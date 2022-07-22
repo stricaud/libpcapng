@@ -14,6 +14,8 @@ endif()
 
 # add_definitions(-DDEBUG=1)
 include(GNUInstallDirs)
+enable_testing()
+
 include(FindPkgConfig)
 
 file(STRINGS VERSION VERSION)
