@@ -9,6 +9,7 @@ Let's write a TCP SYN using libdumbnet and push the buffer into a pcapng file:
 ```c
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <dumbnet.h>
 #include <libpcapng/libpcapng.h>
@@ -36,6 +37,7 @@ int main(int argc, char **argv)
 
 	buffer_size = libpcapng_section_header_block_size();
 	buffer = (unsigned char *)malloc(buffer_size);
+	memset(buffer, '\0', buffer_size);
 	libpcapng_section_header_block_write(buffer);
 	fwrite(buffer, buffer_size, 1, pcapout);
 	free(buffer);
@@ -63,6 +65,8 @@ int main(int argc, char **argv)
 
 	fflush(pcapout);
 	fclose(pcapout);
+
+	free(pkt);
 
 	return 0;
 }
