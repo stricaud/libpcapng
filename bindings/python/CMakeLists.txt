@@ -7,3 +7,5 @@ set(PYCAPNG_SRC
 
 pybind11_add_module(pycapng ${PYCAPNG_SRC})
 target_link_libraries(pycapng PRIVATE ${LIBPCAPNG_LIBRARY})
+
+install(TARGETS pycapng LIBRARY DESTINATION ${Python_STDLIB} COMPONENT python)

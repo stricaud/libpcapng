@@ -13,6 +13,7 @@ Remove the CMakeCache.txt file and try again from another folder, e.g.:
 endif()
 
 # add_definitions(-DDEBUG=1)
+include(GNUInstallDirs)
 include(FindPkgConfig)
 
 file(STRINGS VERSION VERSION)
@@ -30,6 +31,7 @@ install(FILES "${libpcapng_BINARY_DIR}/libpcapng.pc" DESTINATION "${CMAKE_INSTAL
 include_directories(AFTER ${libpcapng_SOURCE_DIR}/lib/include)
 
 find_package(Python COMPONENTS Interpreter Development)
+message("Python installation: ${Python_STDLIB}")
 find_package(pybind11)
 # find_path(WANDIO_INCLUDE_DIR NAMES wandio.h)
 # find_library(WANDIO_LIBRARY NAMES wandio REQUIRED)
@@ -40,7 +42,7 @@ find_package(pybind11)
 # endif()
 
 set(LIBPCAPNG_INCLUDE_DIRS "${libpcapng_SOURCE_DIR}/lib/include/")
-set(LIBPCAPNG_LIBRARY "${libpcapng_BINARY_DIR}/lib/liblibpcapng.so")
+set(LIBPCAPNG_LIBRARY "${libpcapng_BINARY_DIR}/lib/libpcapng.so")
 
 add_definitions(-g)
 
