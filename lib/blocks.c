@@ -108,7 +108,7 @@ size_t libpcapng_enhanced_packet_block_write(const unsigned char *packet, const 
 	uint64_t ms_tv = 0;
 	uint32_t timestamp_high;
 	uint32_t timestamp_low;
-	
+
 	gettimeofday(&tv, NULL);
 	ms_tv = (uint64_t) (tv.tv_sec) * (uint64_t) 1e6 + (uint64_t) (tv.tv_usec);
 
@@ -160,8 +160,8 @@ size_t libpcapng_custom_data_block_write(const uint32_t pen, const unsigned char
 	  printf("%02X", data[i]);
 	}
 	printf("\n");
-#endif // DEBUG	
-	
+#endif // DEBUG
+
 	return block_total_length;
 }
 

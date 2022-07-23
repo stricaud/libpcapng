@@ -13,8 +13,6 @@ Let's write a TCP SYN using libdumbnet and push the buffer into a pcapng file:
 
 #include <dumbnet.h>
 #include <libpcapng/libpcapng.h>
-#include <libpcapng/blocks.h>
-#include <libpcapng/io.h>
 
 int main(int argc, char **argv)
 {
@@ -23,32 +21,15 @@ int main(int argc, char **argv)
 	char *pkt;
 	size_t pktsize = 40;
 
-	unsigned char *buffer;
-	size_t buffer_size;
-
 	pkt = (char *)malloc(pktsize);
 	if (!pkt) {
 	   fprintf(stderr, "Cannot allocate pkt!\n");
 	   return -1;
 	}
 
-	/* We start by writing the pcapng header */
 	pcapout = fopen("pkts.pcap", "wb");
 
-	buffer_size = libpcapng_section_header_block_size();
-	buffer = (unsigned char *)malloc(buffer_size);
-	memset(buffer, '\0', buffer_size);
-	libpcapng_section_header_block_write(buffer);
-	fwrite(buffer, buffer_size, 1, pcapout);
-	free(buffer);
-
-	buffer_size = libpcapng_interface_description_block_size();
-	buffer = (unsigned char *)malloc(buffer_size);
-	libpcapng_interface_description_block_write(0, buffer);
-	fwrite(buffer, buffer_size, 1, pcapout);
-	free(buffer);
-
-	/* ^ Done with headers, now we write the SYN packet */
+	libpcapng_write_header_to_file(pcapout);
 
 	uint32_t saddr = 0x0100a8c0;
 	uint32_t daddr = 0x561c1268;
@@ -57,11 +38,7 @@ int main(int argc, char **argv)
 	tcp_pack_hdr(pkt + 20, 4096, 80, 1, 0, TH_SYN, 14, 0);
 	ip_checksum(pkt, pktsize);
 
-	buffer_size = libpcapng_enhanced_packet_block_size(pktsize);
-	buffer = malloc(buffer_size);
-	libpcapng_enhanced_packet_block_write(pkt, pktsize, buffer);
-	fwrite(buffer, buffer_size, 1, pcapout);
-	free(buffer);
+	libpcapng_write_enhanced_packet_to_file(pcapout, pkt, pktsize);
 
 	fflush(pcapout);
 	fclose(pcapout);

@@ -22,6 +22,11 @@ extern "C" {
 
 #define PCAPNG_BYTE_ORDER_MAGIC 0x1A2B3C4D
 
+#include "blocks.h"
+#include "easyapi.h"
+#include "io.h"
+#include "linktypes.h"
+
 #ifdef __cplusplus
 }
 #endif

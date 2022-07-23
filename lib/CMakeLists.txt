@@ -4,6 +4,7 @@ message("include dirs: ${LIBPCAPNG_INCLUDE_DIRS}")
 
 set(LIBPCAPNG_HEADERS
   include/libpcapng/blocks.h
+  include/libpcapng/easyapi.h
   include/libpcapng/io.h
   include/libpcapng/libpcapng.h
   include/libpcapng/linktypes.h
@@ -11,6 +12,7 @@ set(LIBPCAPNG_HEADERS
 
 set(LIBPCAPNG_SOURCES
   blocks.c
+  easyapi.c
   io.c
   )
 
