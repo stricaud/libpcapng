@@ -44,3 +44,22 @@ int libpcapng_write_enhanced_packet_to_file(FILE *outfile, unsigned char *packet
 	fwrite(buffer, buffer_size, 1, outfile);
 	free(buffer);
 }
+
+int libpcapng_write_enhanced_packet_with_time_to_file(FILE *outfile, unsigned char *packet, size_t packet_size, uint32_t timestamp)
+{
+  unsigned char *buffer;
+  size_t buffer_size;
+
+  uint64_t timestamp_in_micros = timestamp * (uint64_t) 1000000;
+  uint64_t timestamp_high_shift = timestamp_in_micros >> 32;
+  uint32_t timestamp_high = (uint32_t) timestamp_high_shift;
+  uint32_t timestamp_low = timestamp_in_micros & 0xFFFFFFFF;
+
+  buffer_size = libpcapng_enhanced_packet_block_size(packet_size);
+  buffer = (unsigned char *)malloc(buffer_size);
+  libpcapng_enhanced_packet_block_write_time(packet, packet_size, timestamp_high, timestamp_low, buffer);
+  fwrite(buffer, buffer_size, 1, outfile);
+  free(buffer);
+
+  return 0;
+}
