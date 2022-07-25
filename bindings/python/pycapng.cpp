@@ -1,8 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <libpcapng/blocks.h>
-#include <libpcapng/io.h>
+#include <libpcapng/libpcapng.h>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
@@ -33,22 +32,22 @@ int PcapNG::OpenFile(const char *pathname, const char *mode)
       fprintf(stderr, "Could not open file '%s' for writing!\n", pathname);
       return -1;
     }
-    
-    buffer_size = libpcapng_section_header_block_size();
-    buffer = (unsigned char *)malloc(buffer_size);
-    libpcapng_section_header_block_write(buffer);
-    fwrite(buffer, buffer_size, 1, _fp);
-    free(buffer);
 
-    buffer_size = libpcapng_interface_description_block_size();
-    buffer = (unsigned char *)malloc(buffer_size);
-    libpcapng_interface_description_block_write(0, buffer);
-    fwrite(buffer, buffer_size, 1, _fp);
-    free(buffer);
+    libpcapng_write_header_to_file(_fp);
   
     return 0;
   }
 
+  if (!strcmp(mode, "a")) {
+    _fp = fopen(pathname, "a");
+    if (!_fp) {
+      fprintf(stderr, "Could not open file '%s' for appending!\n", pathname);
+      return -1;
+    }
+
+    return 0;
+  }
+  
   if (!strcmp(mode, "r")) {
     _fp = fopen(pathname, "rb");
     if (!_fp) {
@@ -71,39 +70,22 @@ int PcapNG::CloseFile(void)
 
 int PcapNG::WritePacket(py::bytes data, const std::string &comment)  
 {
-  unsigned char *buffer;
-  size_t buffer_size;
-
   py::buffer_info info(py::buffer(data).request());
   uint8_t *data_bytes = reinterpret_cast<uint8_t *>(info.ptr);
   size_t data_len = static_cast<size_t>(info.size);
-  
-  buffer_size = libpcapng_enhanced_packet_block_size(data_len);
-  buffer = (unsigned char *)malloc(buffer_size);
-  libpcapng_enhanced_packet_block_write(data_bytes, data_len, buffer);
-  fwrite(buffer, buffer_size, 1, _fp);
+
+  libpcapng_write_enhanced_packet_to_file(_fp, data_bytes, data_len);
 
   return 0;
 }
 
 int PcapNG::WritePacketTime(py::bytes data, uint32_t timestamp)
 {
-  unsigned char *buffer;
-  size_t buffer_size;
-
   py::buffer_info info(py::buffer(data).request());
   uint8_t *data_bytes = reinterpret_cast<uint8_t *>(info.ptr);
   size_t data_len = static_cast<size_t>(info.size);
 
-  uint64_t timestamp_in_micros = timestamp * (uint64_t) 1000000;
-  uint64_t timestamp_high_shift = timestamp_in_micros >> 32;
-  uint32_t timestamp_high = (uint32_t) timestamp_high_shift;
-  uint32_t timestamp_low = timestamp_in_micros & 0xFFFFFFFF;    
-
-  buffer_size = libpcapng_enhanced_packet_block_size(data_len);
-  buffer = (unsigned char *)malloc(buffer_size);
-  libpcapng_enhanced_packet_block_write_time(data_bytes, data_len, timestamp_high, timestamp_low, buffer);
-  fwrite(buffer, buffer_size, 1, _fp);
+  libpcapng_write_enhanced_packet_with_time_to_file(_fp, data_bytes, data_len, timestamp);
 
   return 0;
 }
