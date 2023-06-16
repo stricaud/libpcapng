@@ -49,5 +49,6 @@ set(LIBPCAPNG_LIBRARY "${libpcapng_BINARY_DIR}/lib/libpcapng.so")
 add_definitions(-g)
 
 add_subdirectory(lib)
+#add_subdirectory(bin)
 add_subdirectory(bindings)
 

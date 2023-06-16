@@ -57,7 +57,7 @@ int libpcapng_fp_read(FILE *fp, foreach_pcapng_block_cb pcapng_block_cb, void *u
 	  fprintf(stderr, "No Block Callback set!\n");
 	  return -1;
 	}
-	
+
 	read_length = fread(&block_info, 1, PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH, fp);
 	if (read_length != PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH) {
 		fprintf(stderr, "Could not read expected data: got %u expected %u. Stopping.\n", read_length, PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH);
@@ -100,7 +100,7 @@ int libpcapng_file_read(char *filename, foreach_pcapng_block_cb pcapng_block_cb,
 	libpcapng_fp_read(fp, pcapng_block_cb, userdata);
 
 	fclose(fp);
-	
+
 	return 0;
 }
 
@@ -111,12 +111,18 @@ int libpcapng_file_read_debug(char *filename)
 
 int libpcapng_padded_count(unsigned char *data, uint32_t data_len)
 {
-  uint32_t i;
-  int retpad = 0;
-  
-  for (i = 0; i < 4; i++) {
-    if (data[data_len-i] == 0) { retpad++; };    
-  }
+	uint32_t i;
+	int retpad = 0;
 
-  return retpad;
+	/* printf("vvvvvvvvvvvv\n"); */
+	/* for (i = 0; i < data_len; i++) { */
+	/* 	printf("%x", data[i]); */
+	/* } */
+	/* printf("\n"); */
+
+	for (i = 1; i <= 4; i++) {
+		if (data[data_len-i] == 0) { retpad++; };
+	}
+
+	return retpad;
 }
