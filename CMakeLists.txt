@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.4)
+cmake_minimum_required (VERSION 3.20)
 project (libpcapng)
 
 if(${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
@@ -33,18 +33,33 @@ install(FILES "${libpcapng_BINARY_DIR}/libpcapng.pc" DESTINATION "${CMAKE_INSTAL
 
 include_directories(AFTER ${libpcapng_SOURCE_DIR}/lib/include)
 
-find_package(Python COMPONENTS Interpreter Development)
-message("Python installation: ${Python_STDLIB}")
-find_package(pybind11)
-find_path(WANDIO_INCLUDE_DIR NAMES wandio.h)
-find_library(WANDIO_LIBRARY NAMES wandio REQUIRED)
-find_package_handle_standard_args(wandio "Could not find wandio library header and/or library ${DEFAULT_MSG}" WANDIO_INCLUDE_DIR WANDIO_LIBRARY)
-if(WANDIO_FOUND)
-  message("-- Found wandio: ${WANDIO_INCLUDE_DIR}" )
-endif()
+# <pybind11>
+execute_process (
+   COMMAND pybind11-config --cmakedir
+   OUTPUT_VARIABLE PYBIND11_CMAKEDIR
+   OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+set(pybind11_ROOT "${PYBIND11_CMAKEDIR}")
+set(PYBIND11_FINDPYTHON "on")
+find_package(pybind11 CONFIG REQUIRED)
+message("Using Python libraries: ${Python_LIBRARIES}")
+# </pybind11>
+
+# find_path(WANDIO_INCLUDE_DIR NAMES wandio.h)
+# find_library(WANDIO_LIBRARY NAMES wandio REQUIRED)
+# find_package_handle_standard_args(wandio "Could not find wandio library header and/or library ${DEFAULT_MSG}" WANDIO_INCLUDE_DIR WANDIO_LIBRARY)
+# if(WANDIO_FOUND)
+#   message("-- Found wandio: ${WANDIO_INCLUDE_DIR}" )
+# endif()
 
 set(LIBPCAPNG_INCLUDE_DIRS "${libpcapng_SOURCE_DIR}/lib/include/")
-set(LIBPCAPNG_LIBRARY "${libpcapng_BINARY_DIR}/lib/libpcapng.so")
+if (LINUX)
+  set(LIBPCAPNG_LIBRARY "${libpcapng_BINARY_DIR}/lib/libpcapng.so")
+endif()
+if (APPLE)
+  set(CMAKE_MACOSX_RPATH ON)
+  set(LIBPCAPNG_LIBRARY "${libpcapng_BINARY_DIR}/lib/libpcapng.dylib")
+endif()
 
 add_definitions(-g)
 
