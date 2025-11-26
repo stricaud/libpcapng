@@ -32,6 +32,28 @@ int libpcapng_write_header_to_file(FILE *outfile)
 	return 0;
 }
 
+int libpcapng_write_header_to_file_with_linktype(FILE *outfile, uint16_t linktype)
+{
+	unsigned char *buffer;
+	size_t buffer_size;
+
+	buffer_size = libpcapng_section_header_block_size();
+	buffer = (unsigned char *)malloc(buffer_size);
+	memset(buffer, '\0', buffer_size);
+	libpcapng_section_header_block_write(buffer);
+	fwrite(buffer, buffer_size, 1, outfile);
+	free(buffer);
+
+	buffer_size = libpcapng_interface_description_block_size();
+	buffer = (unsigned char *)malloc(buffer_size);
+	memset(buffer, '\0', buffer_size);
+	libpcapng_interface_description_block_write_with_linktype(0, buffer, linktype);
+	fwrite(buffer, buffer_size, 1, outfile);
+	free(buffer);
+
+	return 0;
+}
+
 int libpcapng_write_enhanced_packet_to_file(FILE *outfile, unsigned char *packet, size_t packet_size)
 {
 	unsigned char *buffer;

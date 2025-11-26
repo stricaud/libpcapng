@@ -120,6 +120,7 @@ size_t libpcapng_section_header_block_write(unsigned char *outbuf);
 size_t libpcapng_section_header_block_size(void);
 pcapng_section_header_block_light_t *libpcapng_section_header_block_read(unsigned char *inbuf, size_t inbuf_len);
 size_t libpcapng_interface_description_block_write(uint32_t snaplen, unsigned char *outbuf);
+size_t libpcapng_interface_description_block_write_with_linktype(uint32_t snaplen, unsigned char *outbuf, uint16_t linktype);
 size_t libpcapng_interface_description_block_size(void);
 pcapng_interface_description_block_light_t *libpcapng_interface_description_block_read(unsigned char *inbuf, size_t inbuf_len);
 size_t libpcapng_enhanced_packet_block_write_time(const unsigned char *packet, const size_t packet_len, uint32_t timestamp_high, uint32_t timestamp_low, unsigned char *outbuf);

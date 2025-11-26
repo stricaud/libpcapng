@@ -70,6 +70,27 @@ size_t libpcapng_interface_description_block_write(uint32_t snaplen, unsigned ch
 	return block_total_length;
 }
 
+size_t libpcapng_interface_description_block_write_with_linktype(uint32_t snaplen, unsigned char *outbuf, uint16_t linktype)
+{
+	size_t block_total_length;
+	uint32_t *final_length;
+	pcapng_interface_description_block_t *idb;
+
+	block_total_length = libpcapng_interface_description_block_size();
+
+	idb = (pcapng_interface_description_block_t *)outbuf;
+	idb->block_type = PCAPNG_INTERFACE_DESCRIPTION_BLOCK;
+	idb->block_total_length = block_total_length;
+	idb->linktype = linktype;
+	idb->reserved = 0;
+	idb->snaplen = snaplen;
+
+	final_length = (uint32_t *)(outbuf + block_total_length - BLOCK_TOTAL_LENGTH_SIZE);
+	*final_length = block_total_length;
+
+	return block_total_length;
+}
+
 size_t libpcapng_interface_description_block_size(void)
 {
 	return sizeof(pcapng_interface_description_block_t) + BLOCK_TOTAL_LENGTH_SIZE;
