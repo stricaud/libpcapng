@@ -27,6 +27,10 @@ extern "C" {
 #include "io.h"
 #include "linktypes.h"
 
+#include "protocols/ethernet.h"
+#include "protocols/ipv4.h"
+#include "protocols/tcp.h"
+  
 #ifdef __cplusplus
 }
 #endif

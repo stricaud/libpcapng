@@ -13,6 +13,8 @@ struct libpcapng_eth_hdr {
     uint16_t ethertype;
 } __attribute__((packed));
 
+int libpcapng_mac_str_to_bytes(const char *mac_str, uint8_t mac[6]);
+  
 #ifdef __cplusplus
 }
 #endif

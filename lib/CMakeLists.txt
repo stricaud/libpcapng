@@ -17,6 +17,7 @@ set(LIBPCAPNG_SOURCES
   blocks.c
   easyapi.c
   io.c
+  protocols/ethernet.c
   protocols/ipv4.c
   protocols/tcp.c
  )
