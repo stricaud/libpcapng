@@ -37,68 +37,166 @@ void libpcapng_fill_dns_header(struct libpcapng_dns_hdr *dns,
 }
 
 // Encode "www.example.com" → [3]www[7]example[3]com[0]
-size_t libpcapng_dns_encode_qname(const char *name, uint8_t *out)
+size_t libpcapng_dns_encode_qname(const char *name, uint8_t *out, size_t max_len)
 {
-    size_t len = 0;
+    if (!name || !out || max_len == 0) return 0;
+    
+    size_t offset = 0;
     const char *start = name;
     const char *dot;
 
     while ((dot = strchr(start, '.'))) {
-        int label_len = dot - start;
-        out[len++] = label_len;
-        memcpy(out + len, start, label_len);
-        len += label_len;
+        uint8_t len = dot - start;
+        
+        // Check if we have space for: length byte + label + at least null terminator
+        if (offset + 1 + len + 1 > max_len) return 0;
+        
+        out[offset++] = len;
+        memcpy(out + offset, start, len);
+        offset += len;
         start = dot + 1;
     }
 
-    // last label
-    int label_len = strlen(start);
-    out[len++] = label_len;
-    memcpy(out + len, start, label_len);
-    len += label_len;
+    uint8_t len = strlen(start);
+    
+    // Check if we have space for: length byte + final label + null terminator
+    if (offset + 1 + len + 1 > max_len) return 0;
+    
+    out[offset++] = len;
+    memcpy(out + offset, start, len);
+    offset += len;
 
-    out[len++] = 0;  // end of qname
-    return len;
+    out[offset++] = 0;
+
+    return offset;
 }
 
 size_t libpcapng_dns_build_question(uint8_t *buf,
+                                    size_t max_len,
                                     const char *qname,
                                     uint16_t qtype,
                                     uint16_t qclass)
 {
+    if (!buf || !qname || max_len == 0) return 0;
+    
     size_t offset = 0;
-    offset += libpcapng_dns_encode_qname(qname, buf + offset);
+    
+    // Encode the qname
+    size_t qname_len = libpcapng_dns_encode_qname(qname, buf + offset, max_len - offset);
+    if (qname_len == 0) return 0;  // encoding failed (buffer too small)
+    
+    offset += qname_len;
+    
+    // Check if we have space for qtype (2 bytes) + qclass (2 bytes)
+    if (offset + 4 > max_len) return 0;
+    
+    uint16_t t = htons(qtype);
+    uint16_t c = htons(qclass);
 
-    uint16_t *u16 = (uint16_t *)(buf + offset);
-    u16[0] = htons(qtype);
-    u16[1] = htons(qclass);
-    return offset + 4;
+    memcpy(buf + offset, &t, 2); offset += 2;
+    memcpy(buf + offset, &c, 2); offset += 2;
+    
+    return offset;
+}
+
+size_t libpcapng_dns_build_query(uint8_t *buf,
+                                 size_t max_len,
+                                 uint16_t id,
+                                 int rd,
+                                 const char *qname,
+                                 uint16_t qtype,
+                                 uint16_t qclass)
+{
+    if (!buf || !qname || max_len < sizeof(struct libpcapng_dns_hdr)) return 0;
+    
+    struct libpcapng_dns_hdr dns;
+    libpcapng_fill_dns_header(&dns,
+                              id,
+                              0,0,0,0, rd,0,0, // QR=0(query), RD=rd
+                              1,0,0,0);         // 1 question
+
+    // Header is already in network byte order from libpcapng_fill_dns_header
+    memcpy(buf, &dns, sizeof(dns));
+
+    size_t qlen = libpcapng_dns_build_question(buf + sizeof(dns), 
+                                               max_len - sizeof(dns),
+                                               qname, qtype, qclass);
+    if (qlen == 0) return 0;  // question build failed
+    
+    return sizeof(dns) + qlen;
 }
 
 size_t libpcapng_dns_build_answer_a(uint8_t *buf,
-                                    const char *name,
+                                    size_t max_len,
+                                    uint16_t qname_offset,
                                     uint32_t ipv4_be,
-                                    uint32_t ttl)  // seconds
+                                    uint32_t ttl)
 {
+    if (!buf || max_len < 16) return 0;  // minimum size for an A record answer
+    
     size_t offset = 0;
 
-    offset += libpcapng_dns_encode_qname(name, buf + offset);
+    // NAME pointer: C0 XX (2 bytes)
+    if (offset + 2 > max_len) return 0;
+    buf[offset++] = 0xC0;
+    buf[offset++] = qname_offset;
 
-    uint16_t *u16 = (uint16_t *)(buf + offset);
-    u16[0] = htons(1);       // TYPE=A
-    u16[1] = htons(1);       // CLASS=IN
-    offset += 4;
+    // Check space for: type(2) + class(2) + ttl(4) + rdlen(2) + rdata(4) = 14 bytes
+    if (offset + 14 > max_len) return 0;
+    
+    uint16_t type  = htons(1); // A
+    uint16_t class = htons(1); // IN
+    uint32_t ttl_be = htonl(ttl);
+    uint16_t rdlen = htons(4);
+ 
+    memcpy(buf + offset, &type, 2); offset += 2;
+    memcpy(buf + offset, &class, 2); offset += 2;
+    memcpy(buf + offset, &ttl_be, 4); offset += 4;
+    memcpy(buf + offset, &rdlen, 2); offset += 2;
+    
+    memcpy(buf + offset, &ipv4_be, 4); offset += 4;
 
-    uint32_t *u32 = (uint32_t *)(buf + offset);
-    *u32 = htonl(ttl);
-    offset += 4;
+    return offset;
+}
 
-    u16 = (uint16_t *)(buf + offset);
-    u16[0] = htons(4);       // RDLENGTH=4
-    offset += 2;
+size_t libpcapng_dns_build_response(uint8_t *buf,
+                                    size_t max_len,
+                                    uint16_t id,
+                                    const char *qname,
+                                    uint16_t qtype,
+                                    uint16_t qclass,
+                                    uint32_t ip_be,
+                                    uint32_t ttl)
+{
+    if (!buf || !qname || max_len < sizeof(struct libpcapng_dns_hdr)) return 0;
+    
+    struct libpcapng_dns_hdr dns;
+    libpcapng_fill_dns_header(&dns,
+                              id,
+                              1,0,1,0,1,1,0, // QR=1(response), AA=1, RD=1, RA=1
+                              1,1,0,0);       // 1 question, 1 answer
 
-    memcpy(buf + offset, &ipv4_be, 4);
-    offset += 4;
+    // Header is already in network byte order from libpcapng_fill_dns_header
+    memcpy(buf, &dns, sizeof(dns));
+
+    size_t offset = sizeof(dns);
+    size_t remaining = max_len - offset;
+    
+    // Build question
+    size_t qlen = libpcapng_dns_build_question(buf + offset, remaining,
+                                               qname, qtype, qclass);
+    if (qlen == 0) return 0;
+    
+    offset += qlen;
+    remaining -= qlen;
+
+    // Answer uses name pointer to question start
+    uint16_t qname_offset = sizeof(dns);
+    size_t alen = libpcapng_dns_build_answer_a(buf + offset, remaining,
+                                               qname_offset, ip_be, ttl);
+    if (alen == 0) return 0;
+    
+    offset += alen;
 
     return offset;
 }
@@ -117,20 +215,18 @@ void libpcapng_dns_packet_build(const uint8_t src_mac[6],
 {
     if (!dns_hdr || !frame_out || !frame_len) return;
 
-    // total length of payload
     size_t payload_len = sizeof(*dns_hdr) + dns_body_len;
 
-    // allocate dynamically
     uint8_t *udp_payload = malloc(payload_len);
-    if (!udp_payload) return;  // allocation failed
+    if (!udp_payload) {
+      return;
+    }
 
-    // copy header and body
     memcpy(udp_payload, dns_hdr, sizeof(*dns_hdr));
     if (dns_body && dns_body_len > 0) {
         memcpy(udp_payload + sizeof(*dns_hdr), dns_body, dns_body_len);
     }
 
-    // build UDP packet
     libpcapng_udp_packet_build(src_mac, dst_mac,
                                src_ip, dst_ip,
                                src_port, dst_port,
