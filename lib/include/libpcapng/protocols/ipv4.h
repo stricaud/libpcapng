@@ -30,6 +30,7 @@ struct libpcapng_ipv4_hdr {
 
 uint16_t libpcapng_ip_checksum(void *vdata, size_t length);
 uint32_t libpcapng_ipv4_to_host_order(const char *ipstr);
+uint32_t libpcapng_ipv4_to_network_order(const char *ipstr);
 void libpcapng_fill_ipv4_header(struct libpcapng_ipv4_hdr *ip, uint32_t saddr, uint32_t daddr, uint16_t total_len, uint8_t protocol);
   
 #ifdef __cplusplus

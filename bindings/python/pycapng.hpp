@@ -43,6 +43,16 @@ public:
 			  const std::string &domain,
 			  const std::string &qtype,
 			  const std::string &qclass);
+  py::bytes BuildDNSResponse(const std::string &src_mac,
+			     const std::string &dst_mac,
+			     const std::string &src_ip,
+			     const std::string &dst_ip,
+			     uint32_t src_port,
+			     uint32_t dst_port,
+			     uint16_t transaction_id,
+			     const std::string &domain,
+			     const std::string &qtype,
+			     const std::string &response_ip);
   int WritePacketTime(py::bytes data, uint32_t timestamp);
   int WriteCustom(uint32_t pen, py::bytes data, const std::string &comment);
   int ForeachPacket(const py::object &func);

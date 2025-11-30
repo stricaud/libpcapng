@@ -38,6 +38,16 @@ uint32_t libpcapng_ipv4_to_host_order(const char *ipstr) {
     return ntohl(addr.s_addr);
 }
 
+uint32_t libpcapng_ipv4_to_network_order(const char *ipstr) {
+    struct in_addr addr;
+
+    if (inet_pton(AF_INET, ipstr, &addr) != 1) {
+        return 0;  // invalid IP
+    }
+
+    return addr.s_addr;
+}
+
 // build IPv4 header (fill fields and compute checksum)
 void libpcapng_fill_ipv4_header(struct libpcapng_ipv4_hdr *ip, uint32_t saddr, uint32_t daddr, uint16_t total_len, uint8_t protocol) {
     memset(ip, 0, sizeof(*ip));
