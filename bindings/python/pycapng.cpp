@@ -200,6 +200,43 @@ py::bytes PcapNG::BuildTcpPacket(const std::string &src_mac,
     return py::bytes(reinterpret_cast<char *>(frame), frame_len);
 }
 
+py::bytes PcapNG::BuildUdpPacket(const std::string &src_mac,
+                                 const std::string &dst_mac,
+                                 const std::string &src_ip,
+                                 const std::string &dst_ip,
+                                 uint32_t src_port,
+                                 uint32_t dst_port,
+                                 py::bytes data)
+{
+    py::buffer_info info(py::buffer(data).request());
+    uint8_t *data_bytes = reinterpret_cast<uint8_t *>(info.ptr);
+    size_t data_len = static_cast<size_t>(info.size);
+
+    uint8_t frame[65536];
+    size_t frame_len = 0;
+
+    uint8_t client_mac[6];
+    if (libpcapng_mac_str_to_bytes(src_mac.c_str(), client_mac))
+        throw std::runtime_error("Invalid src_mac: " + src_mac);
+
+    uint8_t server_mac[6];
+    if (libpcapng_mac_str_to_bytes(dst_mac.c_str(), server_mac))
+        throw std::runtime_error("Invalid dst_mac: " + dst_mac);
+
+    uint32_t client_ip = libpcapng_ipv4_to_host_order(src_ip.c_str());
+    uint32_t server_ip = libpcapng_ipv4_to_host_order(dst_ip.c_str());
+
+     libpcapng_udp_packet_build(
+        client_mac, server_mac,
+        client_ip, server_ip,
+        src_port, dst_port,
+        (data_len > 0 ? data_bytes : nullptr),
+        data_len,
+        frame, &frame_len);
+
+    return py::bytes(reinterpret_cast<char *>(frame), frame_len);
+}
+
 int PcapNG::WritePacketTime(py::bytes data, uint32_t timestamp)
 {
   py::buffer_info info(py::buffer(data).request());
@@ -211,7 +248,7 @@ int PcapNG::WritePacketTime(py::bytes data, uint32_t timestamp)
   return 0;
 }
 
-py::bytes PcapNG::BuildDNSQuery(const std::string &src_mac,
+py::bytes PcapNG::BuildDnsQuery(const std::string &src_mac,
                                 const std::string &dst_mac,
                                 const std::string &src_ip,
                                 const std::string &dst_ip,
@@ -538,7 +575,8 @@ PYBIND11_MODULE(pycapng, m) {
       .def("WritePacket", &PcapNG::WritePacket)
       .def("WriteTcpPacket", &PcapNG::WriteTcpPacket)
       .def("BuildTcpPacket", &PcapNG::BuildTcpPacket)
-      .def("BuildDNSQuery", &PcapNG::BuildDNSQuery)
+      .def("BuildUdpPacket", &PcapNG::BuildUdpPacket)
+      .def("BuildDnsQuery", &PcapNG::BuildDnsQuery)
       .def("BuildDNSResponse", &PcapNG::BuildDNSResponse)
       .def("WritePacketTime", &PcapNG::WritePacketTime)
       .def("ForeachPacket", &PcapNG::ForeachPacket);

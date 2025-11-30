@@ -33,7 +33,14 @@ public:
 			   uint32_t ack,
 			   uint8_t flags,
 			   py::bytes data);
-  py::bytes BuildDNSQuery(const std::string &src_mac,
+  py::bytes BuildUdpPacket(const std::string &src_mac,
+			   const std::string &dst_mac,
+			   const std::string &src_ip,
+			   const std::string &dst_ip,
+			   uint32_t src_port,
+			   uint32_t dst_port,
+			   py::bytes data);
+  py::bytes BuildDnsQuery(const std::string &src_mac,
 			  const std::string &dst_mac,
 			  const std::string &src_ip,
 			  const std::string &dst_ip,
