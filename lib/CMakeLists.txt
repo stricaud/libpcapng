@@ -13,6 +13,7 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/protocols/tcp.h
   include/libpcapng/protocols/udp.h
   include/libpcapng/protocols/dns.h
+  include/libpcapng/protocols/icmp.h
 )
 
 set(LIBPCAPNG_SOURCES
@@ -24,6 +25,7 @@ set(LIBPCAPNG_SOURCES
   protocols/tcp.c
   protocols/udp.c
   protocols/dns.c
+  protocols/icmp.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})

@@ -32,6 +32,7 @@ extern "C" {
 #include "protocols/tcp.h"
 #include "protocols/udp.h"
 #include "protocols/dns.h"
+#include "protocols/icmp.h"
   
 #ifdef __cplusplus
 }

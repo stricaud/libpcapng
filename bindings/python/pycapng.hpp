@@ -40,6 +40,13 @@ public:
 			   uint32_t src_port,
 			   uint32_t dst_port,
 			   py::bytes data);
+  py::bytes BuildIcmpPacket(const std::string &src_mac,
+			    const std::string &dst_mac,
+			    const std::string &src_ip,
+			    const std::string &dst_ip,
+			    uint8_t icmp_type, uint8_t icmp_code,
+			    uint16_t identifier, uint16_t sequence,
+			    py::bytes data);
   py::bytes BuildDnsQuery(const std::string &src_mac,
 			  const std::string &dst_mac,
 			  const std::string &src_ip,
