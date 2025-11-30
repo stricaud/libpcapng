@@ -30,6 +30,8 @@ extern "C" {
 #include "protocols/ethernet.h"
 #include "protocols/ipv4.h"
 #include "protocols/tcp.h"
+#include "protocols/udp.h"
+#include "protocols/dns.h"
   
 #ifdef __cplusplus
 }
