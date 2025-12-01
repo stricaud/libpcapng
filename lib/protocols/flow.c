@@ -127,10 +127,11 @@ libpcapng_tcp_flow_state_t* libpcapng_get_flow_state(uint32_t client_ip, uint32_
     uint32_t idx = libpcapng_hash_flow(client_ip, server_ip, client_port, server_port);
     uint32_t start_idx = idx;
     uint32_t first_valid_idx = idx;
+    libpcapng_tcp_flow_state_t *flow = NULL;
     
     // Linear probing for collision resolution
     while (flow_valid[idx]) {
-        libpcapng_tcp_flow_state_t *flow = &flow_table[idx];
+        flow = &flow_table[idx];
         if (flow->client_ip == client_ip && 
             flow->server_ip == server_ip &&
             flow->client_port == client_port && 
@@ -146,7 +147,7 @@ libpcapng_tcp_flow_state_t* libpcapng_get_flow_state(uint32_t client_ip, uint32_
     }
     
     // Create new flow (or overwrite if table was full)
-    libpcapng_tcp_flow_state_t *flow = &flow_table[idx];
+    flow = &flow_table[idx];
     flow->client_ip = client_ip;
     flow->server_ip = server_ip;
     flow->client_port = client_port;
