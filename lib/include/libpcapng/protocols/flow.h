@@ -23,7 +23,7 @@ typedef struct {
 /* This hash table only takes 1024 entries in memory and erase the old ones. */
 #define FLOW_TABLE_SIZE 1024
 libpcapng_tcp_flow_state_t flow_table[FLOW_TABLE_SIZE];
-uint8_t flow_valid[FLOW_TABLE_SIZE] = {0};
+extern uint8_t flow_valid[FLOW_TABLE_SIZE];
 
 uint32_t libpcapng_hash_flow(uint32_t client_ip, uint32_t server_ip, 
 			     uint16_t client_port, uint16_t server_port);

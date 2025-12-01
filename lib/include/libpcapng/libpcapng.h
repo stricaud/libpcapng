@@ -33,6 +33,7 @@ extern "C" {
 #include "protocols/udp.h"
 #include "protocols/dns.h"
 #include "protocols/icmp.h"
+#include "protocols/flow.h"
   
 #ifdef __cplusplus
 }

@@ -5,6 +5,8 @@
 
 #include <libpcapng/protocols/flow.h>
 
+uint8_t flow_valid[FLOW_TABLE_SIZE] = {0};
+
 uint32_t libpcapng_hash_flow(uint32_t client_ip, uint32_t server_ip, 
                    uint16_t client_port, uint16_t server_port) {
     uint32_t hash = 2166136261u; // FNV offset basis

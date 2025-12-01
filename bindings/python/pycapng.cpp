@@ -400,8 +400,8 @@ py::bytes PcapNG::BuildDNSResponse(const std::string &src_mac,
     response_len = offset;
 
     libpcapng_dns_packet_build(
-        server_mac, client_mac,
-        server_ip, client_ip,
+        client_mac, server_mac,
+        client_ip, server_ip,
         src_port, dst_port,
         (struct libpcapng_dns_hdr*)dns_response,
         dns_response + sizeof(struct libpcapng_dns_hdr),
