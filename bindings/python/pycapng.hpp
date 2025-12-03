@@ -67,6 +67,22 @@ public:
 			     const std::string &domain,
 			     const std::string &qtype,
 			     const std::string &response_ip);
+  py::bytes BuildDhcpDiscover(const std::string &src_mac,
+			      const std::string &src_ip,
+			      uint32_t src_port,
+			      uint32_t dst_port,
+			      uint16_t xid);
+  py::bytes BuildDhcpOffer(const std::string &src_mac, const std::string &dst_mac,
+			   const std::string &src_ip, const std::string &offered_ip,
+			   uint16_t xid,
+			   uint32_t src_port,
+			   uint32_t dst_port);
+  py::bytes BuildNtpRequest(const std::string &src_mac, const std::string &dst_mac,
+			    const std::string &src_ip, const std::string &dst_ip,
+			    uint32_t src_port, uint32_t dst_port);
+  py::bytes  BuildNtpReply(const std::string &src_mac, const std::string &dst_mac,
+			   const std::string &src_ip, const std::string &dst_ip,
+			   uint32_t src_port, uint32_t dst_port, py::bytes ntp_request);
   int WritePacketTime(py::bytes data, uint32_t timestamp);
   int WriteCustom(uint32_t pen, py::bytes data, const std::string &comment);
   int ForeachPacket(const py::object &func);

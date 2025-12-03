@@ -412,6 +412,141 @@ py::bytes PcapNG::BuildDNSResponse(const std::string &src_mac,
     return py::bytes(reinterpret_cast<char *>(frame), frame_len);
 }
 
+py::bytes PcapNG::BuildDhcpDiscover(const std::string &src_mac,
+			       const std::string &src_ip,
+			       uint32_t src_port,
+			       uint32_t dst_port,
+			       uint16_t xid)
+{
+    uint8_t frame[65536];
+    size_t frame_len = 0;
+
+    uint8_t client_mac[6];
+    if (libpcapng_mac_str_to_bytes(src_mac.c_str(), client_mac))
+        throw std::runtime_error("Invalid src_mac: " + src_mac);
+    uint32_t client_ip = libpcapng_ipv4_to_host_order(src_ip.c_str());
+    
+    libpcapng_build_dhcp_discover(client_mac,
+				  client_ip,
+				  src_port,
+				  dst_port,
+				  xid,
+				  frame,
+				  &frame_len
+				  );
+
+    return py::bytes(reinterpret_cast<char *>(frame), frame_len);
+}
+
+py::bytes PcapNG::BuildDhcpOffer(const std::string &src_mac, const std::string &dst_mac,
+			    const std::string &src_ip, const std::string &offered_ip,
+			    uint16_t xid,
+			    uint32_t src_port,
+			    uint32_t dst_port)
+{
+    uint8_t frame[65536];
+    size_t frame_len = 0;
+
+    uint8_t client_mac[6];
+    if (libpcapng_mac_str_to_bytes(src_mac.c_str(), client_mac))
+        throw std::runtime_error("Invalid src_mac: " + src_mac);
+
+    uint8_t server_mac[6];
+    if (libpcapng_mac_str_to_bytes(dst_mac.c_str(), server_mac))
+        throw std::runtime_error("Invalid dst_mac: " + dst_mac);
+
+    uint32_t server_ip = libpcapng_ipv4_to_host_order(src_ip.c_str());
+    uint32_t offered_ip_i = libpcapng_ipv4_to_host_order(offered_ip.c_str());
+    
+    libpcapng_build_dhcp_offer(
+			       server_mac,
+			       client_mac,
+			       server_ip,
+			       offered_ip_i,
+			       xid,
+			       dst_port,
+			       src_port,  // swap ports: server->client
+			       frame,
+			       &frame_len
+			       );
+
+    return py::bytes(reinterpret_cast<char *>(frame), frame_len);
+
+}
+
+py::bytes PcapNG::BuildNtpRequest(const std::string &src_mac, const std::string &dst_mac,
+			     const std::string &src_ip, const std::string &dst_ip,
+			     uint32_t src_port, uint32_t dst_port)
+{
+    uint8_t frame[65536];
+    size_t frame_len = 0;
+
+    uint8_t client_mac[6];
+    if (libpcapng_mac_str_to_bytes(src_mac.c_str(), client_mac))
+        throw std::runtime_error("Invalid src_mac: " + src_mac);
+
+    uint8_t server_mac[6];
+    if (libpcapng_mac_str_to_bytes(dst_mac.c_str(), server_mac))
+        throw std::runtime_error("Invalid dst_mac: " + dst_mac);
+
+    uint32_t client_ip = libpcapng_ipv4_to_host_order(src_ip.c_str());
+    uint32_t server_ip = libpcapng_ipv4_to_host_order(dst_ip.c_str());
+  
+    libpcapng_build_ntp_request(
+				client_mac,
+				server_mac,
+				client_ip,
+				server_ip,
+				src_port,
+				dst_port,
+				frame,
+				&frame_len
+				);
+
+    return py::bytes(reinterpret_cast<char *>(frame), frame_len);
+
+}
+
+py::bytes PcapNG::BuildNtpReply(const std::string &src_mac, const std::string &dst_mac,
+				const std::string &src_ip, const std::string &dst_ip,
+				uint32_t src_port, uint32_t dst_port, py::bytes ntp_request)
+{
+
+    char *req_data;
+    ssize_t req_len;
+    PYBIND11_BYTES_AS_STRING_AND_SIZE(ntp_request.ptr(), &req_data, &req_len);
+
+    if (req_len < sizeof(libpcapng_eth_hdr) + sizeof(libpcapng_ipv4_hdr) + sizeof(libpcapng_udp_hdr) + sizeof(libpcapng_ntp_hdr))
+        throw std::runtime_error("ntp_request is too short");
+
+    size_t offset = sizeof(libpcapng_eth_hdr) + sizeof(libpcapng_ipv4_hdr) + sizeof(libpcapng_udp_hdr);
+
+    const libpcapng_ntp_hdr *request = reinterpret_cast<const libpcapng_ntp_hdr *>(req_data + offset);
+
+    uint8_t frame[65536];
+    size_t frame_len = 0;
+
+    uint8_t client_mac[6];
+    if (libpcapng_mac_str_to_bytes(src_mac.c_str(), client_mac))
+        throw std::runtime_error("Invalid src_mac: " + src_mac);
+
+    uint8_t server_mac[6];
+    if (libpcapng_mac_str_to_bytes(dst_mac.c_str(), server_mac))
+        throw std::runtime_error("Invalid dst_mac: " + dst_mac);
+
+    uint32_t client_ip = libpcapng_ipv4_to_host_order(src_ip.c_str());
+    uint32_t server_ip = libpcapng_ipv4_to_host_order(dst_ip.c_str());
+
+  
+    libpcapng_build_ntp_reply(client_mac, server_mac,
+			      client_ip, server_ip,
+			      src_port, dst_port,
+			      request,
+			      frame, &frame_len);
+
+    return py::bytes(reinterpret_cast<char *>(frame), frame_len);    
+}
+
 int PcapNG::WriteCustom(uint32_t pen, py::bytes data, const std::string &comment)  
 {
   unsigned char *buffer;
@@ -617,6 +752,10 @@ PYBIND11_MODULE(pycapng, m) {
       .def("BuildIcmpPacket", &PcapNG::BuildIcmpPacket)
       .def("BuildDnsQuery", &PcapNG::BuildDnsQuery)
       .def("BuildDNSResponse", &PcapNG::BuildDNSResponse)
+      .def("BuildDhcpDiscover", &PcapNG::BuildDhcpDiscover)
+      .def("BuildDhcpOffer", &PcapNG::BuildDhcpOffer)
+      .def("BuildNtpRequest", &PcapNG::BuildNtpRequest)
+      .def("BuildNtpReply", &PcapNG::BuildNtpReply)
       .def("WritePacketTime", &PcapNG::WritePacketTime)
       .def("ForeachPacket", &PcapNG::ForeachPacket);
 }

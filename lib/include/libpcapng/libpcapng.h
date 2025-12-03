@@ -34,6 +34,9 @@ extern "C" {
 #include "protocols/dns.h"
 #include "protocols/icmp.h"
 #include "protocols/flow.h"
+#include "protocols/bootp.h"
+#include "protocols/dhcp.h"
+#include "protocols/ntp.h"
   
 #ifdef __cplusplus
 }

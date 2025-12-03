@@ -15,6 +15,9 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/protocols/dns.h
   include/libpcapng/protocols/icmp.h
   include/libpcapng/protocols/flow.h
+  include/libpcapng/protocols/bootp.h
+  include/libpcapng/protocols/dhcp.h
+  include/libpcapng/protocols/ntp.h
 )
 
 set(LIBPCAPNG_SOURCES
@@ -28,6 +31,8 @@ set(LIBPCAPNG_SOURCES
   protocols/dns.c
   protocols/icmp.c
   protocols/flow.c
+  protocols/dhcp.c
+  protocols/ntp.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})
