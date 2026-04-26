@@ -1,6 +1,8 @@
 cmake_minimum_required (VERSION 3.20)
 project (libpcapng)
 
+cmake_policy(SET CMP0148 NEW)
+
 if(${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
 message(FATAL_ERROR "CMake generation is not allowed within the source directory!
 Remove the CMakeCache.txt file and try again from another folder, e.g.:
@@ -33,16 +35,20 @@ install(FILES "${libpcapng_BINARY_DIR}/libpcapng.pc" DESTINATION "${CMAKE_INSTAL
 
 include_directories(AFTER ${libpcapng_SOURCE_DIR}/lib/include)
 
-# <pybind11>
-execute_process (
-   COMMAND pybind11-config --cmakedir
-   OUTPUT_VARIABLE PYBIND11_CMAKEDIR
-   OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-set(pybind11_ROOT "${PYBIND11_CMAKEDIR}")
-set(PYBIND11_FINDPYTHON "on")
+find_package(Python REQUIRED COMPONENTS Interpreter Development)
+set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 CONFIG REQUIRED)
-message("Using Python libraries: ${Python_LIBRARIES}")
+
+# <pybind11>
+# execute_process (
+#    COMMAND pybind11-config --cmakedir
+#    OUTPUT_VARIABLE PYBIND11_CMAKEDIR
+#    OUTPUT_STRIP_TRAILING_WHITESPACE
+# )
+# set(pybind11_ROOT "${PYBIND11_CMAKEDIR}")
+# set(PYBIND11_FINDPYTHON "off")
+# find_package(pybind11 CONFIG REQUIRED)
+# message("Using Python libraries: ${Python_LIBRARIES}")
 # </pybind11>
 
 # find_path(WANDIO_INCLUDE_DIR NAMES wandio.h)

@@ -18,6 +18,12 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/protocols/bootp.h
   include/libpcapng/protocols/dhcp.h
   include/libpcapng/protocols/ntp.h
+  include/libpcapng/protocols/ssl.h
+  include/libpcapng/protocols/http2.h
+  include/libpcapng/protocols/http2_hpack.h
+  include/libpcapng/protocols/http2_stream.h
+  include/libpcapng/protocols/tls_stream.h
+  include/libpcapng/protocols/tcp_mss.h
 )
 
 set(LIBPCAPNG_SOURCES
@@ -33,6 +39,12 @@ set(LIBPCAPNG_SOURCES
   protocols/flow.c
   protocols/dhcp.c
   protocols/ntp.c
+  protocols/ssl.c
+  protocols/http2.c
+  protocols/http2_hpack.c
+  protocols/http2_stream.c
+  protocols/tls_stream.c
+  protocols/tcp_mss.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})

@@ -23,3 +23,7 @@ add_test(Dhcp-Write dhcp-write)
 add_executable(ntp-write ntp-write.c)
 target_link_libraries(ntp-write ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(Ntp-Write ntp-write)
+
+add_executable(ssl-http2-write ssl-http2-write.c)
+target_link_libraries(ssl-http2-write ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Ssl-Http2-Write ssl-http2-write)

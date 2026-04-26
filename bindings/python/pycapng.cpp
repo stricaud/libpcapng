@@ -547,6 +547,109 @@ py::bytes PcapNG::BuildNtpReply(const std::string &src_mac, const std::string &d
     return py::bytes(reinterpret_cast<char *>(frame), frame_len);    
 }
 
+static py::bytes build_tls_packet(const std::string &src_mac,
+                                  const std::string &dst_mac,
+                                  const std::string &src_ip,
+                                  const std::string &dst_ip,
+                                  uint32_t src_port,
+                                  uint32_t dst_port,
+                                  const uint8_t *tls, size_t tls_len)
+{
+    uint8_t smac[6], dmac[6];
+    if (libpcapng_mac_str_to_bytes(src_mac.c_str(), smac))
+        throw std::runtime_error("Invalid src_mac: " + src_mac);
+
+    if (libpcapng_mac_str_to_bytes(dst_mac.c_str(), dmac))
+        throw std::runtime_error("Invalid dst_mac: " + dst_mac);
+
+    uint32_t sip = libpcapng_ipv4_to_host_order(src_ip.c_str());
+    uint32_t dip = libpcapng_ipv4_to_host_order(dst_ip.c_str());
+
+    uint8_t frame[65536];
+    size_t frame_len = 0;
+
+    /* minimal TCP flags: PSH+ACK like your test (0x18) */
+    libpcapng_tcp_packet_build(
+        smac, dmac,
+        sip, dip,
+        src_port, dst_port,
+        0, 0,                // seq/ack (keep simple for now)
+        0x18,
+        tls, tls_len,
+        frame, &frame_len
+    );
+
+    return py::bytes(reinterpret_cast<char *>(frame), frame_len);
+}
+
+py::bytes PcapNG::BuildTlsClientHello(const std::string &src_mac, const std::string &dst_mac,
+				      const std::string &src_ip, const std::string &dst_ip,
+				      uint32_t src_port, uint32_t dst_port)
+{
+    uint8_t buf[8192];
+    size_t len = tls_build_client_hello(buf, sizeof(buf));
+
+    return build_tls_packet(src_mac, dst_mac, src_ip, dst_ip,
+                            src_port, dst_port,
+                            buf, len);  
+}
+
+py::bytes PcapNG::BuildTlsServerHello(const std::string &src_mac, const std::string &dst_mac,
+				      const std::string &src_ip, const std::string &dst_ip,
+				      uint32_t src_port, uint32_t dst_port)
+{
+    uint8_t buf[8192];
+    size_t len = tls_build_server_hello(buf, sizeof(buf));
+
+    return build_tls_packet(src_mac, dst_mac, src_ip, dst_ip,
+                            src_port, dst_port,
+                            buf, len);
+}
+
+py::bytes PcapNG::BuildTlsCertificate(const std::string &cert)
+{
+    uint8_t buf[8192];
+
+    size_t len = tls_build_certificate(buf, sizeof(buf),
+                                       reinterpret_cast<const uint8_t*>(cert.data()),
+                                       cert.size());
+
+    return py::bytes(reinterpret_cast<char *>(buf), len);
+}
+
+py::bytes PcapNG::BuildTlsFinished()
+{
+    uint8_t buf[4096];
+    size_t len = tls_build_finished(buf, sizeof(buf));
+
+    return py::bytes(reinterpret_cast<char *>(buf), len);
+}
+
+py::bytes PcapNG::BuildTlsApplicationData(const std::string &src_mac,
+                                          const std::string &dst_mac,
+                                          const std::string &src_ip,
+                                          const std::string &dst_ip,
+                                          uint32_t src_port,
+                                          uint32_t dst_port,
+                                          py::bytes tls_appdata)
+{
+    char *appdata;
+    ssize_t appdata_len;
+    PYBIND11_BYTES_AS_STRING_AND_SIZE(tls_appdata.ptr(), &appdata, &appdata_len);
+
+    uint8_t buf[8192];
+
+    size_t len = tls_build_application_data(
+        buf, sizeof(buf),
+        reinterpret_cast<const uint8_t*>(appdata),
+        appdata_len
+    );
+
+    return build_tls_packet(src_mac, dst_mac, src_ip, dst_ip,
+                            src_port, dst_port,
+                            buf, len);
+}
+
 int PcapNG::WriteCustom(uint32_t pen, py::bytes data, const std::string &comment)  
 {
   unsigned char *buffer;
@@ -756,6 +859,11 @@ PYBIND11_MODULE(pycapng, m) {
       .def("BuildDhcpOffer", &PcapNG::BuildDhcpOffer)
       .def("BuildNtpRequest", &PcapNG::BuildNtpRequest)
       .def("BuildNtpReply", &PcapNG::BuildNtpReply)
+      .def("BuildTlsClientHello", &PcapNG::BuildTlsClientHello)
+      .def("BuildTlsServerHello", &PcapNG::BuildTlsServerHello)
+      .def("BuildTlsCertificate", &PcapNG::BuildTlsCertificate)
+      .def("BuildTlsFinished", &PcapNG::BuildTlsFinished)
+      .def("BuildTlsApplicationData", &PcapNG::BuildTlsApplicationData)
       .def("WritePacketTime", &PcapNG::WritePacketTime)
       .def("ForeachPacket", &PcapNG::ForeachPacket);
 }

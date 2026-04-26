@@ -37,7 +37,13 @@ extern "C" {
 #include "protocols/bootp.h"
 #include "protocols/dhcp.h"
 #include "protocols/ntp.h"
-  
+#include "protocols/ssl.h"
+#include "protocols/http2.h"
+#include "protocols/http2_hpack.h"
+#include "protocols/http2_stream.h"
+#include "protocols/tls_stream.h"
+#include "protocols/tcp_mss.h"
+
 #ifdef __cplusplus
 }
 #endif
