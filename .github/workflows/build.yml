@@ -2,15 +2,42 @@ name: Build
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
   workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
 
 jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.create.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create tag and release
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(cat VERSION)
+          SHA=$(git rev-parse --short HEAD)
+          TAG="v${VERSION}-${SHA}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          git tag "${TAG}" 2>/dev/null || echo "tag already exists"
+          git push origin "${TAG}" 2>/dev/null || echo "tag already pushed"
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes "Automated build from commit ${GITHUB_SHA}" \
+            2>/dev/null || echo "release already exists"
+
   build:
+    needs: tag
     name: ${{ matrix.os }} / py${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -56,12 +83,12 @@ jobs:
           path: ${{ env.ARTIFACT }}
 
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.ARTIFACT }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.tag.outputs.tag }}" "${{ env.ARTIFACT }}" --repo "${{ github.repository }}" --clobber
 
   build-debian:
+    needs: tag
     name: debian-bookworm-${{ matrix.arch }} / py3.14
     runs-on: ${{ matrix.runner }}
     container: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
@@ -78,7 +105,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
-        run: apt-get update -qq && apt-get install -y --no-install-recommends cmake build-essential
+        run: apt-get update -qq && apt-get install -y --no-install-recommends cmake build-essential gh
 
       - name: Install pybind11
         run: uv pip install --system pybind11
@@ -104,7 +131,6 @@ jobs:
           path: ${{ env.ARTIFACT }}
 
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.ARTIFACT }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.tag.outputs.tag }}" "${{ env.ARTIFACT }}" --repo "${{ github.repository }}" --clobber
