@@ -104,8 +104,15 @@ pcapng.SimulateRdpLogout("02:aa:bb:cc:dd:01", "02:aa:bb:cc:dd:02",
                          "172.16.0.100", "172.16.0.1", 51000, RDP_PORT, use_tls=0)
 
 # ── Low-level: build individual packets without session state ─────────────────
+# Use unique IPs/ports to avoid colliding with the scenario 1 TCP flow above.
+SA_C_MAC  = "02:de:ad:00:00:01"
+SA_S_MAC  = "02:de:ad:00:00:02"
+SA_C_IP   = "10.99.0.1"
+SA_S_IP   = "10.99.0.2"
+SA_C_PORT = 60001
+
 frame = pcapng.BuildRdpConnectionRequest(
-    C_MAC, S_MAC, C_IP, S_IP, C_PORT, RDP_PORT,
+    SA_C_MAC, SA_S_MAC, SA_C_IP, SA_S_IP, SA_C_PORT, RDP_PORT,
     username="standalone",
     domain="EXAMPLE",
     requested_protocol=pycapng.RDP_PROTO_SSL,
@@ -114,7 +121,7 @@ frame = pcapng.BuildRdpConnectionRequest(
 pcapng.WritePacket(frame, "standalone X.224 CR")
 
 frame = pcapng.BuildRdpConnectionConfirm(
-    S_MAC, C_MAC, S_IP, C_IP, RDP_PORT, C_PORT,
+    SA_S_MAC, SA_C_MAC, SA_S_IP, SA_C_IP, RDP_PORT, SA_C_PORT,
     selected_protocol=pycapng.RDP_PROTO_SSL,
 )
 pcapng.WritePacket(frame, "standalone X.224 CC")
