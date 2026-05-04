@@ -70,6 +70,6 @@ endif()
 add_definitions(-g)
 
 add_subdirectory(lib)
-#add_subdirectory(bin)
+add_subdirectory(bin)
 add_subdirectory(bindings)
 

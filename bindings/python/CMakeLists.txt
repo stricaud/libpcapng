@@ -6,7 +6,7 @@ set(PYCAPNG_SRC
 
 add_library(pycapng MODULE ${PYCAPNG_SRC})
 
-target_link_libraries(pycapng PRIVATE pybind11::module PUBLIC ${LIBPCAPNG_LIBRARY})
+target_link_libraries(pycapng PRIVATE pybind11::module pcapng_static)
 
 set_target_properties(pycapng PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}"
   SUFFIX "${PYTHON_MODULE_EXTENSION}"
