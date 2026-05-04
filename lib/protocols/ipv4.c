@@ -69,7 +69,7 @@ char* libpcapng_ipv4_to_string(uint32_t ip_host_order)
 {
     struct in_addr addr;
     addr.s_addr = htonl(ip_host_order);
-    char buf[INET_ADDRSTRLEN];
+    static char buf[INET_ADDRSTRLEN];
     if (!inet_ntop(AF_INET, &addr, buf, sizeof(buf)))
         return "";
     return buf;

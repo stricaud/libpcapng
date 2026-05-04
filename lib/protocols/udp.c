@@ -22,9 +22,12 @@ static uint16_t libpcapng_udp_checksum(const struct libpcapng_ipv4_hdr *ip,
     sum += htons(IPPROTO_UDP);
     sum += udp->len;
 
-    const uint16_t *u16 = (const uint16_t *)udp;
-    for (size_t i = 0; i < sizeof(*udp)/2; i++)
-        sum += ntohs(u16[i]);
+    const uint8_t *u8 = (const uint8_t *)udp;
+    for (size_t i = 0; i < sizeof(*udp); i += 2) {
+        uint16_t word;
+        memcpy(&word, u8 + i, 2);
+        sum += ntohs(word);
+    }
 
     const uint8_t *ptr = payload;
     while (payload_len >= 2) {

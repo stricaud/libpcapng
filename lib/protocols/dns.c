@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <arpa/inet.h>
 
 #include <libpcapng/protocols/udp.h>
 #include <libpcapng/protocols/dns.h>

@@ -60,3 +60,51 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ARTIFACT }}
+
+  build-debian:
+    name: debian-bookworm-${{ matrix.arch }} / py3.14
+    runs-on: ${{ matrix.runner }}
+    container: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest     # x86_64
+            arch: x86_64
+          - runner: ubuntu-24.04-arm  # aarch64
+            arch: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: apt-get update -qq && apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Install pybind11
+        run: uv pip install --system pybind11
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir)
+
+      - name: Build
+        run: cmake --build build --target pycapng --parallel
+
+      - name: Stage artifact
+        run: |
+          SO=$(find build/bindings -name "pycapng*.so" | head -1)
+          cp "$SO" .
+          echo "ARTIFACT=$(basename $SO)" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}-debian-bookworm
+          path: ${{ env.ARTIFACT }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARTIFACT }}
