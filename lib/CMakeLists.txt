@@ -61,7 +61,7 @@ set(CMAKE_BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_INSTALL_RPATH "@rpath")
 
 add_library(pcapng_static STATIC ${LIBPCAPNG_SOURCES})
-set_target_properties(pcapng_static PROPERTIES SOVERSION 1)
+set_target_properties(pcapng_static PROPERTIES SOVERSION 1 POSITION_INDEPENDENT_CODE ON)
 
 install(TARGETS pcapng LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT Libraries)
 install(TARGETS pcapng_static LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT Libraries)
