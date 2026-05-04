@@ -1,7 +1,9 @@
 cmake_minimum_required (VERSION 3.20)
 project (libpcapng)
 
-cmake_policy(SET CMP0148 NEW)
+if(POLICY CMP0148)
+  cmake_policy(SET CMP0148 NEW)
+endif()
 
 if(${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
 message(FATAL_ERROR "CMake generation is not allowed within the source directory!
