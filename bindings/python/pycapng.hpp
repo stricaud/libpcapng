@@ -2,6 +2,9 @@
 #define _PCAPNGPP_H_
 
 #include <stdio.h>
+#include <string.h>
+
+#include <libpcapng/protocols/rdp.h>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
@@ -98,6 +101,54 @@ public:
   int WritePacketTime(py::bytes data, uint32_t timestamp);
   int WriteCustom(uint32_t pen, py::bytes data, const std::string &comment);
   int ForeachPacket(const py::object &func);
+
+  /* ── RDP ── */
+  py::bytes BuildRdpConnectionRequest(const std::string &src_mac,
+                                      const std::string &dst_mac,
+                                      const std::string &src_ip,
+                                      const std::string &dst_ip,
+                                      uint32_t src_port, uint32_t dst_port,
+                                      const std::string &username,
+                                      const std::string &domain,
+                                      uint32_t requested_protocol,
+                                      int use_tls);
+
+  py::bytes BuildRdpConnectionConfirm(const std::string &src_mac,
+                                      const std::string &dst_mac,
+                                      const std::string &src_ip,
+                                      const std::string &dst_ip,
+                                      uint32_t src_port, uint32_t dst_port,
+                                      uint32_t selected_protocol);
+
+  /* Simulate a full RDP session (login → activity → logout) into the open file */
+  void SimulateRdpLogin(const std::string &c_mac, const std::string &s_mac,
+                        const std::string &c_ip,  const std::string &s_ip,
+                        uint32_t c_port, uint32_t s_port,
+                        const std::string &username,
+                        const std::string &domain,
+                        const std::string &password,
+                        uint32_t user_id,
+                        uint32_t desktop_width, uint32_t desktop_height,
+                        int use_tls);
+
+  void SimulateRdpKeyboard(const std::string &c_mac, const std::string &s_mac,
+                           const std::string &c_ip,  const std::string &s_ip,
+                           uint32_t c_port, uint32_t s_port,
+                           uint16_t keycode, int use_tls);
+
+  void SimulateRdpMouse(const std::string &c_mac, const std::string &s_mac,
+                        const std::string &c_ip,  const std::string &s_ip,
+                        uint32_t c_port, uint32_t s_port,
+                        uint16_t x, uint16_t y, int click, int use_tls);
+
+  void SimulateRdpClipboard(const std::string &c_mac, const std::string &s_mac,
+                             const std::string &c_ip,  const std::string &s_ip,
+                             uint32_t c_port, uint32_t s_port,
+                             py::bytes data, int use_tls);
+
+  void SimulateRdpLogout(const std::string &c_mac, const std::string &s_mac,
+                         const std::string &c_ip,  const std::string &s_ip,
+                         uint32_t c_port, uint32_t s_port, int use_tls);
   //
   int get_compression_level(void) { return compression_level; };
   char *get_filename(void) { return filename; };
@@ -105,6 +156,16 @@ private:
   FILE *_fp;
   char *filename;
   int compression_level;
+
+  /* RDP per-file session state (seq numbers advance across calls) */
+  libpcapng_rdp_session_t _rdp_sess;
+  libpcapng_rdp_config_t  _rdp_cfg;
+  uint8_t _rdp_c_mac[6];
+  uint8_t _rdp_s_mac[6];
+  uint32_t _rdp_c_ip;
+  uint32_t _rdp_s_ip;
+  uint16_t _rdp_c_port;
+  uint16_t _rdp_s_port;
 
   static int foreach_packet_cb(uint32_t block_counter, uint32_t block_type, uint32_t block_total_length, unsigned char *data, void *userdata);
 };

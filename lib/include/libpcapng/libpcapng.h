@@ -43,6 +43,8 @@ extern "C" {
 #include "protocols/http2_stream.h"
 #include "protocols/tls_stream.h"
 #include "protocols/tcp_mss.h"
+#include "protocols/asn1.h"
+#include "protocols/rdp.h"
 
 #ifdef __cplusplus
 }

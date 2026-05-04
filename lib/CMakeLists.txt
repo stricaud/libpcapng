@@ -3,6 +3,8 @@ include_directories(AFTER ${LIBPCAPNG_INCLUDE_DIRS})
 message("include dirs: ${LIBPCAPNG_INCLUDE_DIRS}")
 
 set(LIBPCAPNG_HEADERS
+  include/libpcapng/protocols/asn1.h
+  include/libpcapng/protocols/rdp.h
   include/libpcapng/blocks.h
   include/libpcapng/easyapi.h
   include/libpcapng/io.h
@@ -30,6 +32,8 @@ set(LIBPCAPNG_SOURCES
   blocks.c
   easyapi.c
   io.c
+  protocols/asn1.c
+  protocols/rdp.c
   protocols/ethernet.c
   protocols/ipv4.c
   protocols/tcp.c

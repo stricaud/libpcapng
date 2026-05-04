@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <libpcapng/libpcapng.h>
 
@@ -13,9 +14,15 @@ namespace py = pybind11;
 
 PcapNG::PcapNG(void) {
   filename = NULL;
-  
-  // compression_level = 10;
   compression_level = 0;
+  libpcapng_rdp_config_init(&_rdp_cfg);
+  memset(&_rdp_sess, 0, sizeof(_rdp_sess));
+  _rdp_sess.c_seq = 0x11223344;
+  _rdp_sess.s_seq = 0xAABBCCDD;
+  memset(_rdp_c_mac, 0, 6);
+  memset(_rdp_s_mac, 0, 6);
+  _rdp_c_ip = 0; _rdp_s_ip = 0;
+  _rdp_c_port = 0; _rdp_s_port = RDP_DEFAULT_PORT;
 }
 
 PcapNG::~PcapNG(void) {
@@ -690,6 +697,196 @@ int PcapNG::ForeachPacket(const py::object &func)
   return libpcapng_fp_read(_fp, foreach_packet_cb, (void *)&func);
 }
 
+/* ── RDP helpers ────────────────────────────────────────────────────────── */
+
+static void parse_mac_or_throw(const std::string &mac_str, uint8_t out[6])
+{
+    if (libpcapng_mac_str_to_bytes(mac_str.c_str(), out))
+        throw std::runtime_error("Invalid MAC: " + mac_str);
+}
+
+static uint32_t parse_ip(const std::string &ip_str)
+{
+    return libpcapng_ipv4_to_host_order(ip_str.c_str());
+}
+
+py::bytes PcapNG::BuildRdpConnectionRequest(const std::string &src_mac,
+                                            const std::string &dst_mac,
+                                            const std::string &src_ip,
+                                            const std::string &dst_ip,
+                                            uint32_t src_port, uint32_t dst_port,
+                                            const std::string &username,
+                                            const std::string &domain,
+                                            uint32_t requested_protocol,
+                                            int use_tls)
+{
+    libpcapng_rdp_config_t cfg;
+    libpcapng_rdp_config_init(&cfg);
+    strncpy(cfg.username, username.c_str(), sizeof(cfg.username) - 1);
+    strncpy(cfg.domain,   domain.c_str(),   sizeof(cfg.domain)   - 1);
+    cfg.requested_protocol = requested_protocol;
+    cfg.use_tls = use_tls;
+
+    uint8_t smac[6], dmac[6];
+    parse_mac_or_throw(src_mac, smac);
+    parse_mac_or_throw(dst_mac, dmac);
+    uint32_t sip = parse_ip(src_ip);
+    uint32_t dip = parse_ip(dst_ip);
+
+    uint8_t rdp_pdu[256];
+    size_t rdp_len = libpcapng_rdp_build_connection_request(rdp_pdu, sizeof(rdp_pdu), &cfg);
+
+    uint8_t frame[65536];
+    size_t frame_len = 0;
+    libpcapng_tcp_packet_build(smac, dmac, sip, dip,
+                               (uint16_t)src_port, (uint16_t)dst_port,
+                               0, 0, 0x18, rdp_pdu, rdp_len,
+                               frame, &frame_len);
+    return py::bytes(reinterpret_cast<char *>(frame), frame_len);
+}
+
+py::bytes PcapNG::BuildRdpConnectionConfirm(const std::string &src_mac,
+                                            const std::string &dst_mac,
+                                            const std::string &src_ip,
+                                            const std::string &dst_ip,
+                                            uint32_t src_port, uint32_t dst_port,
+                                            uint32_t selected_protocol)
+{
+    libpcapng_rdp_config_t cfg;
+    libpcapng_rdp_config_init(&cfg);
+    cfg.requested_protocol = selected_protocol;
+
+    uint8_t smac[6], dmac[6];
+    parse_mac_or_throw(src_mac, smac);
+    parse_mac_or_throw(dst_mac, dmac);
+    uint32_t sip = parse_ip(src_ip);
+    uint32_t dip = parse_ip(dst_ip);
+
+    uint8_t rdp_pdu[128];
+    size_t rdp_len = libpcapng_rdp_build_connection_confirm(rdp_pdu, sizeof(rdp_pdu), &cfg);
+
+    uint8_t frame[65536];
+    size_t frame_len = 0;
+    libpcapng_tcp_packet_build(smac, dmac, sip, dip,
+                               (uint16_t)src_port, (uint16_t)dst_port,
+                               0, 0, 0x18, rdp_pdu, rdp_len,
+                               frame, &frame_len);
+    return py::bytes(reinterpret_cast<char *>(frame), frame_len);
+}
+
+void PcapNG::SimulateRdpLogin(const std::string &c_mac, const std::string &s_mac,
+                               const std::string &c_ip,  const std::string &s_ip,
+                               uint32_t c_port, uint32_t s_port,
+                               const std::string &username,
+                               const std::string &domain,
+                               const std::string &password,
+                               uint32_t user_id,
+                               uint32_t desktop_width, uint32_t desktop_height,
+                               int use_tls)
+{
+    parse_mac_or_throw(c_mac, _rdp_c_mac);
+    parse_mac_or_throw(s_mac, _rdp_s_mac);
+    _rdp_c_ip   = parse_ip(c_ip);
+    _rdp_s_ip   = parse_ip(s_ip);
+    _rdp_c_port = (uint16_t)c_port;
+    _rdp_s_port = (uint16_t)s_port;
+
+    libpcapng_rdp_config_init(&_rdp_cfg);
+    strncpy(_rdp_cfg.username, username.c_str(), sizeof(_rdp_cfg.username) - 1);
+    strncpy(_rdp_cfg.domain,   domain.c_str(),   sizeof(_rdp_cfg.domain)   - 1);
+    strncpy(_rdp_cfg.password, password.c_str(), sizeof(_rdp_cfg.password) - 1);
+    _rdp_cfg.user_id        = user_id;
+    _rdp_cfg.desktop_width  = (uint16_t)desktop_width;
+    _rdp_cfg.desktop_height = (uint16_t)desktop_height;
+    _rdp_cfg.use_tls        = use_tls;
+    _rdp_cfg.requested_protocol = use_tls ? RDP_PROTO_SSL : RDP_PROTO_CLASSIC;
+
+    _rdp_sess.c_seq = 0x11223344;
+    _rdp_sess.s_seq = 0xAABBCCDD;
+
+    libpcapng_rdp_simulate_login(_fp,
+                                 _rdp_c_mac, _rdp_s_mac,
+                                 _rdp_c_ip, _rdp_s_ip,
+                                 _rdp_c_port, _rdp_s_port,
+                                 &_rdp_cfg, &_rdp_sess);
+}
+
+void PcapNG::SimulateRdpKeyboard(const std::string &c_mac, const std::string &s_mac,
+                                  const std::string &c_ip,  const std::string &s_ip,
+                                  uint32_t c_port, uint32_t s_port,
+                                  uint16_t keycode, int use_tls)
+{
+    uint8_t cm[6], sm[6];
+    parse_mac_or_throw(c_mac, cm);
+    parse_mac_or_throw(s_mac, sm);
+    uint32_t cip = parse_ip(c_ip);
+    uint32_t sip = parse_ip(s_ip);
+
+    _rdp_cfg.use_tls = use_tls;
+
+    libpcapng_rdp_simulate_keyboard(_fp, cm, sm, cip, sip,
+                                    (uint16_t)c_port, (uint16_t)s_port,
+                                    &_rdp_cfg, &_rdp_sess, keycode);
+}
+
+void PcapNG::SimulateRdpMouse(const std::string &c_mac, const std::string &s_mac,
+                               const std::string &c_ip,  const std::string &s_ip,
+                               uint32_t c_port, uint32_t s_port,
+                               uint16_t x, uint16_t y, int click, int use_tls)
+{
+    uint8_t cm[6], sm[6];
+    parse_mac_or_throw(c_mac, cm);
+    parse_mac_or_throw(s_mac, sm);
+    uint32_t cip = parse_ip(c_ip);
+    uint32_t sip = parse_ip(s_ip);
+
+    _rdp_cfg.use_tls = use_tls;
+
+    libpcapng_rdp_simulate_mouse(_fp, cm, sm, cip, sip,
+                                 (uint16_t)c_port, (uint16_t)s_port,
+                                 &_rdp_cfg, &_rdp_sess, x, y, click);
+}
+
+void PcapNG::SimulateRdpClipboard(const std::string &c_mac, const std::string &s_mac,
+                                   const std::string &c_ip,  const std::string &s_ip,
+                                   uint32_t c_port, uint32_t s_port,
+                                   py::bytes data, int use_tls)
+{
+    char *raw; ssize_t raw_len;
+    PYBIND11_BYTES_AS_STRING_AND_SIZE(data.ptr(), &raw, &raw_len);
+
+    uint8_t cm[6], sm[6];
+    parse_mac_or_throw(c_mac, cm);
+    parse_mac_or_throw(s_mac, sm);
+    uint32_t cip = parse_ip(c_ip);
+    uint32_t sip = parse_ip(s_ip);
+
+    _rdp_cfg.use_tls = use_tls;
+
+    libpcapng_rdp_simulate_clipboard(_fp, cm, sm, cip, sip,
+                                     (uint16_t)c_port, (uint16_t)s_port,
+                                     &_rdp_cfg, &_rdp_sess,
+                                     reinterpret_cast<const uint8_t *>(raw),
+                                     (size_t)raw_len);
+}
+
+void PcapNG::SimulateRdpLogout(const std::string &c_mac, const std::string &s_mac,
+                                const std::string &c_ip,  const std::string &s_ip,
+                                uint32_t c_port, uint32_t s_port, int use_tls)
+{
+    uint8_t cm[6], sm[6];
+    parse_mac_or_throw(c_mac, cm);
+    parse_mac_or_throw(s_mac, sm);
+    uint32_t cip = parse_ip(c_ip);
+    uint32_t sip = parse_ip(s_ip);
+
+    _rdp_cfg.use_tls = use_tls;
+
+    libpcapng_rdp_simulate_logout(_fp, cm, sm, cip, sip,
+                                  (uint16_t)c_port, (uint16_t)s_port,
+                                  &_rdp_cfg, &_rdp_sess);
+}
+
 PYBIND11_MODULE(pycapng, m) {
     m.doc() = "libpcapng Python Bindings";
 
@@ -865,7 +1062,68 @@ PYBIND11_MODULE(pycapng, m) {
       .def("BuildTlsFinished", &PcapNG::BuildTlsFinished)
       .def("BuildTlsApplicationData", &PcapNG::BuildTlsApplicationData)
       .def("WritePacketTime", &PcapNG::WritePacketTime)
-      .def("ForeachPacket", &PcapNG::ForeachPacket);
+      .def("ForeachPacket", &PcapNG::ForeachPacket)
+      /* RDP packet builders */
+      .def("BuildRdpConnectionRequest", &PcapNG::BuildRdpConnectionRequest,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"),  py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"),
+           py::arg("username")          = RDP_DEFAULT_USERNAME,
+           py::arg("domain")            = RDP_DEFAULT_DOMAIN,
+           py::arg("requested_protocol") = (uint32_t)RDP_PROTO_SSL,
+           py::arg("use_tls")           = 1)
+      .def("BuildRdpConnectionConfirm", &PcapNG::BuildRdpConnectionConfirm,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"),  py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"),
+           py::arg("selected_protocol") = (uint32_t)RDP_PROTO_SSL)
+      /* RDP session simulators */
+      .def("SimulateRdpLogin", &PcapNG::SimulateRdpLogin,
+           py::arg("c_mac"), py::arg("s_mac"),
+           py::arg("c_ip"),  py::arg("s_ip"),
+           py::arg("c_port"), py::arg("s_port"),
+           py::arg("username")       = RDP_DEFAULT_USERNAME,
+           py::arg("domain")         = RDP_DEFAULT_DOMAIN,
+           py::arg("password")       = RDP_DEFAULT_PASSWORD,
+           py::arg("user_id")        = RDP_DEFAULT_USER_ID,
+           py::arg("desktop_width")  = RDP_DEFAULT_WIDTH,
+           py::arg("desktop_height") = RDP_DEFAULT_HEIGHT,
+           py::arg("use_tls")        = 1)
+      .def("SimulateRdpKeyboard", &PcapNG::SimulateRdpKeyboard,
+           py::arg("c_mac"), py::arg("s_mac"),
+           py::arg("c_ip"),  py::arg("s_ip"),
+           py::arg("c_port"), py::arg("s_port"),
+           py::arg("keycode"),
+           py::arg("use_tls") = 1)
+      .def("SimulateRdpMouse", &PcapNG::SimulateRdpMouse,
+           py::arg("c_mac"), py::arg("s_mac"),
+           py::arg("c_ip"),  py::arg("s_ip"),
+           py::arg("c_port"), py::arg("s_port"),
+           py::arg("x"), py::arg("y"),
+           py::arg("click")   = 0,
+           py::arg("use_tls") = 1)
+      .def("SimulateRdpClipboard", &PcapNG::SimulateRdpClipboard,
+           py::arg("c_mac"), py::arg("s_mac"),
+           py::arg("c_ip"),  py::arg("s_ip"),
+           py::arg("c_port"), py::arg("s_port"),
+           py::arg("data"),
+           py::arg("use_tls") = 1)
+      .def("SimulateRdpLogout", &PcapNG::SimulateRdpLogout,
+           py::arg("c_mac"), py::arg("s_mac"),
+           py::arg("c_ip"),  py::arg("s_ip"),
+           py::arg("c_port"), py::arg("s_port"),
+           py::arg("use_tls") = 1);
+
+    /* RDP constants at module level (same pattern as LINKTYPE_* above) */
+    m.attr("RDP_PORT")          = py::int_(RDP_DEFAULT_PORT);
+    m.attr("RDP_PROTO_CLASSIC") = py::int_(RDP_PROTO_CLASSIC);
+    m.attr("RDP_PROTO_SSL")     = py::int_(RDP_PROTO_SSL);
+    m.attr("RDP_PROTO_NLA")     = py::int_(RDP_PROTO_NLA);
+    m.attr("KBDFLAGS_RELEASE")  = py::int_(KBDFLAGS_RELEASE);
+    m.attr("KBDFLAGS_EXTENDED") = py::int_(KBDFLAGS_EXTENDED);
+    m.attr("PTRFLAGS_MOVE")     = py::int_(PTRFLAGS_MOVE);
+    m.attr("PTRFLAGS_BUTTON1")  = py::int_(PTRFLAGS_BUTTON1);
+    m.attr("PTRFLAGS_BUTTON2")  = py::int_(PTRFLAGS_BUTTON2);
 }
 
 

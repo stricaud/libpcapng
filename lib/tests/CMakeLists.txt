@@ -27,3 +27,7 @@ add_test(Ntp-Write ntp-write)
 add_executable(ssl-http2-write ssl-http2-write.c)
 target_link_libraries(ssl-http2-write ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(Ssl-Http2-Write ssl-http2-write)
+
+add_executable(rdp-write rdp-write.c)
+target_link_libraries(rdp-write ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Rdp-Write rdp-write)
