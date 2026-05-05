@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <ctype.h>
 #include <errno.h>
 #include <arpa/inet.h>
@@ -98,6 +100,40 @@ typedef struct {
 
 static sess_t sessions[MAX_SESSIONS];
 static int    nsessions = 0;
+
+/* ─── Protocol registry ─────────────────────────────────────────────────────── */
+typedef struct { int id; char name[64]; const char *color; } proto_reg_t;
+
+#define MAX_PROTO_REG 128
+static proto_reg_t proto_reg[MAX_PROTO_REG];
+static int         nproto_reg = 0;
+
+static void proto_register(int id, const char *name, const char *color) {
+    for (int i = 0; i < nproto_reg; i++)
+        if (proto_reg[i].id == id) {
+            strncpy(proto_reg[i].name, name, 63);
+            proto_reg[i].color = color;
+            return;
+        }
+    if (nproto_reg >= MAX_PROTO_REG) return;
+    proto_reg[nproto_reg].id = id;
+    strncpy(proto_reg[nproto_reg].name, name, 63);
+    proto_reg[nproto_reg].color = color;
+    nproto_reg++;
+}
+
+static const char *proto_name(int p) {
+    for (int i = 0; i < nproto_reg; i++)
+        if (proto_reg[i].id == p) return proto_reg[i].name;
+    return "???";
+}
+
+static const char *proto_color(int p) {
+    static const char *dc[] = {CBYEL,CBGRN,CBMAG,CBCYN,CBRED,CBLU,CWHT};
+    for (int i = 0; i < nproto_reg; i++)
+        if (proto_reg[i].id == p) return proto_reg[i].color;
+    return dc[p % 7];
+}
 
 static void ip_to_mac(uint32_t ip_host, uint8_t mac[6]) {
     mac[0] = 0x02; mac[1] = 0x00;
@@ -370,7 +406,9 @@ static uint8_t parse_tcp_flags(const char *s) {
 typedef enum {
     PFT_U8, PFT_U16, PFT_U32, PFT_U64,
     PFT_LE_U16, PFT_LE_U32, PFT_LE_U64,  /* little-endian integers (for SMB, RDP, etc.) */
-    PFT_BYTES, PFT_MAC, PFT_IP4, PFT_STR
+    PFT_BYTES, PFT_MAC, PFT_IP4, PFT_STR,
+    PFT_PAYLOAD,   /* rest of packet — variable length, must be last field       */
+    PFT_BYTES_REF  /* bytes[fieldname] — length read from a named integer field  */
 } pftype_t;
 
 typedef struct { char name[64]; uint64_t val; } peval_t;
@@ -381,6 +419,7 @@ typedef struct {
     uint64_t defnum;
     char     defstr[256];
     size_t   nbytes;
+    char     lenfield[64]; /* PFT_BYTES_REF: name of field that holds the byte count */
     peval_t  evals[MAX_PEVALS];
     int      nevals;
 } pfld_t;
@@ -396,9 +435,11 @@ static pdef_t pdefs[MAX_PDEFS];
 static int    npdefs = 0;
 
 static pdef_t *find_pdef_by_name(const char *name) {
+    /* return last match so inline/later definitions override earlier ones */
+    pdef_t *found = NULL;
     for (int i = 0; i < npdefs; i++)
-        if (strcasecmp(pdefs[i].pname, name) == 0) return &pdefs[i];
-    return NULL;
+        if (strcasecmp(pdefs[i].pname, name) == 0) found = &pdefs[i];
+    return found;
 }
 
 static pdef_t *find_pdef_by_id(int id) {
@@ -417,12 +458,15 @@ static pftype_t parse_posa_type(const char *s, size_t *nbytes_out) {
     if (!strcasecmp(s,"le_uint64")||!strcasecmp(s,"uint64le")) return PFT_LE_U64;
     if (!strcasecmp(s,"mac"))    return PFT_MAC;
     if (!strcasecmp(s,"ip4")||!strcasecmp(s,"ip")) return PFT_IP4;
-    if (!strcasecmp(s,"string")) return PFT_STR;
+    if (!strcasecmp(s,"string")||!strcasecmp(s,"cstring")) return PFT_STR;
+    if (!strcasecmp(s,"payload")||!strcasecmp(s,"bytes_eod")) return PFT_PAYLOAD;
     if (!strncasecmp(s,"bytes<",6)||!strncasecmp(s,"byte<",5)) {
         const char *lt = strchr(s,'<');
         if (lt) *nbytes_out = (size_t)atoi(lt+1);
         return PFT_BYTES;
     }
+    /* bytes[fieldname] — handled in parse_posa_src, returns sentinel here */
+    if (!strncasecmp(s,"bytes[",6)) return PFT_BYTES_REF;
     if (!strncasecmp(s,"enum<",5)) {
         const char *inner = s+5;
         if (!strncasecmp(inner,"uint8",5)||!strncasecmp(inner,"int8",4)) return PFT_U8;
@@ -463,7 +507,12 @@ static int parse_posa_src(const char *src) {
             int ni = 0;
             while (*q && *q!=' ' && *q!='\t' && ni<63) cur->pname[ni++] = *q++;
             cur->pname[ni] = '\0';
-            if (cur->pname[0]) { npdefs++; added++; }
+            if (cur->pname[0]) {
+                npdefs++; added++;
+                /* auto-register for name/color lookup */
+                static const char *dc[] = {CBYEL,CBGRN,CBMAG,CBCYN,CBRED,CBLU,CWHT};
+                proto_register(cur->proto_id, cur->pname, dc[cur->proto_id % 7]);
+            }
             continue;
         }
 
@@ -485,6 +534,17 @@ static int parse_posa_src(const char *src) {
             size_t nb = 0;
             f->ftype = parse_posa_type(typestr, &nb);
             f->nbytes = nb;
+            /* bytes[fieldname] — extract the referenced field name */
+            if (f->ftype == PFT_BYTES_REF) {
+                const char *lb = strchr(typestr, '[');
+                const char *rb = lb ? strchr(lb, ']') : NULL;
+                if (lb && rb && rb > lb+1) {
+                    size_t nlen = (size_t)(rb - lb - 1);
+                    if (nlen >= 64) nlen = 63;
+                    strncpy(f->lenfield, lb+1, nlen);
+                    f->lenfield[nlen] = '\0';
+                }
+            }
             if (*s == '=') {
                 s++; while (*s==' '||*s=='\t') s++;
                 if (!strncmp(s,"0x",2)||!strncmp(s,"0X",2)) f->defnum = strtoull(s,NULL,16);
@@ -537,6 +597,17 @@ static int parse_posa_file(const char *path) {
 
 /* Serialize a dynamic protocol layer into wire bytes (big-endian fields). */
 static size_t serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t max) {
+    /* pre-pass: auto-fill length fields for every BYTES_REF field */
+    for (int i = 0; i < def->nflds; i++) {
+        pfld_t *rf = &def->flds[i];
+        if (rf->ftype != PFT_BYTES_REF || !rf->lenfield[0]) continue;
+        field_t *data_lf = find_field(l, rf->fname);
+        size_t dlen = 0;
+        if (data_lf && data_lf->type==FT_BYTES && data_lf->raw) dlen = data_lf->raw_len;
+        else if (data_lf && data_lf->type==FT_STR)              dlen = strlen(data_lf->s);
+        field_t *len_lf = find_field(l, rf->lenfield);
+        if (len_lf) len_lf->n = (uint64_t)dlen;
+    }
     size_t off = 0;
     for (int i = 0; i < def->nflds && off < max; i++) {
         pfld_t *f = &def->flds[i];
@@ -616,6 +687,18 @@ static size_t serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t
                 off += nb;
                 break;
             }
+            case PFT_PAYLOAD:
+            case PFT_BYTES_REF: {
+                field_t *lf = find_field(l, f->fname);
+                if (lf && lf->type==FT_BYTES && lf->raw && lf->raw_len) {
+                    size_t cp = lf->raw_len;
+                    if (off+cp <= max) { memcpy(out+off, lf->raw, cp); off += cp; }
+                } else if (lf && lf->type==FT_STR && lf->s[0]) {
+                    size_t sl = strlen(lf->s);
+                    if (off+sl <= max) { memcpy(out+off, lf->s, sl); off += sl; }
+                }
+                break;
+            }
         }
     }
     return off;
@@ -639,6 +722,11 @@ static layer_t *make_dynamic_layer(pdef_t *def) {
                     uint8_t *z = calloc(1, f->nbytes);
                     if (z) { set_bytes(l, f->fname, z, f->nbytes); free(z); }
                 }
+                break;
+            case PFT_PAYLOAD:
+            case PFT_BYTES_REF:
+                /* start empty — user sets via fieldname="data" or \xNN escapes */
+                set_bytes(l, f->fname, (const uint8_t*)"", 0);
                 break;
         }
     }
@@ -672,11 +760,13 @@ static const char *pftype_name(pftype_t t) {
         case PFT_LE_U16: return "le_uint16";
         case PFT_LE_U32: return "le_uint32";
         case PFT_LE_U64: return "le_uint64";
-        case PFT_BYTES:  return "bytes";
-        case PFT_MAC:    return "mac";
-        case PFT_IP4:    return "ip4";
-        case PFT_STR:    return "string";
-        default:         return "?";
+        case PFT_BYTES:     return "bytes";
+        case PFT_MAC:       return "mac";
+        case PFT_IP4:       return "ip4";
+        case PFT_STR:       return "cstring";
+        case PFT_PAYLOAD:   return "payload";
+        case PFT_BYTES_REF: return "bytes[N]";
+        default:            return "?";
     }
 }
 
@@ -696,17 +786,6 @@ static const char BUILTIN_POSA[] =
 "    required ip4 spa = 0.0.0.0\n"
 "    required mac tha = 00:00:00:00:00:00\n"
 "    required ip4 tpa = 0.0.0.0\n"
-"\n"
-"Object<main> DNS\n"
-"    required uint16 id = 0x0001\n"
-"    required uint16 flags = 0x0100\n"
-"        RESPONSE = 0x8000\n"
-"        STANDARD_QUERY = 0x0100\n"
-"        RD = 0x0100\n"
-"    required uint16 qdcount = 1\n"
-"    required uint16 ancount = 0\n"
-"    required uint16 nscount = 0\n"
-"    required uint16 arcount = 0\n"
 "\n"
 "Object<main> NTP\n"
 "    required uint8 li_vn_mode = 0x1b\n"
@@ -865,6 +944,451 @@ static const char BUILTIN_POSA[] =
 "    required uint8  op_len = 0\n"
 "\n";
 
+/* Default content written to ~/.pcapsh_protos.posa on first run. */
+static const char DEFAULT_USER_POSA[] =
+"# ~/.pcapsh_protos.posa — user protocol definitions\n"
+"# Loaded automatically at startup. Add your own protocols below.\n"
+"# Protocol syntax reference: https://github.com/stricaud/libpcapng/blob/main/bin/pcapsh.md\n"
+"\n"
+"# ── TFTP (RFC 1350) ─────────────────────────────────────────────────────────\n"
+"Object<main> TFTP_RRQ\n"
+"    required uint16  opcode   = 1\n"
+"        RRQ = 1\n"
+"    required cstring filename = \n"
+"    required cstring mode     = octet\n"
+"\n"
+"Object<main> TFTP_WRQ\n"
+"    required uint16  opcode   = 2\n"
+"        WRQ = 2\n"
+"    required cstring filename = \n"
+"    required cstring mode     = octet\n"
+"\n"
+"Object<main> TFTP_DATA\n"
+"    required uint16  opcode = 3\n"
+"        DATA = 3\n"
+"    required uint16  block  = 1\n"
+"    required payload data\n"
+"\n"
+"Object<main> TFTP_ACK\n"
+"    required uint16 opcode = 4\n"
+"        ACK = 4\n"
+"    required uint16 block  = 0\n"
+"\n"
+"Object<main> TFTP_ERROR\n"
+"    required uint16  opcode = 5\n"
+"        ERROR = 5\n"
+"    required uint16  code   = 0\n"
+"        ERR_UNDEFINED        = 0\n"
+"        ERR_FILE_NOT_FOUND   = 1\n"
+"        ERR_ACCESS_VIOLATION = 2\n"
+"        ERR_DISK_FULL        = 3\n"
+"        ERR_ILLEGAL_OP       = 4\n"
+"        ERR_UNKNOWN_TID      = 5\n"
+"        ERR_FILE_EXISTS      = 6\n"
+"        ERR_NO_SUCH_USER     = 7\n"
+"    required cstring msg\n"
+"\n"
+"# ── Telnet (RFC 854) ─────────────────────────────────────────────────────────\n"
+"# Represents a single IAC command triple (IAC + verb + option).\n"
+"# Data bytes between IAC sequences are raw payload and not covered here.\n"
+"Object<main> Telnet\n"
+"    required uint8 iac = 0xFF\n"
+"    required uint8 command = 0xFD\n"
+"        SE   = 0xF0\n"
+"        SB   = 0xFA\n"
+"        WILL = 0xFB\n"
+"        WONT = 0xFC\n"
+"        DO   = 0xFD\n"
+"        DONT = 0xFE\n"
+"        IAC  = 0xFF\n"
+"    required uint8 option = 0\n"
+"        ECHO                 = 1\n"
+"        SUPPRESS_GO_AHEAD    = 3\n"
+"        STATUS               = 5\n"
+"        TIMING_MARK          = 6\n"
+"        TERMINAL_TYPE        = 24\n"
+"        WINDOW_SIZE          = 31\n"
+"        TERMINAL_SPEED       = 32\n"
+"        REMOTE_FLOW_CONTROL  = 33\n"
+"        LINEMODE             = 34\n"
+"        NEW_ENVIRON          = 39\n"
+"\n";
+
+/* ─── DNS layer serializer ──────────────────────────────────────────────────── */
+static size_t serialize_dns_layer(layer_t *l, uint8_t *out, size_t max) {
+    size_t n = 0;
+    uint16_t id      = (uint16_t)get_u64(l, "id",      1);
+    uint16_t flags   = (uint16_t)get_u64(l, "flags",   0);
+    uint16_t qdcount = (uint16_t)get_u64(l, "qdcount", 0);
+    uint16_t ancount = (uint16_t)get_u64(l, "ancount", 0);
+    uint16_t nscount = (uint16_t)get_u64(l, "nscount", 0);
+    uint16_t arcount = (uint16_t)get_u64(l, "arcount", 0);
+    if (n+12 > max) return 0;
+    out[n++]=(id>>8)&0xff;      out[n++]=id&0xff;
+    out[n++]=(flags>>8)&0xff;   out[n++]=flags&0xff;
+    out[n++]=(qdcount>>8)&0xff; out[n++]=qdcount&0xff;
+    out[n++]=(ancount>>8)&0xff; out[n++]=ancount&0xff;
+    out[n++]=(nscount>>8)&0xff; out[n++]=nscount&0xff;
+    out[n++]=(arcount>>8)&0xff; out[n++]=arcount&0xff;
+    const char *secs[] = { "_qd", "_an", "_ns", "_ar" };
+    for (int i = 0; i < 4; i++) {
+        field_t *f = find_field(l, secs[i]);
+        if (f && f->type==FT_BYTES && f->raw && f->raw_len && n+f->raw_len <= max) {
+            memcpy(out+n, f->raw, f->raw_len); n += f->raw_len;
+        }
+    }
+    return n;
+}
+
+/* ─── fromhex / show utilities ──────────────────────────────────────────────── */
+
+static int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Parse hex dump string into bytes. Handles three formats:
+ *   - Plain stream:        "4500003c..."
+ *   - Space-separated:     "45 00 00 3c ..."
+ *   - Wireshark multi-line:"0000   45 00 00 3c ...   E..<"
+ * Returns number of bytes written. */
+static size_t fromhex_parse(const char *s, uint8_t *out, size_t max) {
+    size_t n = 0;
+    const char *p = s;
+    while (*p && n < max) {
+        /* skip leading whitespace / newlines */
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (!*p) break;
+        /* Wireshark-style line: 4 hex digits at column 0 followed by spaces = offset, skip it */
+        if (hexval(p[0]) >= 0 && hexval(p[1]) >= 0 &&
+            hexval(p[2]) >= 0 && hexval(p[3]) >= 0 &&
+            (p[4] == ' ' || p[4] == '\t')) {
+            p += 4; /* skip offset */
+            while (*p == ' ' || *p == '\t') p++;
+        }
+        /* read hex bytes on this line:
+         * stop when we see 3+ consecutive spaces (Wireshark ASCII column) or end of line */
+        while (*p && *p != '\n' && *p != '\r' && n < max) {
+            /* 3+ spaces = ASCII column separator — stop this line */
+            if (p[0]==' ' && p[1]==' ' && p[2]==' ') break;
+            /* skip spaces (byte separators and group separators) */
+            if (*p == ' ' || *p == '\t') { p++; continue; }
+            int hi = hexval(p[0]);
+            int lo = hexval(p[1]);
+            if (hi < 0 || lo < 0) break; /* non-hex char — stop this line (ASCII column) */
+            out[n++] = (uint8_t)((hi << 4) | lo);
+            p += 2;
+        }
+        /* skip to end of line */
+        while (*p && *p != '\n') p++;
+    }
+    return n;
+}
+
+/* Dissect raw bytes according to a pdef and print the fields. */
+static void dissect_pdef_layer(pdef_t *def, const uint8_t *data, size_t len) {
+    /* paranoia: reject obviously invalid inputs */
+    if (!def || !data || len == 0) {
+        printf("<empty>|\n");
+        return;
+    }
+
+    /* accumulate parsed integer values so BYTES_REF can look up length fields */
+    struct { char name[64]; uint64_t val; } pv[MAX_PFLDS];
+    int npv = 0;
+
+    printf(CBOLD "<%s " CR, def->pname);
+    size_t off = 0;
+    for (int i = 0; i < def->nflds; i++) {
+        pfld_t *f = &def->flds[i];
+
+        /* PAYLOAD and BYTES_REF can start even at off==len (empty) */
+        if (f->ftype != PFT_PAYLOAD && f->ftype != PFT_BYTES_REF && off >= len) {
+            printf(CWHT "%s=?" CR " ", f->fname);
+            continue;
+        }
+
+        uint64_t v = 0;
+        size_t consumed = 0;
+        switch (f->ftype) {
+            case PFT_U8:
+                v = data[off]; consumed = 1; break;
+            case PFT_U16:
+                if (off+2 <= len) v = ((uint64_t)data[off]<<8)|data[off+1];
+                consumed = 2; break;
+            case PFT_U32:
+                if (off+4 <= len)
+                    v = ((uint64_t)data[off]<<24)|((uint64_t)data[off+1]<<16)|
+                        ((uint64_t)data[off+2]<<8)|data[off+3];
+                consumed = 4; break;
+            case PFT_U64:
+                if (off+8 <= len) {
+                    for (int b=0;b<8;b++) v = (v<<8)|data[off+b];
+                }
+                consumed = 8; break;
+            case PFT_LE_U16:
+                if (off+2 <= len) v = (uint64_t)data[off]|((uint64_t)data[off+1]<<8);
+                consumed = 2; break;
+            case PFT_LE_U32:
+                if (off+4 <= len)
+                    v = (uint64_t)data[off]|((uint64_t)data[off+1]<<8)|
+                        ((uint64_t)data[off+2]<<16)|((uint64_t)data[off+3]<<24);
+                consumed = 4; break;
+            case PFT_LE_U64:
+                if (off+8 <= len) {
+                    for (int b=0;b<8;b++) v |= ((uint64_t)data[off+b])<<(8*b);
+                }
+                consumed = 8; break;
+            case PFT_IP4: {
+                if (off+4 <= len) {
+                    printf(CWHT "%s" CR "=%u.%u.%u.%u ",
+                           f->fname, data[off], data[off+1], data[off+2], data[off+3]);
+                    off += 4;
+                }
+                continue;
+            }
+            case PFT_MAC: {
+                if (off+6 <= len) {
+                    printf(CWHT "%s" CR "=%02x:%02x:%02x:%02x:%02x:%02x ",
+                           f->fname,
+                           data[off],data[off+1],data[off+2],
+                           data[off+3],data[off+4],data[off+5]);
+                    off += 6;
+                }
+                continue;
+            }
+            case PFT_BYTES: {
+                size_t nb = f->nbytes < (len-off) ? f->nbytes : (len-off);
+                printf(CWHT "%s" CR "=<bytes[%zu]> ", f->fname, nb);
+                off += nb;
+                continue;
+            }
+            case PFT_STR: {
+                /* avail_str >= 1 guaranteed by the off >= len guard above */
+                size_t avail_str = len - off;
+                const char *sv = (const char *)(data + off);
+                size_t sl = strnlen(sv, avail_str);
+                /* sl == avail_str → no NUL found; don't advance past the buffer end */
+                int print_len = (sl > (size_t)INT_MAX) ? INT_MAX : (int)sl;
+                printf(CWHT "%s" CR "='%.*s' ", f->fname, print_len, sv);
+                off += sl + (sl < avail_str ? 1 : 0);
+                if (off > len) off = len;  /* defensive clamp — should never fire */
+                continue;
+            }
+            case PFT_PAYLOAD: {
+                size_t remaining = len - off;
+                /* print as ASCII if fully printable, else hex */
+                int is_text = (remaining > 0);
+                for (size_t k = 0; k < remaining && is_text; k++)
+                    if (!isprint((unsigned char)data[off+k]) &&
+                        !isspace((unsigned char)data[off+k])) is_text = 0;
+                int print_len = (remaining > (size_t)INT_MAX) ? INT_MAX : (int)remaining;
+                if (is_text)
+                    printf(CWHT "%s" CR "='%.*s' ", f->fname, print_len, (const char*)(data+off));
+                else {
+                    printf(CWHT "%s" CR "=<", f->fname);
+                    for (size_t k = 0; k < remaining; k++) printf("%02x", data[off+k]);
+                    printf("> ");
+                }
+                off = len;
+                continue;
+            }
+            case PFT_BYTES_REF: {
+                /* look up length from the previously parsed integer field */
+                size_t blen = 0;
+                if (f->lenfield[0]) {
+                    for (int k = 0; k < npv; k++) {
+                        if (!strcasecmp(pv[k].name, f->lenfield)) {
+                            uint64_t raw = pv[k].val;
+                            /* cap at 64 KiB before converting to size_t — a packet
+                               can't carry more and an evil length field must not
+                               cause a size_t wrap or a giant allocation */
+                            blen = (raw > 65535u) ? 65535u : (size_t)raw;
+                            break;
+                        }
+                    }
+                }
+                size_t avail = len - off;
+                if (blen > avail) blen = avail;  /* never read past data end */
+                /* print as ASCII if fully printable, else hex */
+                int is_text = (blen > 0);
+                for (size_t k = 0; k < blen && is_text; k++)
+                    if (!isprint((unsigned char)data[off+k]) &&
+                        !isspace((unsigned char)data[off+k])) is_text = 0;
+                int print_len = (blen > (size_t)INT_MAX) ? INT_MAX : (int)blen;
+                if (is_text)
+                    printf(CWHT "%s" CR "='%.*s' ", f->fname, print_len, (const char*)(data+off));
+                else {
+                    printf(CWHT "%s" CR "=<", f->fname);
+                    for (size_t k = 0; k < blen; k++) printf("%02x", data[off+k]);
+                    printf("> ");
+                }
+                off += blen;
+                if (off > len) off = len;  /* defensive clamp */
+                continue;
+            }
+        }
+        /* integer field — look up enum name and store in parsed-values table */
+        const char *ename = NULL;
+        for (int j = 0; j < f->nevals; j++)
+            if (f->evals[j].val == v) { ename = f->evals[j].name; break; }
+        if (ename)
+            printf(CWHT "%s" CR "=%s(%"PRIu64") ", f->fname, ename, v);
+        else
+            printf(CWHT "%s" CR "=%"PRIu64" ", f->fname, v);
+        if (npv < MAX_PFLDS) {
+            strncpy(pv[npv].name, f->fname, 63);
+            pv[npv].val = v;
+            npv++;
+        }
+        off += consumed;
+        if (off > len) { off = len; break; }  /* defensive: fixed-width field overran */
+    }
+    printf("|\n");
+    if (off < len)
+        printf(CWHT "  +%zu trailing byte(s)\n" CR, len - off);
+}
+
+/* ─── Per-protocol show helpers (print fields, return bytes consumed) ────────── */
+
+static size_t show_ether_layer(const uint8_t *d, size_t avail) {
+    if (avail < 14) {
+        fprintf(stderr, CBRED "show: Ether needs 14 bytes, got %zu\n" CR, avail);
+        return 0;
+    }
+    printf(CBYEL "<Ether " CR
+           CWHT "dst" CR "=%02x:%02x:%02x:%02x:%02x:%02x "
+           CWHT "src" CR "=%02x:%02x:%02x:%02x:%02x:%02x "
+           CWHT "type" CR "=0x%04x |\n",
+           d[0],d[1],d[2],d[3],d[4],d[5],
+           d[6],d[7],d[8],d[9],d[10],d[11],
+           (unsigned)((d[12]<<8)|d[13]));
+    return 14;
+}
+
+static size_t show_ip_layer(const uint8_t *d, size_t avail) {
+    if (avail < 20) {
+        fprintf(stderr, CBRED "show: IP needs 20 bytes, got %zu\n" CR, avail);
+        return 0;
+    }
+    size_t ihl = (size_t)((d[0] & 0x0f) * 4);
+    if (ihl < 20) ihl = 20;
+    uint8_t proto = d[9];
+    const char *pname = (proto==6) ? "TCP" : (proto==17) ? "UDP" : (proto==1) ? "ICMP" : "?";
+    printf(CBCYN "<IP " CR
+           CWHT "src" CR "=%u.%u.%u.%u "
+           CWHT "dst" CR "=%u.%u.%u.%u "
+           CWHT "ttl" CR "=%u "
+           CWHT "proto" CR "=%u(%s) "
+           CWHT "len" CR "=%u |\n",
+           d[12],d[13],d[14],d[15],
+           d[16],d[17],d[18],d[19],
+           d[8], proto, pname,
+           (unsigned)((d[2]<<8)|d[3]));
+    return ihl;
+}
+
+static size_t show_tcp_layer(const uint8_t *d, size_t avail) {
+    if (avail < 20) {
+        fprintf(stderr, CBRED "show: TCP needs 20 bytes, got %zu\n" CR, avail);
+        return 0;
+    }
+    size_t doff = (size_t)(((d[12] >> 4) & 0x0f) * 4);
+    if (doff < 20) doff = 20;
+    uint8_t fl = d[13];
+    char fstr[8] = {0}; int fi = 0;
+    if (fl & 0x02) fstr[fi++] = 'S';
+    if (fl & 0x10) fstr[fi++] = 'A';
+    if (fl & 0x08) fstr[fi++] = 'P';
+    if (fl & 0x01) fstr[fi++] = 'F';
+    if (fl & 0x04) fstr[fi++] = 'R';
+    if (fl & 0x20) fstr[fi++] = 'U';
+    if (!fi) { fstr[0]='0'; fi=1; }
+    fstr[fi] = '\0';
+    uint32_t seq = ((uint32_t)d[4]<<24)|((uint32_t)d[5]<<16)|((uint32_t)d[6]<<8)|d[7];
+    uint32_t ack = ((uint32_t)d[8]<<24)|((uint32_t)d[9]<<16)|((uint32_t)d[10]<<8)|d[11];
+    printf(CBGRN "<TCP " CR
+           CWHT "sport" CR "=%u "
+           CWHT "dport" CR "=%u "
+           CWHT "seq" CR "=%u "
+           CWHT "ack" CR "=%u "
+           CWHT "flags" CR "=%s |\n",
+           (unsigned)((d[0]<<8)|d[1]),
+           (unsigned)((d[2]<<8)|d[3]),
+           seq, ack, fstr);
+    return doff;
+}
+
+static size_t show_udp_layer(const uint8_t *d, size_t avail) {
+    if (avail < 8) {
+        fprintf(stderr, CBRED "show: UDP needs 8 bytes, got %zu\n" CR, avail);
+        return 0;
+    }
+    printf(CBMAG "<UDP " CR
+           CWHT "sport" CR "=%u "
+           CWHT "dport" CR "=%u "
+           CWHT "len" CR "=%u |\n",
+           (unsigned)((d[0]<<8)|d[1]),
+           (unsigned)((d[2]<<8)|d[3]),
+           (unsigned)((d[4]<<8)|d[5]));
+    return 8;
+}
+
+static size_t show_icmp_layer(const uint8_t *d, size_t avail) {
+    if (avail < 8) {
+        fprintf(stderr, CBRED "show: ICMP needs 8 bytes, got %zu\n" CR, avail);
+        return 0;
+    }
+    const char *tname = (d[0]==0) ? "Echo Reply" : (d[0]==8) ? "Echo Request" :
+                        (d[0]==3) ? "Dest Unreachable" : (d[0]==11) ? "Time Exceeded" : "?";
+    printf(CBRED "<ICMP " CR
+           CWHT "type" CR "=%u(%s) "
+           CWHT "code" CR "=%u "
+           CWHT "id" CR "=%u "
+           CWHT "seq" CR "=%u |\n",
+           d[0], tname, d[1],
+           (unsigned)((d[4]<<8)|d[5]),
+           (unsigned)((d[6]<<8)|d[7]));
+    return 8;
+}
+
+static size_t show_dns_layer(const uint8_t *d, size_t avail) {
+    if (avail < 12) {
+        fprintf(stderr, CBRED "show: DNS needs 12 bytes, got %zu\n" CR, avail);
+        return 0;
+    }
+    printf(CBCYN "<DNS " CR
+           CWHT "id" CR "=%u "
+           CWHT "flags" CR "=0x%04x "
+           CWHT "qdcount" CR "=%u "
+           CWHT "ancount" CR "=%u "
+           CWHT "nscount" CR "=%u "
+           CWHT "arcount" CR "=%u |\n",
+           (unsigned)(((uint16_t)d[0]<<8)|d[1]),
+           (unsigned)(((uint16_t)d[2]<<8)|d[3]),
+           (unsigned)(((uint16_t)d[4]<<8)|d[5]),
+           (unsigned)(((uint16_t)d[6]<<8)|d[7]),
+           (unsigned)(((uint16_t)d[8]<<8)|d[9]),
+           (unsigned)(((uint16_t)d[10]<<8)|d[11]));
+    return avail;
+}
+
+/* Dispatch a single named layer; returns bytes consumed (0 = error). */
+static size_t show_layer_by_name(const char *proto, const uint8_t *d, size_t avail) {
+    if (!strcasecmp(proto,"Ether") || !strcasecmp(proto,"Ethernet")) return show_ether_layer(d, avail);
+    if (!strcasecmp(proto,"IP")    || !strcasecmp(proto,"IPv4"))      return show_ip_layer(d, avail);
+    if (!strcasecmp(proto,"TCP"))                                      return show_tcp_layer(d, avail);
+    if (!strcasecmp(proto,"UDP"))                                      return show_udp_layer(d, avail);
+    if (!strcasecmp(proto,"ICMP"))                                     return show_icmp_layer(d, avail);
+    if (!strcasecmp(proto,"DNS"))                                      return show_dns_layer(d, avail);
+    pdef_t *def = find_pdef_by_name(proto);
+    if (def) { dissect_pdef_layer(def, d, avail); return avail; }
+    fprintf(stderr, CBRED "show: unknown protocol '%s' — use ls() to see all\n" CR, proto);
+    return 0;
+}
+
 /* ─── Raw bytes builder ─────────────────────────────────────────────────────── */
 #define MAX_PKT_BYTES 65535
 
@@ -897,9 +1421,14 @@ static size_t pkt_to_raw_ex(layer_t *pkt, uint8_t *buf, size_t bufsz, int keep_e
         memcpy(dst_mac, BCAST, 6);
     }
 
-    /* Collect payload: dynamic protocol layers first, then Raw layer bytes. */
+    /* Collect payload: built-in application layers, dynamic posa layers, then Raw. */
     uint8_t pay_combined[8192]; size_t pay_len = 0;
     for (layer_t *lx = pkt; lx; lx = lx->next) {
+        if (lx->proto == PROTO_DNS) {
+            if (pay_len < sizeof(pay_combined))
+                pay_len += serialize_dns_layer(lx, pay_combined+pay_len, sizeof(pay_combined)-pay_len);
+            continue;
+        }
         if (lx->proto < PROTO_DYNAMIC_BASE) continue;
         pdef_t *def = find_pdef_by_id(lx->proto);
         if (def && pay_len < sizeof(pay_combined))
@@ -1001,34 +1530,6 @@ static size_t pkt_to_raw_ex(layer_t *pkt, uint8_t *buf, size_t bufsz, int keep_e
 
 /* ─── Pretty printer ────────────────────────────────────────────────────────── */
 
-static const char *proto_name(int p) {
-    switch (p) {
-        case PROTO_ETHER: return "Ether";
-        case PROTO_IP:    return "IP";
-        case PROTO_TCP:   return "TCP";
-        case PROTO_UDP:   return "UDP";
-        case PROTO_ICMP:  return "ICMP";
-        case PROTO_RAW:   return "Raw";
-        default: {
-            pdef_t *d = find_pdef_by_id(p);
-            return d ? d->pname : "???";
-        }
-    }
-}
-
-static const char *proto_color(int p) {
-    static const char *dc[] = {CBYEL,CBGRN,CBMAG,CBCYN,CBRED,CBLU,CWHT};
-    switch (p) {
-        case PROTO_ETHER: return CBYEL;
-        case PROTO_IP:    return CBCYN;
-        case PROTO_TCP:   return CBGRN;
-        case PROTO_UDP:   return CBMAG;
-        case PROTO_ICMP:  return CBRED;
-        case PROTO_RAW:   return CWHT;
-        default:          return dc[p % 7];
-    }
-}
-
 static void print_field(const field_t *f, int proto) {
     printf(" " CCYN "%s" CR "=", f->name);
     if (f->is_auto) { printf(CDIM "auto" CR); return; }
@@ -1071,8 +1572,10 @@ static void print_field(const field_t *f, int proto) {
 static void print_pkt(layer_t *pkt) {
     for (layer_t *l = pkt; l; l = l->next) {
         printf(CWHT "<" CR "%s%s" CR, proto_color(l->proto), proto_name(l->proto));
-        for (int i = 0; i < l->nflds; i++)
+        for (int i = 0; i < l->nflds; i++) {
+            if (l->flds[i].name[0] == '_') continue; /* hidden internal field */
             print_field(&l->flds[i], l->proto);
+        }
         if (l->next) printf(" " CWHT "|" CR);
     }
     /* close brackets */
@@ -1143,6 +1646,26 @@ static const proto_field_info_t icmp_fields[] = {
 static const proto_field_info_t raw_fields[] = {
     {"load","Raw bytes payload",FT_BYTES},{NULL,NULL,0}
 };
+static const proto_field_info_t dns_fields[] = {
+    {"id",      "Transaction ID",        FT_U64},
+    {"flags",   "Flags word (or use qr/rd/aa/tc/ra/rcode)",FT_U64},
+    {"qr",      "Query(0)/Response(1)",  FT_U64},
+    {"opcode",  "Opcode (0=QUERY)",      FT_U64},
+    {"aa",      "Authoritative answer",  FT_U64},
+    {"tc",      "Truncated",             FT_U64},
+    {"rd",      "Recursion desired",     FT_U64},
+    {"ra",      "Recursion available",   FT_U64},
+    {"rcode",   "Response code",         FT_U64},
+    {"qdcount", "Question count",        FT_U64},
+    {"ancount", "Answer RR count",       FT_U64},
+    {"nscount", "Authority RR count",    FT_U64},
+    {"arcount", "Additional RR count",   FT_U64},
+    {"qd",      "Question  DNSQR(...)",  FT_BYTES},
+    {"an",      "Answer    DNSRR(...)",  FT_BYTES},
+    {"ns",      "Authority DNSRR(...)",  FT_BYTES},
+    {"ar",      "Additional DNSRR(...)", FT_BYTES},
+    {NULL,NULL,0}
+};
 
 typedef struct { const char *name; int proto; const proto_field_info_t *fields; } proto_info_t;
 
@@ -1153,6 +1676,7 @@ static const proto_info_t protos[] = {
     {"Ether", PROTO_ETHER, ether_fields},
     {"ICMP",  PROTO_ICMP,  icmp_fields},
     {"Raw",   PROTO_RAW,   raw_fields},
+    {"DNS",   PROTO_DNS,   dns_fields},
     {NULL, 0, NULL}
 };
 
@@ -1174,8 +1698,10 @@ static void do_ls(const char *proto_arg) {
         printf("%s%s" CR " fields:\n", proto_color(d->proto_id), d->pname);
         for (int j = 0; j < d->nflds; j++) {
             pfld_t *f = &d->flds[j];
-            char typebuf[32];
-            if (f->ftype==PFT_BYTES) snprintf(typebuf,sizeof(typebuf),"bytes<%zu>",f->nbytes);
+            char typebuf[80];
+            if (f->ftype==PFT_BYTES)     snprintf(typebuf,sizeof(typebuf),"bytes<%zu>",f->nbytes);
+            else if (f->ftype==PFT_BYTES_REF && f->lenfield[0])
+                                         snprintf(typebuf,sizeof(typebuf),"bytes[%s]",f->lenfield);
             else strncpy(typebuf, pftype_name(f->ftype), sizeof(typebuf)-1);
             printf("  " CCYN "%-12s" CR " %-12s", f->fname, typebuf);
             if (f->nevals > 0) {
@@ -1421,7 +1947,9 @@ typedef struct eval_result {
     size_t   raw_len;
     int      is_raw;
     int      is_none;
-    sess_t  *sess;  /* non-NULL if result is a TCPSession reference */
+    sess_t  *sess;
+    uint64_t num;
+    int      is_num;
 } EvalResult;
 
 static EvalResult eval_expr(Lex *L);
@@ -1500,10 +2028,47 @@ static layer_t *do_server_fin_ack(sess_t *s) {
     return p;
 }
 
+/* ─── DNS wire-format helpers ───────────────────────────────────────────────── */
+
+static uint16_t dns_qtype_from_str(const char *s) {
+    if (!strcasecmp(s,"A"))     return 1;
+    if (!strcasecmp(s,"NS"))    return 2;
+    if (!strcasecmp(s,"CNAME")) return 5;
+    if (!strcasecmp(s,"SOA"))   return 6;
+    if (!strcasecmp(s,"PTR"))   return 12;
+    if (!strcasecmp(s,"MX"))    return 15;
+    if (!strcasecmp(s,"AAAA"))  return 28;
+    if (!strcasecmp(s,"ANY"))   return 255;
+    return 1;
+}
+
+/* Encode dotted domain name into DNS label wire format; returns bytes written. */
+static size_t dns_encode_name(const char *name, uint8_t *out, size_t max) {
+    size_t off = 0;
+    if (!name || !*name) { if (off < max) out[off++] = 0; return off; }
+    while (*name) {
+        const char *dot = strchr(name, '.');
+        size_t llen = dot ? (size_t)(dot - name) : strlen(name);
+        if (!llen) { name++; continue; }
+        if (off + 1 + llen + 1 > max) break;
+        out[off++] = (uint8_t)llen;
+        memcpy(out + off, name, llen); off += llen;
+        if (!dot) break;
+        name = dot + 1;
+    }
+    if (off < max) out[off++] = 0;
+    return off;
+}
+
 /* ─── Evaluate a primary (call, variable, string literal) ───────────────────── */
 
 static EvalResult eval_primary(Lex *L) {
-    EvalResult r = {NULL, NULL, 0, 0, 0};
+    EvalResult r = {0};
+
+    if (L->cur.type == T_NUM) {
+        r.num = L->cur.n; r.is_num = 1;
+        lex_adv(L); return r;
+    }
 
     if (L->cur.type == T_STR) {
         /* raw string layer */
@@ -1606,6 +2171,64 @@ static EvalResult eval_primary(Lex *L) {
                 do_ls(proto_arg[0] ? proto_arg : NULL);
                 r.is_none = 1; return r;
             }
+            /* fromhex("hex string or Wireshark dump") — parse hex into raw bytes */
+            if (!strcmp(name,"fromhex")) {
+                char hexstr[65536] = "";
+                if (L->cur.type == T_STR) { strncpy(hexstr, L->cur.s, sizeof(hexstr)-1); lex_adv(L); }
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                if (!hexstr[0]) { r.is_none = 1; return r; }
+                uint8_t *buf = malloc(32768);
+                if (!buf) { r.is_none = 1; return r; }
+                size_t n = fromhex_parse(hexstr, buf, 32768);
+                if (n == 0) {
+                    fprintf(stderr, CBRED "fromhex: no bytes parsed\n" CR);
+                    free(buf); r.is_none = 1; return r;
+                }
+                printf(CMAG "<raw %zu bytes>" CR "\n", n);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                return r;
+            }
+            /* show("IP/UDP/DNS", raw) — dissect raw bytes through a protocol stack */
+            if (!strcmp(name,"show")) {
+                char proto_arg[128] = "";
+                if (L->cur.type == T_STR) { strncpy(proto_arg, L->cur.s, 127); lex_adv(L); }
+                else if (L->cur.type == T_IDENT) { strncpy(proto_arg, L->cur.s, 127); lex_adv(L); }
+                if (L->cur.type == T_COMMA) lex_adv(L);
+                EvalResult data_r = eval_expr(L);
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                const uint8_t *bytes = NULL; size_t blen = 0;
+                uint8_t *tmp = NULL;
+                if (data_r.raw) { bytes = data_r.raw; blen = data_r.raw_len; }
+                else if (data_r.pkt) {
+                    tmp = malloc(MAX_PKT_BYTES);
+                    if (tmp) { blen = pkt_to_raw(data_r.pkt, tmp, MAX_PKT_BYTES); bytes = tmp; }
+                    free_layer(data_r.pkt); data_r.pkt = NULL;
+                }
+                if (!bytes || !blen) {
+                    fprintf(stderr, CBRED "show: no data\n" CR);
+                    if (tmp) free(tmp);
+                    r.is_none = 1; return r;
+                }
+                /* split proto_arg on '/' and walk the stack */
+                char stack_buf[128];
+                strncpy(stack_buf, proto_arg, 127);
+                char *layers[16]; int nlayers = 0;
+                char *tok = strtok(stack_buf, "/");
+                while (tok && nlayers < 16) { layers[nlayers++] = tok; tok = strtok(NULL, "/"); }
+                size_t offset = 0;
+                for (int li = 0; li < nlayers; li++) {
+                    if (offset >= blen) {
+                        fprintf(stderr, CBRED "show: no bytes left for '%s'\n" CR, layers[li]);
+                        break;
+                    }
+                    size_t consumed = show_layer_by_name(layers[li], bytes + offset, blen - offset);
+                    if (consumed == 0) break; /* error already printed */
+                    offset += consumed;
+                }
+                if (data_r.raw) free(data_r.raw);
+                if (tmp) free(tmp);
+                r.is_none = 1; return r;
+            }
             /* wrpcap("file", pkt) — appends if file already exists */
             if (!strcmp(name,"wrpcap")) {
                 char filename[256] = "";
@@ -1660,10 +2283,28 @@ static EvalResult eval_primary(Lex *L) {
                        "  " CBRED "ICMP" CR "([type,code,id,seq,...])     "
                        CWHT "Raw" CR "(load='bytes')\n"
                        "\n"
+                       CBYEL "DNS (native):\n" CR
+                       "  " CCYN "DNS" CR "(id,qr,opcode,aa,tc,rd,ra,rcode,flags,qdcount,...\n"
+                       "       qd=DNSQR(...), an=DNSRR(...), ns=..., ar=...)\n"
+                       "  " CCYN "DNSQR" CR "(qname=\"host.example.com\", qtype=A, qclass=IN)\n"
+                       "  " CCYN "DNSRR" CR "(rrname=\"host.example.com\", type=A, ttl=60, rdata=\"1.2.3.4\")\n"
+                       "  " CCYN "RandShort" CR "()  random uint16\n"
+                       "  qtype/type: A NS CNAME SOA PTR MX AAAA ANY (or integer)\n"
+                       "\n"
                        CBYEL "Dynamic protocols (posa-defined):\n" CR
-                       "  " CBCYN "ARP DNS NTP DHCP GRE VXLAN RADIUS SYSLOG" CR "\n"
+                       "  " CBCYN "ARP NTP DHCP GRE VXLAN RADIUS SYSLOG" CR "\n"
                        "  " CBCYN "NBT SMB2 DCERPC LDAP" CR "\n"
                        "  Plus any loaded via load() — use ls() to see all\n"
+                       "\n"
+                       CBYEL "Inline protocol definition:\n" CR
+                       "  " CCYN "protocol" CR " MyProto\n"
+                       "      required uint8  type = 0\n"
+                       "          DATA = 1  CTRL = 2\n"
+                       "      required uint16 length = 0\n"
+                       "      required uint32 sequence = 0\n"
+                       "  " CCYN "end" CR "\n"
+                       "  Types: uint8 uint16 uint32 uint64 le_uint16 le_uint32 le_uint64\n"
+                       "         mac ip4 cstring payload bytes<N> bytes[lenfield]\n"
                        "\n"
                        CBYEL "Operators:\n" CR
                        "  " CCYN "/" CR "         stack layers:  IP()/UDP()/DNS()\n"
@@ -1675,6 +2316,8 @@ static EvalResult eval_primary(Lex *L) {
                        "  " CCYN "ls" CR "([Proto])               list protocol fields\n"
                        "  " CCYN "wrpcap" CR "(\"file\",pkt)        write/append pcapng\n"
                        "  " CCYN "load" CR "(\"file.posa\")         load protocol defs\n"
+                       "  " CCYN "fromhex" CR "(\"hex\")             parse hex dump → raw bytes\n"
+                       "  " CCYN "show" CR "(\"IP/UDP/Proto\", raw)  dissect stacked layers\n"
                        "  " CCYN "help" CR "()                    this message\n"
                        "  " CCYN "exit" CR "() / " CCYN "quit" CR "()        exit\n"
                        "\n"
@@ -1693,7 +2336,8 @@ static EvalResult eval_primary(Lex *L) {
                        "  Numeric: TCP(flags=0x12)  [0x02=SYN 0x10=ACK 0x01=FIN]\n"
                        "\n"
                        CBYEL "Examples:\n" CR
-                       "  IP(dst=\"8.8.8.8\")/UDP(dport=53)/DNS(id=0x1234)\n"
+                       "  IP(dst=\"8.8.8.8\")/UDP(dport=53)/DNS(rd=1,qd=DNSQR(qname=\"example.com\"))\n"
+                       "  DNS(qr=1,an=DNSRR(rrname=\"x.com\",ttl=60,rdata=\"1.2.3.4\"),ancount=1)\n"
                        "  Ether(type=0x0806)/ARP(op=REQUEST,spa=\"192.168.1.1\")\n"
                        "  IP()/TCP()/NBT()/SMB2(command=READ)\n"
                        "  s = TCPSession(\"10.0.0.1\",\"10.0.0.2\",54321,80)\n"
@@ -1701,6 +2345,8 @@ static EvalResult eval_primary(Lex *L) {
                        "  wrpcap(\"http.pcapng\", syn_ack(s))\n"
                        "  wrpcap(\"http.pcapng\", client_send(s,\"GET / HTTP/1.0\\r\\n\\r\\n\"))\n"
                        "  load(\"myproto.posa\")  ls(SMB2)\n"
+                       "  show(\"IP/UDP/DNS\", fromhex(\"45 00 ...\"))\n"
+                       "  show(\"IP/TCP/MyProto\", fromhex(\"45 00 ...\"))\n"
                        "\n");
                 r.is_none = 1; return r;
             }
@@ -1709,6 +2355,177 @@ static EvalResult eval_primary(Lex *L) {
                 if (L->cur.type == T_RPAREN) lex_adv(L);
                 linenoiseHistorySave(".pcapsh_history");
                 exit(0);
+            }
+            /* RandShort() — random uint16 */
+            if (!strcmp(name,"RandShort")) {
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                r.num = (uint64_t)(rand() & 0xffff); r.is_num = 1;
+                return r;
+            }
+            /* DNSQR(qname="...", qtype=A, qclass=IN)
+             * Returns raw bytes: encoded_name + qtype(BE16) + qclass(BE16) */
+            if (!strcmp(name,"DNSQR")) {
+                char qname[256] = ""; uint16_t qtype = 1, qclass = 1;
+                while (L->cur.type != T_RPAREN && L->cur.type != T_EOF) {
+                    if (L->cur.type == T_IDENT) {
+                        char an[64]; strncpy(an, L->cur.s, 63); lex_adv(L);
+                        if (L->cur.type == T_EQ) {
+                            lex_adv(L);
+                            if (!strcmp(an,"qname") && L->cur.type == T_STR)
+                                { strncpy(qname, L->cur.s, 255); lex_adv(L); }
+                            else if (!strcmp(an,"qtype")) {
+                                if (L->cur.type==T_STR || L->cur.type==T_IDENT)
+                                    { qtype = dns_qtype_from_str(L->cur.s); lex_adv(L); }
+                                else if (L->cur.type==T_NUM)
+                                    { qtype = (uint16_t)L->cur.n; lex_adv(L); }
+                            } else if (!strcmp(an,"qclass")) {
+                                if (L->cur.type==T_NUM) { qclass = (uint16_t)L->cur.n; lex_adv(L); }
+                                else lex_adv(L);
+                            } else lex_adv(L);
+                        }
+                    } else if (L->cur.type == T_STR) {
+                        strncpy(qname, L->cur.s, 255); lex_adv(L);
+                    } else lex_adv(L);
+                    if (L->cur.type == T_COMMA) lex_adv(L);
+                }
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                uint8_t buf[512]; size_t blen = 0;
+                blen += dns_encode_name(qname, buf+blen, sizeof(buf)-blen);
+                buf[blen++] = (qtype>>8)&0xff;  buf[blen++] = qtype&0xff;
+                buf[blen++] = (qclass>>8)&0xff; buf[blen++] = qclass&0xff;
+                r.raw = malloc(blen);
+                if (r.raw) { memcpy(r.raw, buf, blen); r.raw_len = blen; }
+                return r;
+            }
+            /* DNSRR(rrname="...", type=A, rclass=IN, ttl=0, rdata="1.2.3.4")
+             * Returns raw bytes: encoded_name + type + class + ttl + rdlen + rdata */
+            if (!strcmp(name,"DNSRR")) {
+                char rrname[256] = "", rdata_s[256] = "";
+                uint16_t type = 1, rclass = 1; uint32_t ttl = 0;
+                while (L->cur.type != T_RPAREN && L->cur.type != T_EOF) {
+                    if (L->cur.type == T_IDENT) {
+                        char an[64]; strncpy(an, L->cur.s, 63); lex_adv(L);
+                        if (L->cur.type == T_EQ) {
+                            lex_adv(L);
+                            if (!strcmp(an,"rrname") && L->cur.type==T_STR)
+                                { strncpy(rrname, L->cur.s, 255); lex_adv(L); }
+                            else if (!strcmp(an,"rdata") && L->cur.type==T_STR)
+                                { strncpy(rdata_s, L->cur.s, 255); lex_adv(L); }
+                            else if (!strcmp(an,"type")) {
+                                if (L->cur.type==T_STR||L->cur.type==T_IDENT)
+                                    { type = dns_qtype_from_str(L->cur.s); lex_adv(L); }
+                                else if (L->cur.type==T_NUM)
+                                    { type = (uint16_t)L->cur.n; lex_adv(L); }
+                            } else if (!strcmp(an,"rclass")||!strcmp(an,"rdclass")) {
+                                if (L->cur.type==T_NUM) { rclass=(uint16_t)L->cur.n; lex_adv(L); }
+                                else lex_adv(L);
+                            } else if (!strcmp(an,"ttl") && L->cur.type==T_NUM)
+                                { ttl=(uint32_t)L->cur.n; lex_adv(L); }
+                            else lex_adv(L);
+                        }
+                    } else if (L->cur.type==T_STR) {
+                        strncpy(rrname, L->cur.s, 255); lex_adv(L);
+                    } else lex_adv(L);
+                    if (L->cur.type==T_COMMA) lex_adv(L);
+                }
+                if (L->cur.type==T_RPAREN) lex_adv(L);
+                uint8_t rdata_b[256]; size_t rdlen = 0;
+                if (type==1 && rdata_s[0]) {
+                    struct in_addr a; a.s_addr = 0;
+                    if (inet_aton(rdata_s, &a)) { memcpy(rdata_b, &a.s_addr, 4); rdlen = 4; }
+                } else if ((type==5||type==2||type==12) && rdata_s[0]) {
+                    rdlen = dns_encode_name(rdata_s, rdata_b, sizeof(rdata_b));
+                } else if (rdata_s[0]) {
+                    rdlen = strlen(rdata_s);
+                    if (rdlen > sizeof(rdata_b)) rdlen = sizeof(rdata_b);
+                    memcpy(rdata_b, rdata_s, rdlen);
+                }
+                uint8_t buf[512]; size_t blen = 0;
+                blen += dns_encode_name(rrname, buf+blen, sizeof(buf)-blen);
+                buf[blen++]=(type>>8)&0xff;   buf[blen++]=type&0xff;
+                buf[blen++]=(rclass>>8)&0xff; buf[blen++]=rclass&0xff;
+                buf[blen++]=(ttl>>24)&0xff;   buf[blen++]=(ttl>>16)&0xff;
+                buf[blen++]=(ttl>>8)&0xff;    buf[blen++]=ttl&0xff;
+                buf[blen++]=(rdlen>>8)&0xff;  buf[blen++]=rdlen&0xff;
+                if (rdlen) { memcpy(buf+blen, rdata_b, rdlen); blen += rdlen; }
+                r.raw = malloc(blen);
+                if (r.raw) { memcpy(r.raw, buf, blen); r.raw_len = blen; }
+                return r;
+            }
+            /* DNS(id, qr, opcode, aa, tc, rd, ra, rcode, flags,
+             *     qdcount, ancount, nscount, arcount,
+             *     qd=DNSQR(...), an=DNSRR(...), ns=DNSRR(...), ar=DNSRR(...))
+             * Builds a complete DNS message as a Raw layer. */
+            if (!strcmp(name,"DNS")) {
+                uint16_t id = (uint16_t)(rand() & 0xffff);
+                uint8_t  qr=0, opcode=0, aa=0, tc=0, rd=0, ra=0, rcode=0;
+                uint16_t qdcount=0, ancount=0, nscount=0, arcount=0;
+                uint16_t flags_ov=0; int flags_set=0;
+                int qdcnt_set=0, ancnt_set=0, nscnt_set=0, arcnt_set=0;
+                uint8_t qd_b[2048]; size_t qd_l=0;
+                uint8_t an_b[2048]; size_t an_l=0;
+                uint8_t ns_b[2048]; size_t ns_l=0;
+                uint8_t ar_b[2048]; size_t ar_l=0;
+                while (L->cur.type != T_RPAREN && L->cur.type != T_EOF) {
+                    if (L->cur.type == T_IDENT) {
+                        char an[64]; strncpy(an, L->cur.s, 63); lex_adv(L);
+                        if (L->cur.type == T_EQ) {
+                            lex_adv(L);
+                            if (!strcmp(an,"qd")||!strcmp(an,"an")||
+                                !strcmp(an,"ns")||!strcmp(an,"ar")) {
+                                EvalResult sub = eval_expr(L);
+                                if (sub.raw) {
+                                    uint8_t *dst; size_t *dl; size_t dsz;
+                                    if      (!strcmp(an,"qd")){ dst=qd_b; dl=&qd_l; dsz=sizeof(qd_b); if(!qdcnt_set) qdcount++; }
+                                    else if (!strcmp(an,"an")){ dst=an_b; dl=&an_l; dsz=sizeof(an_b); if(!ancnt_set) ancount++; }
+                                    else if (!strcmp(an,"ns")){ dst=ns_b; dl=&ns_l; dsz=sizeof(ns_b); if(!nscnt_set) nscount++; }
+                                    else                       { dst=ar_b; dl=&ar_l; dsz=sizeof(ar_b); if(!arcnt_set) arcount++; }
+                                    size_t cp = sub.raw_len < dsz-*dl ? sub.raw_len : dsz-*dl;
+                                    memcpy(dst+*dl, sub.raw, cp); *dl += cp; free(sub.raw);
+                                }
+                                if (sub.pkt) free_layer(sub.pkt);
+                            } else {
+                                EvalResult sub = eval_expr(L);
+                                uint64_t v = sub.is_num ? sub.num : 0;
+                                if (!sub.is_num && sub.raw && sub.raw_len<=8) {
+                                    for (size_t bi=0; bi<sub.raw_len; bi++) v=(v<<8)|sub.raw[bi];
+                                    free(sub.raw);
+                                }
+                                if (sub.pkt) free_layer(sub.pkt);
+                                if      (!strcmp(an,"id"))      id=(uint16_t)v;
+                                else if (!strcmp(an,"qr"))      qr=(uint8_t)(v&1);
+                                else if (!strcmp(an,"opcode"))  opcode=(uint8_t)(v&0xf);
+                                else if (!strcmp(an,"aa"))      aa=(uint8_t)(v&1);
+                                else if (!strcmp(an,"tc"))      tc=(uint8_t)(v&1);
+                                else if (!strcmp(an,"rd"))      rd=(uint8_t)(v&1);
+                                else if (!strcmp(an,"ra"))      ra=(uint8_t)(v&1);
+                                else if (!strcmp(an,"rcode"))   rcode=(uint8_t)(v&0xf);
+                                else if (!strcmp(an,"flags"))   { flags_ov=(uint16_t)v; flags_set=1; }
+                                else if (!strcmp(an,"qdcount")) { qdcount=(uint16_t)v; qdcnt_set=1; }
+                                else if (!strcmp(an,"ancount")) { ancount=(uint16_t)v; ancnt_set=1; }
+                                else if (!strcmp(an,"nscount")) { nscount=(uint16_t)v; nscnt_set=1; }
+                                else if (!strcmp(an,"arcount")) { arcount=(uint16_t)v; arcnt_set=1; }
+                            }
+                        }
+                    } else lex_adv(L);
+                    if (L->cur.type==T_COMMA) lex_adv(L);
+                }
+                if (L->cur.type==T_RPAREN) lex_adv(L);
+                uint16_t fl = flags_set ? flags_ov
+                    : (uint16_t)((qr<<15)|(opcode<<11)|(aa<<10)|(tc<<9)|(rd<<8)|(ra<<7)|(rcode&0xf));
+                layer_t *dns_l = new_layer(PROTO_DNS);
+                set_u64(dns_l, "id",      id);
+                set_u64(dns_l, "flags",   fl);
+                set_u64(dns_l, "qdcount", qdcount);
+                set_u64(dns_l, "ancount", ancount);
+                set_u64(dns_l, "nscount", nscount);
+                set_u64(dns_l, "arcount", arcount);
+                if (qd_l) set_bytes(dns_l, "_qd", qd_b, qd_l);
+                if (an_l) set_bytes(dns_l, "_an", an_b, an_l);
+                if (ns_l) set_bytes(dns_l, "_ns", ns_b, ns_l);
+                if (ar_l) set_bytes(dns_l, "_ar", ar_b, ar_l);
+                r.pkt = dns_l;
+                return r;
             }
             /* TCPSession(client_ip, server_ip, sport, dport) */
             if (!strcmp(name,"TCPSession")) {
@@ -1778,10 +2595,23 @@ static EvalResult eval_primary(Lex *L) {
 
         /* parse args into layer */
         parse_arglist(L, lay);
-        /* for dynamic protocols, resolve any ident strings as enum names */
+        /* for dynamic protocols: resolve enum names and auto-fill length fields */
         if (lay->proto >= PROTO_DYNAMIC_BASE) {
             pdef_t *def = find_pdef_by_id(lay->proto);
-            if (def) resolve_dynamic_enums(def, lay);
+            if (def) {
+                resolve_dynamic_enums(def, lay);
+                /* auto-fill bytes[lenfield] length fields so display matches wire */
+                for (int _i = 0; _i < def->nflds; _i++) {
+                    pfld_t *rf = &def->flds[_i];
+                    if (rf->ftype != PFT_BYTES_REF || !rf->lenfield[0]) continue;
+                    field_t *data_lf = find_field(lay, rf->fname);
+                    size_t dlen = 0;
+                    if (data_lf && data_lf->type==FT_BYTES && data_lf->raw) dlen = data_lf->raw_len;
+                    else if (data_lf && data_lf->type==FT_STR) dlen = strlen(data_lf->s);
+                    field_t *len_lf = find_field(lay, rf->lenfield);
+                    if (len_lf) len_lf->n = (uint64_t)dlen;
+                }
+            }
         }
         if (L->cur.type == T_RPAREN) lex_adv(L);
         r.pkt = lay;
@@ -1880,9 +2710,12 @@ static EvalResult eval_expr(Lex *L) {
 static void completion_cb(const char *buf, linenoiseCompletions *lc) {
     static const char *keywords[] = {
         "IP(","TCP(","UDP(","Ether(","ICMP(","Raw(",
-        "hexdump(","raw(","ls(","wrpcap(","load(","help()","exit()","quit()",
+        "DNS(","DNSQR(","DNSRR(","RandShort()",
+        "hexdump(","raw(","ls(","wrpcap(","load(","fromhex(","show(",
+        "help()","exit()","quit()",
         "TCPSession(","syn(","syn_ack(","tcp_ack(","client_send(","server_send(",
         "client_fin(","server_fin_ack(",
+        "protocol ",
         NULL
     };
     size_t n = strlen(buf);
@@ -1948,6 +2781,23 @@ static void eval_line(const char *src) {
     }
 }
 
+/* ─── Inline protocol definition (protocol NAME ... end) ─────────────────────── */
+
+static void eval_protocol_block(const char *name, const char *body) {
+    char posa[16384];
+    snprintf(posa, sizeof(posa), "Object<main> %s\n%s", name, body);
+    int n_before = npdefs;
+    int n = parse_posa_src(posa);
+    if (n > 0) {
+        pdef_t *def = &pdefs[n_before];
+        printf(CGRN "Protocol '%s' defined" CR " (%d field%s). "
+               "Use " CCYN "%s()" CR " and " CCYN "ls(%s)" CR ".\n",
+               name, def->nflds, def->nflds == 1 ? "" : "s", name, name);
+    } else {
+        fprintf(stderr, CBRED "Protocol '%s': no fields parsed — check syntax.\n" CR, name);
+    }
+}
+
 /* ─── Script execution ───────────────────────────────────────────────────────── */
 
 static int run_script(const char *path) {
@@ -1955,20 +2805,46 @@ static int run_script(const char *path) {
     if (!f) { fprintf(stderr, CBRED "pcapsh: cannot open script '%s': %s\n" CR, path, strerror(errno)); return 1; }
 
     char line[4096];
-    int  lineno = 0;
+    char proto_name[64] = {0};
+    char proto_body[8192] = {0};
+    int  in_proto = 0;
+
     while (fgets(line, sizeof(line), f)) {
-        lineno++;
         /* strip trailing CR/LF */
         size_t len = strlen(line);
         while (len > 0 && (line[len-1]=='\n'||line[len-1]=='\r')) line[--len]='\0';
 
-        /* skip blank lines and comments */
         char *p = line;
         while (*p==' '||*p=='\t') p++;
+
+        if (in_proto) {
+            if (strcmp(p, "end") == 0) {
+                eval_protocol_block(proto_name, proto_body);
+                in_proto = 0; proto_name[0] = 0; proto_body[0] = 0;
+            } else {
+                strncat(proto_body, line,   sizeof(proto_body) - strlen(proto_body) - 2);
+                strncat(proto_body, "\n",   sizeof(proto_body) - strlen(proto_body) - 1);
+            }
+            continue;
+        }
+
         if (!*p || *p=='#') continue;
+
+        if (strncmp(p, "protocol ", 9) == 0) {
+            in_proto = 1;
+            p += 9; while (*p==' '||*p=='\t') p++;
+            strncpy(proto_name, p, 63); proto_name[63] = 0;
+            /* strip inline comment */
+            char *hash = strchr(proto_name, '#'); if (hash) *hash = 0;
+            len = strlen(proto_name);
+            while (len > 0 && (proto_name[len-1]==' '||proto_name[len-1]=='\t')) proto_name[--len]=0;
+            continue;
+        }
 
         eval_line(line);
     }
+    if (in_proto)
+        fprintf(stderr, CBRED "pcapsh: unterminated 'protocol %s' block (missing 'end')\n" CR, proto_name);
     fclose(f);
     return 0;
 }
@@ -2003,15 +2879,34 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    /* register built-in protocol definitions */
+    /* register built-in protocols in the name/color registry */
+    proto_register(PROTO_ETHER, "Ether", CBYEL);
+    proto_register(PROTO_IP,    "IP",    CBCYN);
+    proto_register(PROTO_TCP,   "TCP",   CBGRN);
+    proto_register(PROTO_UDP,   "UDP",   CBMAG);
+    proto_register(PROTO_ICMP,  "ICMP",  CBRED);
+    proto_register(PROTO_RAW,   "Raw",   CWHT);
+    proto_register(PROTO_DNS,   "DNS",   CBCYN);
+
+    /* register built-in posa-defined protocols */
     parse_posa_src(BUILTIN_POSA);
 
-    /* auto-load ~/.pcapsh_protos.posa if it exists */
+    /* auto-load ~/.pcapsh_protos.posa; create with defaults if missing */
     {
         const char *home = getenv("HOME");
         if (home) {
             char p[512]; snprintf(p, sizeof(p), "%s/.pcapsh_protos.posa", home);
-            struct stat _s; if (stat(p, &_s) == 0) parse_posa_file(p);
+            struct stat _s;
+            if (stat(p, &_s) != 0) {
+                /* file does not exist — seed it with TFTP + Telnet examples */
+                FILE *fp = fopen(p, "w");
+                if (fp) {
+                    fputs(DEFAULT_USER_POSA, fp);
+                    fclose(fp);
+                    fprintf(stderr, CGRN "Created %s with example protocols (TFTP, Telnet).\n" CR, p);
+                }
+            }
+            parse_posa_file(p);
         }
     }
 
@@ -2065,13 +2960,44 @@ int main(int argc, char **argv) {
     linenoiseHistorySetMaxLen(500);
     linenoiseHistoryLoad(".pcapsh_history");
 
-    const char *prompt = CBCYN "pcapsh" CR CWHT " >>> " CR;
+    const char *prompt      = CBCYN "pcapsh" CR CWHT " >>> " CR;
+    const char *cont_prompt = CCYN  "...   " CR CWHT " ... " CR;
+
+    char proto_name[64]   = {0};
+    char proto_body[8192] = {0};
+    int  in_proto = 0;
 
     char *line;
-    while ((line = linenoise(prompt)) != NULL) {
+    while ((line = linenoise(in_proto ? cont_prompt : prompt)) != NULL) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
+
+        if (in_proto) {
+            if (strcmp(p, "end") == 0) {
+                linenoiseHistoryAdd(line);
+                eval_protocol_block(proto_name, proto_body);
+                in_proto = 0; proto_name[0] = 0; proto_body[0] = 0;
+            } else {
+                strncat(proto_body, line,  sizeof(proto_body) - strlen(proto_body) - 2);
+                strncat(proto_body, "\n",  sizeof(proto_body) - strlen(proto_body) - 1);
+            }
+            linenoiseFree(line);
+            continue;
+        }
+
         if (*p == '\0' || *p == '#') { linenoiseFree(line); continue; }
+
+        if (strncmp(p, "protocol ", 9) == 0) {
+            in_proto = 1;
+            p += 9; while (*p==' '||*p=='\t') p++;
+            strncpy(proto_name, p, 63); proto_name[63] = 0;
+            char *hash = strchr(proto_name, '#'); if (hash) *hash = 0;
+            size_t nl = strlen(proto_name);
+            while (nl > 0 && (proto_name[nl-1]==' '||proto_name[nl-1]=='\t')) proto_name[--nl]=0;
+            linenoiseHistoryAdd(line);
+            linenoiseFree(line);
+            continue;
+        }
 
         linenoiseHistoryAdd(line);
         eval_line(line);

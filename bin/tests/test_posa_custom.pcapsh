@@ -1,0 +1,41 @@
+# test_posa_custom.pcapsh — custom protocol via posa and protocol registry
+
+# Load the inline posa definition using -p or ~/.pcapsh_protos.posa
+# To run this test: pcapsh -p tests/custom.posa tests/test_posa_custom.pcapsh
+# Or add the Object definitions to ~/.pcapsh_protos.posa
+
+# Verify built-in posa protocols display correctly via registry
+ARP()
+NTP()
+DHCP()
+SMB2()
+DCERPC()
+LDAP()
+RADIUS()
+SYSLOG()
+
+# Enum values in posa protocols
+ARP(op=REQUEST)
+ARP(op=REPLY)
+RADIUS(code=ACCESS_ACCEPT)
+RADIUS(code=ACCESS_REJECT)
+SMB2(command=NEGOTIATE)
+SMB2(command=READ)
+SMB2(command=WRITE)
+DCERPC(type=BIND)
+DCERPC(type=REQUEST)
+NTP(li_vn_mode=CLIENT)
+NTP(li_vn_mode=SERVER)
+SYSLOG(severity=EMERGENCY)
+SYSLOG(severity=DEBUG)
+
+# Stack posa protocols under IP/TCP/UDP
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/UDP(sport=49152,dport=1812)/RADIUS(code=ACCESS_REQUEST,identifier=42,length=20))
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=514)/SYSLOG(severity=CRITICAL,facility=3))
+hexdump(IP(src="10.0.0.1",dst="129.6.15.28")/UDP(dport=123)/NTP(li_vn_mode=CLIENT))
+
+# Write posa protocols to pcapng
+wrpcap("/tmp/test_posa.pcapng", Ether(type=0x0806)/ARP(op=REQUEST,spa="10.0.0.1",tpa="10.0.0.2"))
+wrpcap("/tmp/test_posa.pcapng", IP(src="10.0.0.1",dst="129.6.15.28")/UDP(dport=123)/NTP(li_vn_mode=CLIENT))
+wrpcap("/tmp/test_posa.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=1812)/RADIUS(code=ACCESS_REQUEST,identifier=1,length=20))
+wrpcap("/tmp/test_posa.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/TCP(dport=445,flags="PA",seq=1,ack=1)/NBT()/SMB2(command=NEGOTIATE))

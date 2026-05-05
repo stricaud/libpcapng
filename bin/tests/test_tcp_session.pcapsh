@@ -1,0 +1,38 @@
+# test_tcp_session.pcapsh — TCP session tracking tests
+
+# HTTP session
+s = TCPSession("192.168.1.100", "93.184.216.34", 54321, 80)
+wrpcap("/tmp/test_http.pcapng", syn(s))
+wrpcap("/tmp/test_http.pcapng", syn_ack(s))
+wrpcap("/tmp/test_http.pcapng", tcp_ack(s))
+wrpcap("/tmp/test_http.pcapng", client_send(s, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n"))
+wrpcap("/tmp/test_http.pcapng", server_send(s, "HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello"))
+wrpcap("/tmp/test_http.pcapng", client_fin(s))
+wrpcap("/tmp/test_http.pcapng", server_fin_ack(s))
+
+# SMTP session
+smtp = TCPSession("10.0.0.5", "10.0.0.25", 49153, 25)
+wrpcap("/tmp/test_smtp.pcapng", syn(smtp))
+wrpcap("/tmp/test_smtp.pcapng", syn_ack(smtp))
+wrpcap("/tmp/test_smtp.pcapng", tcp_ack(smtp))
+wrpcap("/tmp/test_smtp.pcapng", server_send(smtp, "220 mail.example.com ESMTP\r\n"))
+wrpcap("/tmp/test_smtp.pcapng", client_send(smtp, "EHLO client.example.com\r\n"))
+wrpcap("/tmp/test_smtp.pcapng", server_send(smtp, "250-mail.example.com\r\n250 STARTTLS\r\n"))
+wrpcap("/tmp/test_smtp.pcapng", client_fin(smtp))
+wrpcap("/tmp/test_smtp.pcapng", server_fin_ack(smtp))
+
+# Two simultaneous sessions interleaved in one pcapng
+web  = TCPSession("10.0.0.1", "1.2.3.4",   49152, 80)
+db   = TCPSession("10.0.0.1", "10.0.0.10", 49154, 5432)
+wrpcap("/tmp/test_multi.pcapng", syn(web))
+wrpcap("/tmp/test_multi.pcapng", syn(db))
+wrpcap("/tmp/test_multi.pcapng", syn_ack(web))
+wrpcap("/tmp/test_multi.pcapng", syn_ack(db))
+wrpcap("/tmp/test_multi.pcapng", tcp_ack(web))
+wrpcap("/tmp/test_multi.pcapng", tcp_ack(db))
+wrpcap("/tmp/test_multi.pcapng", client_send(web, "GET /index.html HTTP/1.1\r\nHost: 1.2.3.4\r\n\r\n"))
+wrpcap("/tmp/test_multi.pcapng", client_send(db,  "SELECT 1;\r\n"))
+wrpcap("/tmp/test_multi.pcapng", client_fin(web))
+wrpcap("/tmp/test_multi.pcapng", client_fin(db))
+wrpcap("/tmp/test_multi.pcapng", server_fin_ack(web))
+wrpcap("/tmp/test_multi.pcapng", server_fin_ack(db))

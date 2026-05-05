@@ -1,0 +1,33 @@
+# test_raw_inspect.pcapsh — raw(), hexdump(), ls() inspection tests
+
+# raw() output — useful for comparing wire bytes
+raw(IP()/TCP())
+raw(IP(dst="8.8.8.8")/UDP(dport=53)/DNS(id=0x1234,rd=1,qd=DNSQR(qname="example.com")))
+raw(Ether()/IP(src="10.0.0.1",dst="10.0.0.2")/ICMP(type=8,id=1,seq=1))
+raw(IP()/UDP()/NTP(li_vn_mode=CLIENT))
+
+# hexdump() — visual byte layout
+hexdump(Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="10.0.0.1",dst="10.0.0.2")/TCP(sport=1024,dport=443,flags="S"))
+hexdump(IP(dst="8.8.8.8")/UDP(dport=53)/DNS(id=0x5678,rd=1,qd=DNSQR(qname="google.com")))
+hexdump(IP()/UDP()/DHCP(op=BOOTREQUEST,xid=0xaabbccdd))
+
+# ls() — field reference
+ls(IP)
+ls(TCP)
+ls(UDP)
+ls(ICMP)
+ls(DNS)
+ls(ARP)
+ls(NTP)
+ls(SMB2)
+ls(DCERPC)
+
+# Variable assignment and inspection
+a = IP(src="1.2.3.4",dst="5.6.7.8")/TCP(sport=1111,dport=2222,flags="PA")/"payload data"
+a
+hexdump(a)
+raw(a)
+
+b = DNS(id=0xbeef, rd=1, qd=DNSQR(qname="test.local", qtype=A))
+b
+hexdump(IP(dst="192.168.1.1")/UDP(dport=53)/b)

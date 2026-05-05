@@ -1,0 +1,83 @@
+# test_cstring_security.pcapsh — security hardening for cstring / bytes[N] / payload
+#
+# Each show() call is a distinct case.  run_tests.sh greps the combined output
+# for the expected strings listed in the comments.
+
+# ── Protocol definitions ──────────────────────────────────────────────────────
+
+protocol CStr1
+    required uint8  tag = 0
+    required cstring msg
+    required uint8  after = 0
+end
+
+protocol CStr2
+    required cstring first
+    required cstring second
+end
+
+protocol TLV
+    required uint16        length = 0
+    required bytes[length] value
+end
+
+protocol TLVAfter
+    required uint16        length = 0
+    required bytes[length] value
+    required uint8         after = 0
+end
+
+protocol WithPayload
+    required uint8    type = 0
+    required payload  data
+end
+
+# ── cstring: normal, null-terminated ─────────────────────────────────────────
+# tag=1, msg='hello'\0, after=0x42(66)
+# expect: msg='hello'  after=66
+show("CStr1", fromhex("01 68 65 6c 6c 6f 00 42"))
+
+# ── cstring: no null terminator (evil packet) ─────────────────────────────────
+# tag=1, then 3 bytes with no \0 — must not overread or advance off past len
+# expect: msg='ABC'  after=?
+show("CStr1", fromhex("01 41 42 43"))
+
+# ── cstring: empty string (null byte first) ───────────────────────────────────
+# tag=1, \0, after=0x55(85)
+# expect: msg=''  after=85
+show("CStr1", fromhex("01 00 55"))
+
+# ── cstring: two consecutive cstrings ────────────────────────────────────────
+# 'AB'\0'CDE'\0
+# expect: first='AB'  second='CDE'
+show("CStr2", fromhex("41 42 00 43 44 45 00"))
+
+# ── bytes[N]: normal length ───────────────────────────────────────────────────
+# length=3, value='ABC'
+# expect: value='ABC'
+show("TLV", fromhex("00 03 41 42 43"))
+
+# ── bytes[N]: evil 0xffff length, only 3 data bytes available ────────────────
+# must clamp to the 3 available bytes and not overread
+# expect: length=65535  value='ABC'
+show("TLV", fromhex("ff ff 41 42 43"))
+
+# ── bytes[N]: zero length ─────────────────────────────────────────────────────
+# length=0, value empty, after=0x55(85)
+# expect: length=0  after=85
+show("TLVAfter", fromhex("00 00 55"))
+
+# ── payload: text content ────────────────────────────────────────────────────
+# type=1, then 'HTTP/1.0' as ASCII
+# expect: data='HTTP
+show("WithPayload", fromhex("01 48 54 54 50 2f 31 2e 30"))
+
+# ── payload: binary content ───────────────────────────────────────────────────
+# type=2, then non-printable bytes — should show as hex, not crash
+# expect: data=<
+show("WithPayload", fromhex("02 00 01 ff fe"))
+
+# ── payload: empty (single header byte, nothing after) ───────────────────────
+# type=3, zero remaining bytes — should not crash
+# expect: type=3
+show("WithPayload", fromhex("03"))

@@ -1,0 +1,68 @@
+# test_inline_protocol.pcapsh — inline protocol definition tests
+
+# Basic protocol with integer fields and enums
+protocol MyProto
+    required uint8  type = 0
+        DATA = 1
+        CTRL = 2
+        BYE  = 3
+    required uint16 length = 0
+    required uint32 sequence = 0
+end
+
+# Verify it appears in ls()
+ls(MyProto)
+
+# Default construction
+MyProto()
+
+# With field values
+MyProto(type=DATA, length=12, sequence=1)
+MyProto(type=CTRL, sequence=99)
+MyProto(type=3, length=0, sequence=255)
+
+# Stacked under IP/UDP
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=9000)/MyProto(type=DATA,length=8,sequence=42))
+wrpcap("/tmp/test_inline.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=9000)/MyProto(type=CTRL,sequence=1))
+
+# Protocol with little-endian fields
+protocol WinHdr
+    required le_uint32 magic = 0xDEADBEEF
+    required le_uint16 version = 2
+    required le_uint16 flags = 0
+        COMPRESSED = 1
+        ENCRYPTED  = 2
+    required le_uint32 length = 0
+end
+
+WinHdr()
+WinHdr(version=3, flags=COMPRESSED, length=256)
+hexdump(IP()/TCP(dport=8080,flags="PA",seq=1,ack=1)/WinHdr(flags=ENCRYPTED,length=128))
+
+# Protocol with mac and ip4 fields
+protocol SensorBeacon
+    required mac    sensor_mac = 00:00:00:00:00:00
+    required ip4    sensor_ip  = 0.0.0.0
+    required uint32 uptime_sec = 0
+    required uint16 battery_mv = 3300
+    required uint8  seq = 0
+end
+
+SensorBeacon(sensor_mac="aa:bb:cc:dd:ee:ff", sensor_ip="192.168.1.50", uptime_sec=3600, battery_mv=3150, seq=1)
+hexdump(IP(src="192.168.1.50",dst="255.255.255.255")/UDP(dport=6666)/SensorBeacon(sensor_mac="aa:bb:cc:dd:ee:ff",sensor_ip="192.168.1.50",uptime_sec=86400,seq=5))
+
+# Multiple protocols defined and used in sequence
+protocol TLV
+    required uint8  tag = 0
+        HEARTBEAT = 1
+        DATA      = 2
+        EOF_TAG   = 255
+    required uint8  flags = 0
+    required uint16 length = 0
+    required uint32 sequence = 0
+end
+
+TLV(tag=HEARTBEAT, sequence=1)
+TLV(tag=DATA, length=16, sequence=2)
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=9001)/TLV(tag=HEARTBEAT,sequence=100))
+wrpcap("/tmp/test_inline.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=9001)/TLV(tag=DATA,length=8,sequence=1))

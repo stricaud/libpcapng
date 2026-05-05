@@ -1,0 +1,37 @@
+# test_dns.pcapsh — DNS protocol tests
+
+# Basic DNS() displays named fields (not Raw)
+a = DNS()
+# a should show <DNS id=... flags=... qdcount=... ...>
+
+# DNS query with recursion desired
+q = DNS(id=0x1234, rd=1, qd=DNSQR(qname="example.com"))
+hexdump(IP(src="192.168.1.10",dst="8.8.8.8")/UDP(sport=54321,dport=53)/q)
+
+# DNS response with A record
+r = DNS(id=0x1234, qr=1, rd=1, ra=1, qd=DNSQR(qname="example.com"), an=DNSRR(rrname="example.com", type=A, ttl=300, rdata="93.184.216.34"), qdcount=1, ancount=1)
+hexdump(IP(src="8.8.8.8",dst="192.168.1.10")/UDP(sport=53,dport=54321)/r)
+
+# DNS MX query
+mx_q = DNS(id=0x5678, rd=1, qd=DNSQR(qname="gmail.com", qtype=MX))
+hexdump(IP(dst="8.8.8.8")/UDP(dport=53)/mx_q)
+
+# DNS CNAME response
+cname_r = DNS(id=0xabcd, qr=1, rd=1, ra=1, an=DNSRR(rrname="www.example.com", type=CNAME, ttl=3600, rdata="example.com"), ancount=1)
+hexdump(IP(dst="192.168.1.10")/UDP(sport=53)/cname_r)
+
+# NXDOMAIN response
+nxdomain = DNS(id=0x9999, qr=1, rd=1, ra=1, rcode=3)
+hexdump(IP(dst="192.168.1.10")/UDP(sport=53)/nxdomain)
+
+# NS query
+ns_q = DNS(id=RandShort(), rd=1, qd=DNSQR(qname="example.com", qtype=NS))
+hexdump(IP(dst="8.8.8.8")/UDP(dport=53)/ns_q)
+
+# PTR query (reverse lookup)
+ptr_q = DNS(id=0x1111, rd=1, qd=DNSQR(qname="34.216.184.93.in-addr.arpa", qtype=PTR))
+hexdump(IP(dst="8.8.8.8")/UDP(dport=53)/ptr_q)
+
+# Write a full DNS exchange to pcapng
+wrpcap("/tmp/test_dns.pcapng", IP(src="192.168.1.10",dst="8.8.8.8")/UDP(sport=54321,dport=53)/DNS(id=0x1111,rd=1,qd=DNSQR(qname="example.com")))
+wrpcap("/tmp/test_dns.pcapng", IP(src="8.8.8.8",dst="192.168.1.10")/UDP(sport=53,dport=54321)/DNS(id=0x1111,qr=1,rd=1,ra=1,qd=DNSQR(qname="example.com"),an=DNSRR(rrname="example.com",type=A,ttl=300,rdata="93.184.216.34"),qdcount=1,ancount=1))

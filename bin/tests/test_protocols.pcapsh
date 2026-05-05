@@ -1,0 +1,72 @@
+# test_protocols.pcapsh — built-in and posa protocol tests
+
+# ── IP / TCP / UDP / ICMP ────────────────────────────────────────────���───────
+
+# TCP SYN
+hexdump(Ether()/IP(src="10.0.0.1",dst="10.0.0.2")/TCP(sport=1234,dport=80,flags="S"))
+
+# TCP PSH+ACK with payload
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/TCP(sport=1234,dport=80,flags="PA",seq=1,ack=1)/"GET / HTTP/1.0\r\n\r\n")
+
+# UDP minimal
+hexdump(IP()/UDP(sport=9000,dport=9001)/"hello udp")
+
+# ICMP ping pair
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/ICMP(type=8,id=42,seq=1)/"ping!")
+hexdump(IP(src="10.0.0.2",dst="10.0.0.1")/ICMP(type=0,id=42,seq=1)/"ping!")
+
+# ── ARP ──────────────────────────────────────────────────────────────────────
+
+hexdump(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(op=REQUEST, spa="192.168.1.10", tpa="192.168.1.1"))
+hexdump(Ether(dst="aa:bb:cc:dd:ee:ff")/ARP(op=REPLY, sha="00:11:22:33:44:55", spa="192.168.1.1", tha="aa:bb:cc:dd:ee:ff", tpa="192.168.1.10"))
+
+# ── NTP ──────────────────────────────────────────────────────────────────────
+
+hexdump(IP(src="10.0.0.1",dst="129.6.15.28")/UDP(sport=12345,dport=123)/NTP(li_vn_mode=CLIENT))
+hexdump(IP(src="129.6.15.28",dst="10.0.0.1")/UDP(sport=123,dport=12345)/NTP(li_vn_mode=SERVER,stratum=1))
+
+# ── DHCP ─────────────────────────────────────────────────────────────────────
+
+hexdump(Ether(src="aa:bb:cc:dd:ee:ff",dst="ff:ff:ff:ff:ff:ff")/IP(src="0.0.0.0",dst="255.255.255.255")/UDP(sport=68,dport=67)/DHCP(op=BOOTREQUEST,xid=0x12345678))
+hexdump(Ether(src="00:11:22:33:44:55",dst="aa:bb:cc:dd:ee:ff")/IP(src="192.168.1.1",dst="255.255.255.255")/UDP(sport=67,dport=68)/DHCP(op=BOOTREPLY,xid=0x12345678,yiaddr="192.168.1.100"))
+
+# ── GRE tunnel ───────────────────────────────────────────────────────────────
+
+hexdump(Ether()/IP(src="10.0.0.1",dst="10.0.0.2",proto=47)/GRE(proto=IPV4)/IP(src="192.168.1.1",dst="192.168.2.1")/TCP(dport=80,flags="S"))
+
+# ── VXLAN ────────────────────────────────────────────────────────────────────
+
+hexdump(Ether()/IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=4789)/VXLAN()/IP(src="172.16.0.1",dst="172.16.0.2")/TCP(dport=8080,flags="S"))
+
+# ── RADIUS ───────────────────────────────────────────────────────────────────
+
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/UDP(sport=49152,dport=1812)/RADIUS(code=ACCESS_REQUEST,identifier=1,length=20))
+hexdump(IP(src="10.0.0.2",dst="10.0.0.1")/UDP(sport=1812,dport=49152)/RADIUS(code=ACCESS_ACCEPT,identifier=1,length=20))
+
+# ── SYSLOG ───────────────────────────────────────────────────────────────────
+
+hexdump(IP(src="10.0.0.5",dst="10.0.0.1")/UDP(dport=514)/SYSLOG(severity=WARNING,facility=1))
+
+# ── SMB2 over NBT/TCP ────────────────────────────────────────────────────────
+
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/TCP(dport=445,flags="PA",seq=1,ack=1)/NBT(type=SESSION_MESSAGE,length=64)/SMB2(command=NEGOTIATE,credit_request=1))
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/TCP(dport=445,flags="PA",seq=1,ack=1)/NBT(type=SESSION_MESSAGE)/SMB2(command=READ,tree_id=1,session_id=0x100,message_id=2))
+
+# ── DCERPC ───────────────────────────────────────────────────────────────────
+
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/TCP(dport=135,flags="PA",seq=1,ack=1)/DCERPC(type=BIND,call_id=1,frag_len=72))
+hexdump(IP(src="10.0.0.2",dst="10.0.0.1")/TCP(dport=135,flags="PA",seq=1,ack=1)/DCERPC(type=BIND_ACK,call_id=1))
+
+# ── LDAP ─────────────────────────────────────────────────────────────────────
+
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/TCP(dport=389,flags="PA",seq=1,ack=1)/LDAP(op_tag=BIND_REQUEST,message_id=1))
+hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/TCP(dport=389,flags="PA",seq=1,ack=1)/LDAP(op_tag=SEARCH_REQUEST,message_id=2))
+
+# ── Write all protocols to one capture ───────────────────────────────────────
+
+wrpcap("/tmp/test_protocols.pcapng", Ether()/IP(src="10.0.0.1",dst="10.0.0.2")/TCP(sport=1234,dport=80,flags="S"))
+wrpcap("/tmp/test_protocols.pcapng", Ether()/IP(src="10.0.0.1",dst="8.8.8.8")/UDP(dport=53)/DNS(id=0x1234,rd=1,qd=DNSQR(qname="example.com")))
+wrpcap("/tmp/test_protocols.pcapng", Ether(type=0x0806)/ARP(op=REQUEST,spa="10.0.0.1",tpa="10.0.0.254"))
+wrpcap("/tmp/test_protocols.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/ICMP(type=8,id=1,seq=1))
+wrpcap("/tmp/test_protocols.pcapng", IP(src="10.0.0.1",dst="129.6.15.28")/UDP(dport=123)/NTP(li_vn_mode=CLIENT))
+wrpcap("/tmp/test_protocols.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/TCP(dport=445,flags="PA",seq=1,ack=1)/NBT()/SMB2(command=NEGOTIATE))
