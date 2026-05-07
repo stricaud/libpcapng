@@ -1,0 +1,42 @@
+# tftp_protos.posa — TFTP (RFC 1350) sub-protocol definitions
+#
+# All five types are tagged Object<TFTP> so that show("…/TFTP", data)
+# dispatches automatically on the opcode field.  Direct use still works:
+#   show("…/TFTP_ACK", data)
+
+Object<TFTP> TFTP_RRQ
+    required uint16  opcode   = 1
+        RRQ = 1
+    required cstring filename
+    required cstring mode
+
+Object<TFTP> TFTP_WRQ
+    required uint16  opcode   = 2
+        WRQ = 2
+    required cstring filename
+    required cstring mode
+
+Object<TFTP> TFTP_DATA
+    required uint16  opcode = 3
+        DATA = 3
+    required uint16  block  = 1
+    required payload data
+
+Object<TFTP> TFTP_ACK
+    required uint16 opcode = 4
+        ACK = 4
+    required uint16 block  = 0
+
+Object<TFTP> TFTP_ERROR
+    required uint16  opcode = 5
+        ERROR = 5
+    required uint16  code   = 0
+        ERR_UNDEFINED        = 0
+        ERR_FILE_NOT_FOUND   = 1
+        ERR_ACCESS_VIOLATION = 2
+        ERR_DISK_FULL        = 3
+        ERR_ILLEGAL_OP       = 4
+        ERR_UNKNOWN_TID      = 5
+        ERR_FILE_EXISTS      = 6
+        ERR_NO_SUCH_USER     = 7
+    required cstring msg

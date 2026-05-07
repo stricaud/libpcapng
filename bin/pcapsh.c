@@ -182,6 +182,8 @@ typedef struct {
     size_t   raw_len;
     int      is_raw;
     int      is_session;  /* variable holds a TCPSession reference */
+    int64_t  numval;      /* numeric value (for loop variables) */
+    int      is_num;
 } var_t;
 
 static var_t vars[MAX_VARS];
@@ -426,6 +428,7 @@ typedef struct {
 
 typedef struct {
     char   pname[64];
+    char   parent[64]; /* Object<parent> type; empty or "main" for top-level */
     int    proto_id;
     pfld_t flds[MAX_PFLDS];
     int    nflds;
@@ -502,7 +505,15 @@ static int parse_posa_src(const char *src) {
             cur->proto_id = PROTO_DYNAMIC_BASE + npdefs;
             lastfld = NULL;
             const char *q = s + 6;
-            if (*q == '<') { while (*q && *q != '>') q++; if (*q) q++; }
+            /* parse optional <parent> type — store if not "main" or empty */
+            if (*q == '<') {
+                q++;
+                int pi = 0;
+                while (*q && *q != '>' && pi < 63) cur->parent[pi++] = *q++;
+                cur->parent[pi] = '\0';
+                if (*q == '>') q++;
+                if (!strcasecmp(cur->parent, "main")) cur->parent[0] = '\0';
+            }
             while (*q==' '||*q=='\t') q++;
             int ni = 0;
             while (*q && *q!=' ' && *q!='\t' && ni<63) cur->pname[ni++] = *q++;
@@ -951,30 +962,33 @@ static const char DEFAULT_USER_POSA[] =
 "# Protocol syntax reference: https://github.com/stricaud/libpcapng/blob/main/bin/pcapsh.md\n"
 "\n"
 "# ── TFTP (RFC 1350) ─────────────────────────────────────────────────────────\n"
-"Object<main> TFTP_RRQ\n"
+"# Sub-protocols are tagged Object<TFTP> so that show(\"IP/UDP/TFTP\", data)\n"
+"# automatically dispatches on the opcode field.  Each sub-protocol can still\n"
+"# be used directly: show(\"IP/UDP/TFTP_ACK\", data).\n"
+"Object<TFTP> TFTP_RRQ\n"
 "    required uint16  opcode   = 1\n"
 "        RRQ = 1\n"
 "    required cstring filename = \n"
 "    required cstring mode     = octet\n"
 "\n"
-"Object<main> TFTP_WRQ\n"
+"Object<TFTP> TFTP_WRQ\n"
 "    required uint16  opcode   = 2\n"
 "        WRQ = 2\n"
 "    required cstring filename = \n"
 "    required cstring mode     = octet\n"
 "\n"
-"Object<main> TFTP_DATA\n"
+"Object<TFTP> TFTP_DATA\n"
 "    required uint16  opcode = 3\n"
 "        DATA = 3\n"
 "    required uint16  block  = 1\n"
 "    required payload data\n"
 "\n"
-"Object<main> TFTP_ACK\n"
+"Object<TFTP> TFTP_ACK\n"
 "    required uint16 opcode = 4\n"
 "        ACK = 4\n"
 "    required uint16 block  = 0\n"
 "\n"
-"Object<main> TFTP_ERROR\n"
+"Object<TFTP> TFTP_ERROR\n"
 "    required uint16  opcode = 5\n"
 "        ERROR = 5\n"
 "    required uint16  code   = 0\n"
@@ -1085,6 +1099,169 @@ static size_t fromhex_parse(const char *s, uint8_t *out, size_t max) {
         while (*p && *p != '\n') p++;
     }
     return n;
+}
+
+/* ─── frompcapng helper ──────────────────────────────────────────────────────── */
+
+typedef struct {
+    uint32_t  target;    /* 1-based packet number to extract */
+    uint32_t  seen;      /* packet blocks seen so far */
+    uint8_t  *buf;       /* output buffer (pre-allocated, 65535 bytes) */
+    size_t    buf_len;   /* bytes written */
+} frompcapng_ctx_t;
+
+static int frompcapng_cb(uint32_t block_counter, uint32_t block_type,
+                         uint32_t block_total_length, unsigned char *data,
+                         void *userdata)
+{
+    frompcapng_ctx_t *ctx = (frompcapng_ctx_t *)userdata;
+
+    /* count Enhanced Packet Blocks, Simple Packet Blocks, and legacy Packet Blocks */
+    if (block_type != PCAPNG_ENHANCED_PACKET_BLOCK &&
+        block_type != PCAPNG_SIMPLE_PACKET_BLOCK   &&
+        block_type != PCAPNG_PACKET_BLOCK)
+        return 0;
+
+    ctx->seen++;
+    if (ctx->seen != ctx->target)
+        return 0;
+
+    /* Extract packet data from the block.
+     * The 'data' buffer starts immediately after the 8-byte type+length header.
+     * EPB:  interface_id(4) + ts_high(4) + ts_low(4) + cap_len(4) + orig_len(4) = 20 bytes
+     * SPB:  orig_len(4) = 4 bytes header
+     * PKT (legacy): iface(2) + drops(2) + ts_high(4) + ts_low(4) + cap_len(4) + orig_len(4) = 20 bytes */
+    uint32_t cap_len = 0;
+    uint32_t hdr_offset = 0;
+
+    if (block_type == PCAPNG_ENHANCED_PACKET_BLOCK) {
+        if (block_total_length < 8 + 20) return 0;
+        pcapng_enhanced_packet_block_light_t *epb =
+            (pcapng_enhanced_packet_block_light_t *)data;
+        cap_len    = epb->captured_packet_length;
+        hdr_offset = (uint32_t)sizeof(pcapng_enhanced_packet_block_light_t);
+    } else if (block_type == PCAPNG_SIMPLE_PACKET_BLOCK) {
+        if (block_total_length < 8 + 4) return 0;
+        /* cap_len = block_total_length - 16 (type4 + len4 + orig_len4 + trailing_len4) */
+        cap_len    = block_total_length - 16;
+        hdr_offset = 4; /* skip orig_len only */
+    } else { /* PCAPNG_PACKET_BLOCK */
+        if (block_total_length < 8 + 20) return 0;
+        /* interface_id(2)+drops(2)+ts_high(4)+ts_low(4)+cap_len(4)+orig_len(4) = 20 */
+        cap_len    = *(uint32_t *)(data + 12);
+        hdr_offset = 20;
+    }
+
+    if (cap_len > 65535) cap_len = 65535;
+    size_t avail = block_total_length - 8 - hdr_offset;
+    if (cap_len > avail) cap_len = (uint32_t)avail;
+
+    memcpy(ctx->buf, data + hdr_offset, cap_len);
+    ctx->buf_len = cap_len;
+    return 0;
+}
+
+/* Read packet number 'pktnum' (1-based) from a pcapng file.
+ * Returns a malloc'd buffer of the raw packet bytes (caller must free), or NULL on error.
+ * *out_len is set to the number of bytes. */
+static uint8_t *frompcapng_read(const char *filename, uint32_t pktnum, size_t *out_len)
+{
+    *out_len = 0;
+    if (!filename || pktnum == 0) return NULL;
+
+    uint8_t *buf = malloc(65535);
+    if (!buf) return NULL;
+
+    frompcapng_ctx_t ctx = { .target = pktnum, .seen = 0, .buf = buf, .buf_len = 0 };
+    libpcapng_file_read((char *)filename, frompcapng_cb, &ctx);
+
+    if (ctx.buf_len == 0) {
+        free(buf);
+        if (ctx.seen < pktnum)
+            fprintf(stderr, CBRED "frompcapng: file has %u packet(s), requested #%u\n" CR,
+                    ctx.seen, pktnum);
+        else
+            fprintf(stderr, CBRED "frompcapng: packet #%u has zero bytes\n" CR, pktnum);
+        return NULL;
+    }
+
+    *out_len = ctx.buf_len;
+    return buf;
+}
+
+/* ─── replacepkt helper ──────────────────────────────────────────────────────── */
+
+/* Replace packet number 'pktnum' (1-based) in 'filename' with 'new_bytes'.
+ * All other blocks (SHB, IDB, non-target EPBs) are copied verbatim.
+ * The file is updated in-place via a temp file + rename. */
+static int replacepkt_in_file(const char *filename, uint32_t pktnum,
+                               const uint8_t *new_bytes, size_t new_len)
+{
+    FILE *src = fopen(filename, "rb");
+    if (!src) { perror("replacepkt: open"); return -1; }
+
+    char tmpname[520];
+    snprintf(tmpname, sizeof(tmpname), "%s.pcapsh_tmp", filename);
+    FILE *dst = fopen(tmpname, "wb");
+    if (!dst) { perror("replacepkt: tmpfile"); fclose(src); return -1; }
+
+    uint32_t pkt_seen = 0;
+    int replaced = 0;
+    uint8_t hdr[8];
+    uint8_t *body = NULL;
+    size_t body_alloc = 0;
+
+    while (fread(hdr, 1, 8, src) == 8) {
+        uint32_t block_type, block_total_length;
+        memcpy(&block_type,         hdr,     4);
+        memcpy(&block_total_length, hdr + 4, 4);
+
+        if (block_total_length < 12) {
+            fprintf(stderr, CBRED "replacepkt: corrupt block (type=0x%08x len=%u)\n" CR,
+                    block_type, block_total_length);
+            break;
+        }
+
+        size_t body_len = block_total_length - 8;
+        if (body_len > body_alloc) {
+            free(body);
+            body = malloc(body_len);
+            if (!body) { fprintf(stderr, CBRED "replacepkt: malloc failed\n" CR); break; }
+            body_alloc = body_len;
+        }
+        if (fread(body, 1, body_len, src) != body_len) break;
+
+        int is_pkt = (block_type == PCAPNG_ENHANCED_PACKET_BLOCK ||
+                      block_type == PCAPNG_SIMPLE_PACKET_BLOCK   ||
+                      block_type == PCAPNG_PACKET_BLOCK);
+        if (is_pkt) pkt_seen++;
+
+        if (is_pkt && pkt_seen == pktnum) {
+            libpcapng_write_enhanced_packet_to_file(dst, (unsigned char *)new_bytes, new_len);
+            replaced = 1;
+        } else {
+            fwrite(hdr,  1, 8,        dst);
+            fwrite(body, 1, body_len, dst);
+        }
+    }
+
+    free(body);
+    fclose(src);
+    fclose(dst);
+
+    if (!replaced) {
+        fprintf(stderr, CBRED "replacepkt: file has %u packet(s), requested #%u\n" CR,
+                pkt_seen, pktnum);
+        remove(tmpname);
+        return -1;
+    }
+
+    if (rename(tmpname, filename) != 0) {
+        perror("replacepkt: rename");
+        remove(tmpname);
+        return -1;
+    }
+    return 0;
 }
 
 /* Dissect raw bytes according to a pdef and print the fields. */
@@ -1375,6 +1552,49 @@ static size_t show_dns_layer(const uint8_t *d, size_t avail) {
     return avail;
 }
 
+/* Dispatch to a sub-protocol by reading the first field value and matching it
+   against the default of the first field in every Object<parent> sub-protocol. */
+static int dispatch_by_parent(const char *parent, const uint8_t *data, size_t len) {
+    /* find any sub-protocol to learn the first-field byte width */
+    size_t field_width = 2;
+    for (int i = 0; i < npdefs; i++) {
+        if (pdefs[i].parent[0] && !strcasecmp(pdefs[i].parent, parent) && pdefs[i].nflds > 0) {
+            switch (pdefs[i].flds[0].ftype) {
+                case PFT_U8:  field_width = 1; break;
+                case PFT_U32: field_width = 4; break;
+                case PFT_U64: field_width = 8; break;
+                default:      field_width = 2; break;
+            }
+            break;
+        }
+    }
+    if (len < field_width) {
+        fprintf(stderr, CBRED "show: '%s': truncated (%zu bytes)\n" CR, parent, len);
+        return 0;
+    }
+    uint64_t v = 0;
+    for (size_t b = 0; b < field_width; b++) v = (v << 8) | data[b];
+
+    for (int i = 0; i < npdefs; i++) {
+        pdef_t *sub = &pdefs[i];
+        if (!sub->parent[0] || strcasecmp(sub->parent, parent) != 0) continue;
+        if (sub->nflds == 0) continue;
+        if (sub->flds[0].defnum == v) {
+            dissect_pdef_layer(sub, data, len);
+            return 1;
+        }
+    }
+    fprintf(stderr, CBRED "show: '%s': no sub-protocol matches value %"PRIu64"\n" CR, parent, v);
+    return 0;
+}
+
+/* Check if 'name' is used as a parent type by any registered sub-protocol. */
+static int has_sub_protocols(const char *name) {
+    for (int i = 0; i < npdefs; i++)
+        if (pdefs[i].parent[0] && !strcasecmp(pdefs[i].parent, name)) return 1;
+    return 0;
+}
+
 /* Dispatch a single named layer; returns bytes consumed (0 = error). */
 static size_t show_layer_by_name(const char *proto, const uint8_t *d, size_t avail) {
     if (!strcasecmp(proto,"Ether") || !strcasecmp(proto,"Ethernet")) return show_ether_layer(d, avail);
@@ -1385,6 +1605,11 @@ static size_t show_layer_by_name(const char *proto, const uint8_t *d, size_t ava
     if (!strcasecmp(proto,"DNS"))                                      return show_dns_layer(d, avail);
     pdef_t *def = find_pdef_by_name(proto);
     if (def) { dissect_pdef_layer(def, d, avail); return avail; }
+    /* not a direct protocol — try parent-type dispatch (Object<proto> sub-protocols) */
+    if (has_sub_protocols(proto)) {
+        dispatch_by_parent(proto, d, avail);
+        return avail;
+    }
     fprintf(stderr, CBRED "show: unknown protocol '%s' — use ls() to see all\n" CR, proto);
     return 0;
 }
@@ -1696,6 +1921,8 @@ static void do_ls(const char *proto_arg) {
         pdef_t *d = &pdefs[i];
         if (proto_arg && strcasecmp(d->pname, proto_arg) != 0) continue;
         printf("%s%s" CR " fields:\n", proto_color(d->proto_id), d->pname);
+        if (d->parent[0])
+            printf("  " CDIM "(sub-protocol of %s)" CR "\n", d->parent);
         for (int j = 0; j < d->nflds; j++) {
             pfld_t *f = &d->flds[j];
             char typebuf[80];
@@ -1714,6 +1941,20 @@ static void do_ls(const char *proto_arg) {
             printf("\n");
         }
         if (!proto_arg) printf("\n");
+    }
+    /* if proto_arg names a parent type, list its sub-protocols */
+    if (proto_arg && has_sub_protocols(proto_arg)) {
+        printf(CBOLD "%s" CR " sub-protocols:\n", proto_arg);
+        for (int i = 0; i < npdefs; i++) {
+            if (pdefs[i].parent[0] && !strcasecmp(pdefs[i].parent, proto_arg)) {
+                pdef_t *sub = &pdefs[i];
+                printf("  " CCYN "%-20s" CR, sub->pname);
+                if (sub->nflds > 0)
+                    printf(" (first field %s = %llu)", sub->flds[0].fname,
+                           (unsigned long long)sub->flds[0].defnum);
+                printf("\n");
+            }
+        }
     }
 }
 
@@ -1782,11 +2023,30 @@ static var_t *var_set_raw(const char *name, const uint8_t *data, size_t len) {
     return v;
 }
 
+static var_t *var_set_num(const char *name, int64_t val) {
+    var_t *v = var_find(name);
+    if (!v) {
+        if (nvars >= MAX_VARS) { fprintf(stderr, "too many variables\n"); return NULL; }
+        v = &vars[nvars++];
+        memset(v, 0, sizeof(*v));
+        strncpy(v->name, name, 63);
+    } else {
+        if (v->pkt) { free_layer(v->pkt); v->pkt = NULL; }
+        if (v->raw) { free(v->raw);       v->raw = NULL; }
+    }
+    v->used   = 1;
+    v->numval = val;
+    v->is_num = 1;
+    v->is_raw = 0;
+    return v;
+}
+
 /* ─── Tokenizer ─────────────────────────────────────────────────────────────── */
 
 typedef enum {
     T_EOF, T_IDENT, T_NUM, T_STR,
-    T_LPAREN, T_RPAREN, T_COMMA, T_EQ, T_SLASH, T_DOT
+    T_LPAREN, T_RPAREN, T_COMMA, T_EQ, T_SLASH, T_DOT,
+    T_VAR   /* $ident — loop/numeric variable reference */
 } TT;
 
 typedef struct {
@@ -1863,6 +2123,15 @@ static void lex_adv(Lex *L) {
         L->cur.type = T_NUM; return;
     }
 
+    if (c == '$') {
+        L->pos++; /* skip past '$' */
+        int i = 0;
+        while (isalnum((unsigned char)L->src[L->pos]) || L->src[L->pos]=='_')
+            L->cur.s[i++] = L->src[L->pos++];
+        L->cur.s[i] = '\0';
+        L->cur.type = T_VAR; return;
+    }
+
     if (isalpha(c) || c == '_') {
         int i = 0;
         while (isalnum(L->src[L->pos]) || L->src[L->pos]=='_')
@@ -1915,6 +2184,11 @@ static void apply_field(layer_t *l, const char *name, Lex *L) {
     } else if (L->cur.type == T_IDENT) {
         /* variable reference (e.g. flags=SYN not supported yet, treat as str) */
         set_str(l, name, L->cur.s);
+        lex_adv(L);
+    } else if (L->cur.type == T_VAR) {
+        /* $varname — look up numeric variable and use its value */
+        var_t *v = var_find(L->cur.s);
+        if (v && v->is_num) set_u64(l, name, (uint64_t)(int64_t)v->numval);
         lex_adv(L);
     }
 }
@@ -2077,6 +2351,20 @@ static EvalResult eval_primary(Lex *L) {
         return r;
     }
 
+    if (L->cur.type == T_VAR) {
+        /* $varname — look up numeric (loop) variable */
+        var_t *v = var_find(L->cur.s);
+        lex_adv(L);
+        if (!v || !v->is_num) {
+            fprintf(stderr, CBRED "pcapsh: undefined variable '$%s'\n" CR,
+                    v ? v->name : "?");
+            r.is_none = 1; return r;
+        }
+        r.num = (uint64_t)(int64_t)v->numval;
+        r.is_num = 1;
+        return r;
+    }
+
     if (L->cur.type != T_IDENT) {
         if (L->err[0]) fprintf(stderr, CBRED "Error: %s\n" CR, L->err);
         r.is_none = 1; return r;
@@ -2187,6 +2475,76 @@ static EvalResult eval_primary(Lex *L) {
                 printf(CMAG "<raw %zu bytes>" CR "\n", n);
                 r.raw = buf; r.raw_len = n; r.is_raw = 1;
                 return r;
+            }
+            /* frompcapng("file.pcapng", packet_number=N) — extract raw bytes from pcapng */
+            if (!strcmp(name,"frompcapng")) {
+                char filename[512] = "";
+                uint32_t pktnum = 1;
+                if (L->cur.type == T_STR) { strncpy(filename, L->cur.s, 511); lex_adv(L); }
+                if (L->cur.type == T_COMMA) lex_adv(L);
+                /* accept positional expr or keyword packet_number=expr ($var, literal, ...) */
+                if (L->cur.type == T_IDENT && !strcmp(L->cur.s, "packet_number")) {
+                    lex_adv(L); /* skip "packet_number" */
+                    if (L->cur.type == T_EQ) lex_adv(L);
+                }
+                if (L->cur.type != T_RPAREN && L->cur.type != T_EOF) {
+                    EvalResult nr = eval_primary(L);
+                    if (nr.is_num) pktnum = (uint32_t)(int64_t)(int64_t)nr.num;
+                }
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                if (!filename[0]) {
+                    fprintf(stderr, CBRED "frompcapng: filename required\n" CR);
+                    r.is_none = 1; return r;
+                }
+                size_t n = 0;
+                uint8_t *buf = frompcapng_read(filename, pktnum, &n);
+                if (!buf) { r.is_none = 1; return r; }
+                printf(CMAG "<raw %zu bytes from %s packet #%u>" CR "\n", n, filename, pktnum);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                return r;
+            }
+            /* replacepkt("file.pcapng", N, new_pkt) — replace packet N in-place */
+            if (!strcmp(name,"replacepkt")) {
+                char filename[512] = "";
+                uint32_t pktnum = 1;
+                if (L->cur.type == T_STR) { strncpy(filename, L->cur.s, 511); lex_adv(L); }
+                if (L->cur.type == T_COMMA) lex_adv(L);
+                if (L->cur.type != T_RPAREN && L->cur.type != T_EOF) {
+                    EvalResult nr = eval_primary(L);
+                    if (nr.is_num) pktnum = (uint32_t)(int64_t)nr.num;
+                }
+                if (L->cur.type == T_COMMA) lex_adv(L);
+                EvalResult arg = eval_expr(L);
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                if (!filename[0]) {
+                    fprintf(stderr, CBRED "replacepkt: filename required\n" CR);
+                    if (arg.pkt) free_layer(arg.pkt);
+                    if (arg.raw) free(arg.raw);
+                    r.is_none = 1; return r;
+                }
+                if (!arg.pkt && !arg.raw) {
+                    fprintf(stderr, CBRED "replacepkt: packet required as third argument\n" CR);
+                    r.is_none = 1; return r;
+                }
+                uint8_t *buf = malloc(MAX_PKT_BYTES); size_t len = 0;
+                if (!buf) {
+                    if (arg.pkt) free_layer(arg.pkt);
+                    if (arg.raw) free(arg.raw);
+                    r.is_none = 1; return r;
+                }
+                if (arg.pkt) {
+                    len = pkt_to_raw_ex(arg.pkt, buf, MAX_PKT_BYTES, 1);
+                    free_layer(arg.pkt);
+                } else {
+                    len = arg.raw_len < MAX_PKT_BYTES ? arg.raw_len : MAX_PKT_BYTES;
+                    memcpy(buf, arg.raw, len);
+                    free(arg.raw);
+                }
+                if (replacepkt_in_file(filename, pktnum, buf, len) == 0)
+                    printf(CGRN "Replaced packet #%u in %s (%zu bytes)\n" CR,
+                           pktnum, filename, len);
+                free(buf);
+                r.is_none = 1; return r;
             }
             /* show("IP/UDP/DNS", raw) — dissect raw bytes through a protocol stack */
             if (!strcmp(name,"show")) {
@@ -2317,6 +2675,8 @@ static EvalResult eval_primary(Lex *L) {
                        "  " CCYN "wrpcap" CR "(\"file\",pkt)        write/append pcapng\n"
                        "  " CCYN "load" CR "(\"file.posa\")         load protocol defs\n"
                        "  " CCYN "fromhex" CR "(\"hex\")             parse hex dump → raw bytes\n"
+                       "  " CCYN "frompcapng" CR "(\"file\",N)       read packet #N from pcapng → raw bytes\n"
+                       "  " CCYN "replacepkt" CR "(\"file\",N,pkt)   replace packet #N in pcapng in-place\n"
                        "  " CCYN "show" CR "(\"IP/UDP/Proto\", raw)  dissect stacked layers\n"
                        "  " CCYN "help" CR "()                    this message\n"
                        "  " CCYN "exit" CR "() / " CCYN "quit" CR "()        exit\n"
@@ -2711,7 +3071,7 @@ static void completion_cb(const char *buf, linenoiseCompletions *lc) {
     static const char *keywords[] = {
         "IP(","TCP(","UDP(","Ether(","ICMP(","Raw(",
         "DNS(","DNSQR(","DNSRR(","RandShort()",
-        "hexdump(","raw(","ls(","wrpcap(","load(","fromhex(","show(",
+        "hexdump(","raw(","ls(","wrpcap(","load(","fromhex(","frompcapng(","replacepkt(","show(",
         "help()","exit()","quit()",
         "TCPSession(","syn(","syn_ack(","tcp_ack(","client_send(","server_send(",
         "client_fin(","server_fin_ack(",
@@ -2761,6 +3121,93 @@ static void completion_cb(const char *buf, linenoiseCompletions *lc) {
     }
 }
 
+/* ─── For-loop support ───────────────────────────────────────────────────────── */
+
+static void eval_line(const char *src); /* forward declaration */
+
+/* Parse: for $varname in range([start,] stop [, step]):
+ * Returns 1 on success, 0 if the line is not a for-loop header. */
+static int parse_for_header(const char *line,
+                            char *varname,       /* out: variable name (no $) */
+                            int64_t *start_out,
+                            int64_t *stop_out,
+                            int64_t *step_out)
+{
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "for", 3) != 0) return 0;
+    p += 3;
+    if (*p != ' ' && *p != '\t') return 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '$') return 0;
+    p++;
+    int i = 0;
+    while ((isalnum((unsigned char)*p) || *p == '_') && i < 63)
+        varname[i++] = *p++;
+    varname[i] = '\0';
+    if (i == 0) return 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "in", 2) != 0) return 0;
+    p += 2;
+    if (*p != ' ' && *p != '\t') return 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "range", 5) != 0) return 0;
+    p += 5;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '(') return 0;
+    p++;
+    int64_t args[3]; int nargs = 0;
+    while (nargs < 3) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == ')') break;
+        char *end;
+        args[nargs++] = strtoll(p, &end, 10);
+        if (end == p) return 0;
+        p = end;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == ',') { p++; continue; }
+        if (*p == ')') break;
+        return 0;
+    }
+    if (*p != ')') return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return 0;
+    if (nargs == 0) return 0;
+    if (nargs == 1) { *start_out = 1; *stop_out = args[0] + 1; *step_out = 1; }
+    else if (nargs == 2) { *start_out = args[0]; *stop_out = args[1]; *step_out = 1; }
+    else                 { *start_out = args[0]; *stop_out = args[1]; *step_out = args[2]; }
+    if (*step_out == 0) return 0;
+    return 1;
+}
+
+/* Execute the body string (newline-separated lines) for each value in the range,
+ * setting $varname to each value before evaluating the body. */
+static void run_for_body(const char *varname, int64_t start, int64_t stop, int64_t step,
+                         const char *body)
+{
+    /* iterate while (step>0 ? i < stop : i > stop) */
+    int64_t i = start;
+    while ((step > 0 && i < stop) || (step < 0 && i > stop)) {
+        var_set_num(varname, i);
+        /* execute each line of the body */
+        char buf[4096];
+        const char *p = body;
+        while (*p) {
+            const char *nl = strchr(p, '\n');
+            size_t len = nl ? (size_t)(nl - p) : strlen(p);
+            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+            memcpy(buf, p, len); buf[len] = '\0';
+            /* skip blank/comment lines */
+            char *q = buf; while (*q == ' ' || *q == '\t') q++;
+            if (*q && *q != '#') eval_line(buf);
+            p += len + (nl ? 1 : 0);
+            if (!nl) break;
+        }
+        i += step;
+    }
+}
+
 /* ─── Line evaluator (shared by REPL and script mode) ───────────────────────── */
 
 static void eval_line(const char *src) {
@@ -2773,9 +3220,10 @@ static void eval_line(const char *src) {
             else if (r.raw) { free(r.raw); }
         }
         /* skip semicolons / trailing junk between statements */
-        while (L.cur.type != T_EOF &&
+        while (L.cur.type != T_EOF  &&
                L.cur.type != T_IDENT &&
-               L.cur.type != T_NUM   &&
+               L.cur.type != T_VAR  &&
+               L.cur.type != T_NUM  &&
                L.cur.type != T_STR)
             lex_adv(&L);
     }
@@ -2805,9 +3253,14 @@ static int run_script(const char *path) {
     if (!f) { fprintf(stderr, CBRED "pcapsh: cannot open script '%s': %s\n" CR, path, strerror(errno)); return 1; }
 
     char line[4096];
-    char proto_name[64] = {0};
+    char proto_name[64]   = {0};
     char proto_body[8192] = {0};
     int  in_proto = 0;
+
+    char for_var[64]        = {0};
+    char for_body[65536]    = {0};
+    int64_t for_start = 0, for_stop = 0, for_step = 1;
+    int  in_for = 0;
 
     while (fgets(line, sizeof(line), f)) {
         /* strip trailing CR/LF */
@@ -2822,10 +3275,27 @@ static int run_script(const char *path) {
                 eval_protocol_block(proto_name, proto_body);
                 in_proto = 0; proto_name[0] = 0; proto_body[0] = 0;
             } else {
-                strncat(proto_body, line,   sizeof(proto_body) - strlen(proto_body) - 2);
-                strncat(proto_body, "\n",   sizeof(proto_body) - strlen(proto_body) - 1);
+                strncat(proto_body, line, sizeof(proto_body) - strlen(proto_body) - 2);
+                strncat(proto_body, "\n", sizeof(proto_body) - strlen(proto_body) - 1);
             }
             continue;
+        }
+
+        if (in_for) {
+            /* body lines must be indented; a non-empty, non-indented line ends the loop */
+            int indented = (line[0] == ' ' || line[0] == '\t');
+            if (!indented && *p && *p != '#') {
+                /* flush and execute the loop, then fall through to process this line */
+                run_for_body(for_var, for_start, for_stop, for_step, for_body);
+                in_for = 0; for_var[0] = 0; for_body[0] = 0;
+                /* fall through — process 'line' normally below */
+            } else {
+                if (*p && *p != '#') {
+                    strncat(for_body, line, sizeof(for_body) - strlen(for_body) - 2);
+                    strncat(for_body, "\n", sizeof(for_body) - strlen(for_body) - 1);
+                }
+                continue;
+            }
         }
 
         if (!*p || *p=='#') continue;
@@ -2834,10 +3304,18 @@ static int run_script(const char *path) {
             in_proto = 1;
             p += 9; while (*p==' '||*p=='\t') p++;
             strncpy(proto_name, p, 63); proto_name[63] = 0;
-            /* strip inline comment */
             char *hash = strchr(proto_name, '#'); if (hash) *hash = 0;
             len = strlen(proto_name);
             while (len > 0 && (proto_name[len-1]==' '||proto_name[len-1]=='\t')) proto_name[--len]=0;
+            continue;
+        }
+
+        char tmp_var[64]; int64_t ts, te, tstep;
+        if (parse_for_header(p, tmp_var, &ts, &te, &tstep)) {
+            in_for = 1;
+            strncpy(for_var, tmp_var, 63); for_var[63] = 0;
+            for_start = ts; for_stop = te; for_step = tstep;
+            for_body[0] = 0;
             continue;
         }
 
@@ -2845,6 +3323,8 @@ static int run_script(const char *path) {
     }
     if (in_proto)
         fprintf(stderr, CBRED "pcapsh: unterminated 'protocol %s' block (missing 'end')\n" CR, proto_name);
+    if (in_for)
+        run_for_body(for_var, for_start, for_stop, for_step, for_body);
     fclose(f);
     return 0;
 }
@@ -2967,8 +3447,14 @@ int main(int argc, char **argv) {
     char proto_body[8192] = {0};
     int  in_proto = 0;
 
+    char for_var[64]     = {0};
+    char for_body[65536] = {0};
+    int64_t for_start = 0, for_stop = 0, for_step = 1;
+    int  in_for = 0;
+
     char *line;
-    while ((line = linenoise(in_proto ? cont_prompt : prompt)) != NULL) {
+    int continue_mode = 0; /* show cont_prompt when collecting multi-line constructs */
+    while ((line = linenoise(continue_mode ? cont_prompt : prompt)) != NULL) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
 
@@ -2977,9 +3463,26 @@ int main(int argc, char **argv) {
                 linenoiseHistoryAdd(line);
                 eval_protocol_block(proto_name, proto_body);
                 in_proto = 0; proto_name[0] = 0; proto_body[0] = 0;
+                continue_mode = 0;
             } else {
-                strncat(proto_body, line,  sizeof(proto_body) - strlen(proto_body) - 2);
-                strncat(proto_body, "\n",  sizeof(proto_body) - strlen(proto_body) - 1);
+                strncat(proto_body, line, sizeof(proto_body) - strlen(proto_body) - 2);
+                strncat(proto_body, "\n", sizeof(proto_body) - strlen(proto_body) - 1);
+            }
+            linenoiseFree(line);
+            continue;
+        }
+
+        if (in_for) {
+            if (*p == '\0') {
+                /* blank line — end of loop body, execute */
+                linenoiseHistoryAdd(line);
+                run_for_body(for_var, for_start, for_stop, for_step, for_body);
+                in_for = 0; for_var[0] = 0; for_body[0] = 0;
+                continue_mode = 0;
+            } else {
+                linenoiseHistoryAdd(line);
+                strncat(for_body, line, sizeof(for_body) - strlen(for_body) - 2);
+                strncat(for_body, "\n", sizeof(for_body) - strlen(for_body) - 1);
             }
             linenoiseFree(line);
             continue;
@@ -2988,12 +3491,23 @@ int main(int argc, char **argv) {
         if (*p == '\0' || *p == '#') { linenoiseFree(line); continue; }
 
         if (strncmp(p, "protocol ", 9) == 0) {
-            in_proto = 1;
+            in_proto = 1; continue_mode = 1;
             p += 9; while (*p==' '||*p=='\t') p++;
             strncpy(proto_name, p, 63); proto_name[63] = 0;
             char *hash = strchr(proto_name, '#'); if (hash) *hash = 0;
             size_t nl = strlen(proto_name);
             while (nl > 0 && (proto_name[nl-1]==' '||proto_name[nl-1]=='\t')) proto_name[--nl]=0;
+            linenoiseHistoryAdd(line);
+            linenoiseFree(line);
+            continue;
+        }
+
+        char tmp_var[64]; int64_t ts, te, tstep;
+        if (parse_for_header(p, tmp_var, &ts, &te, &tstep)) {
+            in_for = 1; continue_mode = 1;
+            strncpy(for_var, tmp_var, 63); for_var[63] = 0;
+            for_start = ts; for_stop = te; for_step = tstep;
+            for_body[0] = 0;
             linenoiseHistoryAdd(line);
             linenoiseFree(line);
             continue;

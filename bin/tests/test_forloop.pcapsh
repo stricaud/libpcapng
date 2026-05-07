@@ -1,0 +1,37 @@
+# test_forloop.pcapsh — for-loop and frompcapng tests
+#
+# Creates a 3-packet pcapng, then reads it back with several loop forms to verify:
+#   • range(N) starts at 1 and runs N times (not 0..N-1)
+#   • range(start, stop) uses exclusive stop like Python
+#   • range(start, stop, step) works with negative step (reverse)
+#   • $var resolves correctly in frompcapng() and protocol field arguments
+
+# ── Setup: write 3 packets with distinct source IPs ───────────────────────────
+
+wrpcap("/tmp/pcapsh_forloop.pcapng", IP(src="10.1.1.1",dst="10.1.1.1")/UDP(dport=1001))
+wrpcap("/tmp/pcapsh_forloop.pcapng", IP(src="10.1.1.2",dst="10.1.1.2")/UDP(dport=1002))
+wrpcap("/tmp/pcapsh_forloop.pcapng", IP(src="10.1.1.3",dst="10.1.1.3")/UDP(dport=1003))
+
+# ── range(N): 1-based, runs N times ──────────────────────────────────────────
+# range(3) → $i = 1, 2, 3
+
+for $i in range(3):
+    show("Ether/IP/UDP", frompcapng("/tmp/pcapsh_forloop.pcapng", $i))
+
+# ── range(start, stop): exclusive stop ───────────────────────────────────────
+# range(2, 4) → $i = 2, 3 (packet 1 is NOT read)
+
+for $i in range(2, 4):
+    show("Ether/IP", frompcapng("/tmp/pcapsh_forloop.pcapng", $i))
+
+# ── range(start, stop, step): negative step ──────────────────────────────────
+# range(3, 0, -1) → $i = 3, 2, 1 (reverse order)
+
+for $i in range(3, 0, -1):
+    show("Ether/IP", frompcapng("/tmp/pcapsh_forloop.pcapng", $i))
+
+# ── $var in protocol field argument ──────────────────────────────────────────
+# Build 3 UDP packets with dport=$i; range(3) → dport=1, 2, 3
+
+for $i in range(3):
+    show("IP/UDP", IP(src="1.2.3.4")/UDP(dport=$i))

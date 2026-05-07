@@ -137,55 +137,54 @@ the numeric value is annotated with its name — the same behaviour Spicy achiev
 
 ---
 
-## Part 4 — Multiple packet types
+## Part 4 — Multiple packet types with automatic dispatch
 
 In Spicy a single `Packet` unit has a `switch(self.opcode)` that dispatches to sub-units at
-parse time. posa uses fixed-width fields and has no runtime dispatch; instead you define a
-**separate protocol for each packet shape** and choose the right one when you call `show()` or
-build a packet.
+parse time. posa achieves the same with **`Object<parent>`** — tagging each sub-protocol with
+its parent name enables automatic opcode-based dispatch in `show()`.
 
-This is the key architectural difference:
+The key idea: declare each packet shape as `Object<TFTP>` instead of `Object<main>`. pcapsh
+then dispatches `show("…/TFTP", data)` to the matching sub-protocol by reading the first field
+and comparing it to each sub-protocol's default value.
 
 | Concept | Spicy | pcapsh/posa |
 |---------|-------|-------------|
-| Dispatch | `switch(self.opcode)` in grammar | caller picks the right protocol name |
-| Variable-length fields | `bytes &until=b"\x00"` | not supported — use `string` or `bytes<N>` |
-| Sub-units | named types referenced in switch | separate `Object<main>` / `protocol` blocks |
+| Dispatch | `switch(self.opcode)` in grammar | `Object<parent>` grouping + first-field match |
+| Variable-length fields | `bytes &until=b"\x00"` | `cstring` (null-terminated), `payload` (rest of packet) |
+| Sub-units | named types referenced in switch | `Object<TFTP>` sub-protocols |
 
-### Define each packet shape
+### Define each packet shape as `Object<TFTP>`
+
+In `.posa` format (or via `load()`):
 
 ```
-# TFTP_RRQ / TFTP_WRQ
-# RFC 1350: opcode(2) + filename(null-term) + mode(null-term).
-# posa does not support null-terminated strings; we use a fixed bytes<64> field
-# for the filename and a string field for the mode.
-protocol TFTP_RRQ
+Object<TFTP> TFTP_RRQ
     required uint16  opcode   = 1
         RRQ = 1
+    required cstring filename
+    required cstring mode
+
+Object<TFTP> TFTP_WRQ
+    required uint16  opcode   = 2
         WRQ = 2
-    required bytes<64> filename
-    required string    mode
-end
+    required cstring filename
+    required cstring mode
 
-# TFTP_DATA: opcode(2) + block(2) + data(variable — not in fixed header)
-protocol TFTP_DATA
-    required uint16 opcode = 3
+Object<TFTP> TFTP_DATA
+    required uint16  opcode = 3
         DATA = 3
-    required uint16 block  = 0
-end
+    required uint16  block  = 1
+    required payload data
 
-# TFTP_ACK: opcode(2) + block(2)
-protocol TFTP_ACK
+Object<TFTP> TFTP_ACK
     required uint16 opcode = 4
         ACK = 4
     required uint16 block  = 0
-end
 
-# TFTP_ERROR: opcode(2) + error_code(2) + message(string)
-protocol TFTP_ERROR
-    required uint16 opcode = 5
+Object<TFTP> TFTP_ERROR
+    required uint16  opcode = 5
         ERROR = 5
-    required uint16 code   = 0
+    required uint16  code   = 0
         ERR_UNDEFINED        = 0
         ERR_FILE_NOT_FOUND   = 1
         ERR_ACCESS_VIOLATION = 2
@@ -194,23 +193,51 @@ protocol TFTP_ERROR
         ERR_UNKNOWN_TID      = 5
         ERR_FILE_EXISTS      = 6
         ERR_NO_SUCH_USER     = 7
-    required string  msg
-end
+    required cstring msg
 ```
 
-### Dissect by choosing the right type
+### Automatic dispatch — same as Spicy
 
 ```
 # Spicy:  spicy-driver dispatches automatically on opcode
-# pcapsh: you pick the type that matches what you captured
+# pcapsh: Object<TFTP> grouping gives the same behaviour
 
-pcapsh >>> show("IP/UDP/TFTP_ACK",   fromhex("45 00 00 1c ... 00 04 00 07"))
-pcapsh >>> show("IP/UDP/TFTP_DATA",  fromhex("45 00 00 2c ... 00 03 00 01 ..."))
-pcapsh >>> show("IP/UDP/TFTP_ERROR", fromhex("45 00 00 20 ... 00 05 00 01 ..."))
+pcapsh >>> show("TFTP", fromhex("00 04 00 07"))
+<TFTP_ACK opcode=ACK(4) block=7 |
+
+pcapsh >>> show("TFTP", fromhex("00 03 00 01 48 65 6c 6c 6f"))
+<TFTP_DATA opcode=DATA(3) block=1 data='Hello' |
+
+pcapsh >>> show("TFTP", fromhex("00 05 00 01 46 69 6c 65 20 6e 6f 74 20 66 6f 75 6e 64 00"))
+<TFTP_ERROR opcode=ERROR(5) code=ERR_FILE_NOT_FOUND(1) msg='File not found' |
 ```
 
-When you already know the packet type (from a Wireshark filter, a port, or the opcode byte you
-read first) this is no less ergonomic than Spicy's runtime dispatch.
+The same works stacked under IP/UDP:
+
+```
+pcapsh >>> show("IP/UDP/TFTP", fromhex("45 00 00 20 ... 00 04 00 07"))
+<IP src=192.168.1.1 dst=192.168.1.2 … |
+<UDP sport=69 dport=69 … |
+<TFTP_ACK opcode=ACK(4) block=7 |
+```
+
+`ls(TFTP)` shows all sub-protocols and their dispatch values:
+
+```
+pcapsh >>> ls(TFTP)
+TFTP sub-protocols:
+  TFTP_RRQ             (first field opcode = 1)
+  TFTP_WRQ             (first field opcode = 2)
+  TFTP_DATA            (first field opcode = 3)
+  TFTP_ACK             (first field opcode = 4)
+  TFTP_ERROR           (first field opcode = 5)
+```
+
+Direct sub-protocol names still work alongside dispatch:
+
+```
+pcapsh >>> show("IP/UDP/TFTP_ACK", fromhex("… 00 04 00 07"))
+```
 
 ### Build a complete TFTP exchange
 
@@ -242,25 +269,38 @@ because the layer types and port 69 are standard.
 Spicy ends with a single unified grammar file. The posa equivalent is what lives in
 `~/.pcapsh_protos.posa` — auto-loaded at every pcapsh startup.
 
-The file is created automatically with TFTP and Telnet stubs on first run. Here is the full
-TFTP definition you can paste or extend in that file:
+The file is created automatically on first run with TFTP and Telnet definitions. The full TFTP
+block uses `Object<TFTP>` so that `show("TFTP", …)` dispatches automatically:
 
 ```
 # ── TFTP (RFC 1350) ─────────────────────────────────────────────────────────
-Object<main> TFTP_ACK
+Object<TFTP> TFTP_RRQ
+    required uint16  opcode   = 1
+        RRQ = 1
+    required cstring filename
+    required cstring mode
+
+Object<TFTP> TFTP_WRQ
+    required uint16  opcode   = 2
+        WRQ = 2
+    required cstring filename
+    required cstring mode
+
+Object<TFTP> TFTP_DATA
+    required uint16  opcode = 3
+        DATA = 3
+    required uint16  block  = 1
+    required payload data
+
+Object<TFTP> TFTP_ACK
     required uint16 opcode = 4
         ACK = 4
-    required uint16 block = 0
+    required uint16 block  = 0
 
-Object<main> TFTP_DATA
-    required uint16 opcode = 3
-        DATA = 3
-    required uint16 block = 0
-
-Object<main> TFTP_ERROR
-    required uint16 opcode = 5
+Object<TFTP> TFTP_ERROR
+    required uint16  opcode = 5
         ERROR = 5
-    required uint16 code = 0
+    required uint16  code   = 0
         ERR_UNDEFINED        = 0
         ERR_FILE_NOT_FOUND   = 1
         ERR_ACCESS_VIOLATION = 2
@@ -269,35 +309,32 @@ Object<main> TFTP_ERROR
         ERR_UNKNOWN_TID      = 5
         ERR_FILE_EXISTS      = 6
         ERR_NO_SUCH_USER     = 7
-    required string msg
-
-Object<main> TFTP_RRQ
-    required uint16    opcode   = 1
-        RRQ = 1
-    required bytes<64> filename
-    required string    mode
-
-Object<main> TFTP_WRQ
-    required uint16    opcode   = 2
-        WRQ = 2
-    required bytes<64> filename
-    required string    mode
+    required cstring msg
 ```
 
-After adding this, every new pcapsh session has `TFTP_ACK`, `TFTP_DATA`, `TFTP_ERROR`,
-`TFTP_RRQ`, and `TFTP_WRQ` available:
+After startup every pcapsh session has `TFTP_ACK`, `TFTP_DATA`, `TFTP_ERROR`, `TFTP_RRQ`, and
+`TFTP_WRQ` available, plus automatic dispatch through the `TFTP` parent name:
 
 ```
 pcapsh >>> ls(TFTP_ACK)
 TFTP_ACK fields:
+  (sub-protocol of TFTP)
   opcode  uint16  [ACK=0x4]
   block   uint16
 
 pcapsh >>> TFTP_ACK(block=42)
 <TFTP_ACK opcode=4 block=42>
 
-pcapsh >>> show("TFTP_ERROR", fromhex("00 05 00 01"))
+pcapsh >>> show("TFTP", fromhex("00 05 00 01"))
 <TFTP_ERROR opcode=ERROR(5) code=ERR_FILE_NOT_FOUND(1) msg='' |
+
+pcapsh >>> ls(TFTP)
+TFTP sub-protocols:
+  TFTP_RRQ             (first field opcode = 1)
+  TFTP_WRQ             (first field opcode = 2)
+  TFTP_DATA            (first field opcode = 3)
+  TFTP_ACK             (first field opcode = 4)
+  TFTP_ERROR           (first field opcode = 5)
 ```
 
 ---
@@ -306,10 +343,10 @@ pcapsh >>> show("TFTP_ERROR", fromhex("00 05 00 01"))
 
 | Feature | Spicy | pcapsh/posa |
 |---------|-------|-------------|
-| Field types | rich type system incl. `bytes &until`, bitfields, vectors | fixed-width integers, mac, ip4, string, bytes\<N\> |
-| Runtime dispatch | `switch(self.field)` in grammar | caller selects the right protocol by name |
-| Variable-length fields | `bytes &eod`, `bytes &until=b"\x00"` | not supported in posa |
-| Null-terminated strings | `bytes &until=b"\x00"` | `string` field (null-terminated on wire) |
+| Field types | rich type system incl. `bytes &until`, bitfields, vectors | fixed-width integers, mac, ip4, cstring, payload, bytes\<N\>, bytes[field] |
+| Runtime dispatch | `switch(self.field)` in grammar | `Object<parent>` grouping — `show("TFTP", …)` dispatches on first field |
+| Variable-length fields | `bytes &eod`, `bytes &until=b"\x00"` | `cstring` (null-terminated), `payload` (rest of packet), `bytes[lenfield]` |
+| Null-terminated strings | `bytes &until=b"\x00"` | `cstring` field |
 | Packet construction | not a goal — Spicy is parser-only | first-class: `TFTP_ACK(block=5)`, stacking with `/` |
 | Output format | Zeek logs, `spicy-driver` stdout | pcapng files readable by Wireshark/tshark |
 | Integration | Zeek network monitor | standalone shell + pcapng writer |
@@ -332,8 +369,14 @@ protocol TFTP_ACK
     required uint16 block = 0
 end
 
-# Persistent — add the Object<main> form to ~/.pcapsh_protos.posa
-# and it is available in every future session without redefining it.
+# Persistent — add the Object<TFTP> form to ~/.pcapsh_protos.posa
+# so the full dispatch group is available in every future session.
+# Object<TFTP> (not Object<main>) tags each type as a TFTP sub-protocol
+# and enables show("…/TFTP", data) to dispatch automatically on opcode.
+Object<TFTP> TFTP_ACK
+    required uint16 opcode = 4
+        ACK = 4
+    required uint16 block = 0
 ```
 
 This mirrors the Spicy workflow where you develop in a `.spicy` file and eventually integrate
@@ -344,8 +387,11 @@ the grammar into a Zeek package.
 ## Quick reference
 
 ```bash
-# Run one-liner
+# Run one-liner — direct sub-protocol
 pcapsh -e 'show("TFTP_ACK", fromhex("00 04 00 07"))'
+
+# Run one-liner — automatic dispatch (requires Object<TFTP> definitions loaded)
+pcapsh -e 'show("IP/UDP/TFTP", fromhex("45 00 00 20 00 01 40 00 40 11 00 00 c0 a8 01 01 c0 a8 01 02 00 45 00 45 00 0c 00 00 00 04 00 07"))'
 
 # Run a script
 pcapsh tftp_exchange.pcapsh
@@ -358,8 +404,18 @@ pcapsh
 ...     required uint16 block = 0
 ... end
 >>> TFTP_ACK(block=3)
->>> show("IP/UDP/TFTP_ACK", fromhex("..."))
+>>> show("TFTP_ACK", fromhex("00 04 00 03"))
+
+# Interactive REPL with automatic dispatch (after loading Object<TFTP> definitions)
+>>> load("bin/tests/tftp_protos.posa")
+>>> show("IP/UDP/TFTP", fromhex("..."))   # dispatches to TFTP_ACK, TFTP_DATA, etc.
+>>> ls(TFTP)                              # lists all sub-protocols and their dispatch keys
 >>> wrpcap("/tmp/out.pcapng", IP()/UDP(dport=69)/TFTP_ACK(block=1))
+
+# Loop over every packet in a captured TFTP exchange
+# range(N) starts at 1 — packet_number=1 is the first packet
+for $i in range(20):
+    show("IP/UDP/TFTP", frompcapng("tftp_session.pcapng", $i))
 ```
 
 Full field and function reference: [bin/pcapsh.md](bin/pcapsh.md)  

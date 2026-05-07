@@ -1,0 +1,52 @@
+# test_tftp.pcapsh — TFTP Object<TFTP> dispatch tests
+#
+# Loads tftp_protos.posa which tags all sub-protocols as Object<TFTP>.
+# show("TFTP", …) and show("IP/UDP/TFTP", …) then dispatch automatically
+# on the opcode field.  Direct sub-protocol names still work too.
+
+load("bin/tests/tftp_protos.posa")
+
+# ── Bare TFTP dispatch (no IP/UDP) ────────────────────────────────────────────
+
+# opcode=4 (ACK), block=7
+# expect: <TFTP_ACK opcode=ACK(4) block=7
+show("TFTP", fromhex("00 04 00 07"))
+
+# opcode=3 (DATA), block=1, payload="Hello"
+# expect: <TFTP_DATA opcode=DATA(3) block=1 data='Hello'
+show("TFTP", fromhex("00 03 00 01 48 65 6c 6c 6f"))
+
+# opcode=1 (RRQ), filename="test.txt", mode="octet"
+# expect: <TFTP_RRQ opcode=RRQ(1) filename='test.txt' mode='octet'
+show("TFTP", fromhex("00 01 74 65 73 74 2e 74 78 74 00 6f 63 74 65 74 00"))
+
+# opcode=2 (WRQ), filename="upload.txt", mode="netascii"
+# expect: <TFTP_WRQ opcode=WRQ(2) filename='upload.txt' mode='netascii'
+show("TFTP", fromhex("00 02 75 70 6c 6f 61 64 2e 74 78 74 00 6e 65 74 61 73 63 69 69 00"))
+
+# opcode=5 (ERROR), code=1 (ERR_FILE_NOT_FOUND), msg="File not found"
+# expect: <TFTP_ERROR opcode=ERROR(5) code=ERR_FILE_NOT_FOUND(1) msg='File not found'
+show("TFTP", fromhex("00 05 00 01 46 69 6c 65 20 6e 6f 74 20 66 6f 75 6e 64 00"))
+
+# ── Stacked IP/UDP/TFTP dispatch ──────────────────────────────────────────────
+# IP(20) + UDP(8) + TFTP_ACK(4) = 32 bytes, IP total=0x0020, UDP len=0x000c
+
+# expect: <IP …  <UDP …  <TFTP_ACK opcode=ACK(4) block=7
+show("IP/UDP/TFTP", fromhex("45 00 00 20 00 01 40 00 40 11 00 00 c0 a8 01 01 c0 a8 01 02 00 45 00 45 00 0c 00 00 00 04 00 07"))
+
+# IP(20) + UDP(8) + TFTP_DATA(9) = 37 bytes, IP total=0x0025, UDP len=0x0011
+# expect: <IP …  <UDP …  <TFTP_DATA opcode=DATA(3) block=1 data='Hello'
+show("IP/UDP/TFTP", fromhex("45 00 00 25 00 01 40 00 40 11 00 00 c0 a8 01 02 c0 a8 01 01 00 45 00 45 00 11 00 00 00 03 00 01 48 65 6c 6c 6f"))
+
+# IP(20) + UDP(8) + TFTP_ERROR(19) = 47 bytes, IP total=0x002f, UDP len=0x001b
+# expect: <IP …  <UDP …  <TFTP_ERROR opcode=ERROR(5) code=ERR_FILE_NOT_FOUND(1)
+show("IP/UDP/TFTP", fromhex("45 00 00 2f 00 01 40 00 40 11 00 00 c0 a8 01 02 c0 a8 01 01 00 45 00 45 00 1b 00 00 00 05 00 01 46 69 6c 65 20 6e 6f 74 20 66 6f 75 6e 64 00"))
+
+# IP(20) + UDP(8) + TFTP_RRQ(17) = 45 bytes, IP total=0x002d, UDP len=0x0019
+# expect: <IP …  <UDP …  <TFTP_RRQ opcode=RRQ(1) filename='test.txt'
+show("IP/UDP/TFTP", fromhex("45 00 00 2d 00 01 40 00 40 11 00 00 c0 a8 01 01 c0 a8 01 02 00 45 00 45 00 19 00 00 00 01 74 65 73 74 2e 74 78 74 00 6f 63 74 65 74 00"))
+
+# ── Direct sub-protocol (no dispatch) ────────────────────────────────────────
+# Direct use by full name still works alongside dispatch.
+# expect: <TFTP_ACK opcode=ACK(4) block=3
+show("TFTP_ACK", fromhex("00 04 00 03"))

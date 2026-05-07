@@ -362,19 +362,21 @@ wrpcap("beacon.pcapng", pkt)
 
 All posa field types are available:
 
-| Type          | Size    | Notes |
-|---------------|---------|-------|
-| `uint8`       | 1 byte  | big-endian |
-| `uint16`      | 2 bytes | big-endian |
-| `uint32`      | 4 bytes | big-endian |
-| `uint64`      | 8 bytes | big-endian |
-| `le_uint16`   | 2 bytes | little-endian (Windows protocols) |
-| `le_uint32`   | 4 bytes | little-endian |
-| `le_uint64`   | 8 bytes | little-endian |
-| `mac`         | 6 bytes | default `00:00:00:00:00:00` |
-| `ip4`         | 4 bytes | default `0.0.0.0` |
-| `string`      | variable| null-terminated |
-| `bytes<N>`    | N bytes | fixed width, zero-padded |
+| Type              | Size     | Notes |
+|-------------------|----------|-------|
+| `uint8`           | 1 byte   | big-endian |
+| `uint16`          | 2 bytes  | big-endian |
+| `uint32`          | 4 bytes  | big-endian |
+| `uint64`          | 8 bytes  | big-endian |
+| `le_uint16`       | 2 bytes  | little-endian (Windows protocols) |
+| `le_uint32`       | 4 bytes  | little-endian |
+| `le_uint64`       | 8 bytes  | little-endian |
+| `mac`             | 6 bytes  | default `00:00:00:00:00:00` |
+| `ip4`             | 4 bytes  | default `0.0.0.0` |
+| `cstring`         | variable | null-terminated string |
+| `payload`         | variable | rest of packet bytes (must be last field) |
+| `bytes[lenfield]` | variable | length taken from a previously parsed integer field |
+| `bytes<N>`        | N bytes  | fixed width, zero-padded |
 
 ### Enum values
 
@@ -492,6 +494,35 @@ pcapsh -p myprotos.posa
 
 The format for `.posa` files is the same as the `protocol ... end` block, but using
 the posa `Object<main> NAME` header instead of `protocol NAME` / `end`.
+
+### Grouping sub-protocols with `Object<parent>`
+
+Use `Object<parent>` to group related sub-protocols under a common dispatch name.
+pcapsh then dispatches `show("…/PARENT", data)` automatically by reading the first
+field and matching it to each sub-protocol's default value:
+
+```
+# Two message types that share a "Msg" namespace
+Object<Msg> Msg_Hello
+    required uint8 type = 1
+    required uint16 seq = 0
+
+Object<Msg> Msg_Bye
+    required uint8 type = 2
+    required uint16 code = 0
+```
+
+```
+pcapsh >>> show("Msg", fromhex("01 00 07"))   # → <Msg_Hello type=1 seq=7 |
+pcapsh >>> show("Msg", fromhex("02 00 01"))   # → <Msg_Bye   type=2 code=1 |
+pcapsh >>> ls(Msg)
+Msg sub-protocols:
+  Msg_Hello            (first field type = 1)
+  Msg_Bye              (first field type = 2)
+```
+
+The nesting can be arbitrary: `Object<Msg_Hello>` would group sub-types of `Msg_Hello`.
+Sub-protocols can still be named directly: `show("Msg_Hello", data)` always works.
 
 ---
 
@@ -647,6 +678,73 @@ wrpcap("replay.pcapng", client_send(s, WinHdr(flags=COMPRESSED, length=64)))
 
 ---
 
+## Part 13 — Reading pcapng files and looping
+
+`frompcapng()` extracts a single packet's raw bytes from a pcapng file by 1-based packet
+number. The result is identical to `fromhex()` output — pipe it straight into `show()`,
+`hexdump()`, or `raw()`.
+
+```
+# Get packet 1 (the first packet)
+show("Ether/IP/UDP", frompcapng("capture.pcapng", 1))
+
+# Keyword form is also accepted
+show("Ether/IP/TCP", frompcapng("capture.pcapng", packet_number=3))
+```
+
+### for $i in range(N): — loop over packets
+
+pcapsh has a Python-style for-loop. Loop variables use a `$` prefix. `range(N)` starts at
+**1** (not 0) and runs N times, matching `frompcapng`'s 1-based packet numbering.
+
+```
+# Inspect every packet in a capture (packets 1 through 100)
+for $i in range(100):
+    show("Ether/IP", frompcapng("capture.pcapng", $i))
+```
+
+`range(start, stop)` and `range(start, stop, step)` work like Python — exclusive stop:
+
+```
+# Packets 5 through 9
+for $i in range(5, 10):
+    hexdump(frompcapng("capture.pcapng", $i))
+
+# Reverse: packets 10 down to 1
+for $i in range(10, 0, -1):
+    show("Ether/IP/TCP", frompcapng("capture.pcapng", $i))
+```
+
+`$i` works in protocol field arguments too:
+
+```
+# Write 10 ICMP echo requests with incrementing sequence numbers
+for $i in range(10):
+    wrpcap("pings.pcapng", IP(dst="8.8.8.8")/ICMP(type=8,seq=$i))
+```
+
+### Full analysis workflow
+
+```
+# 1. Capture or copy a pcapng file — e.g. exported from Wireshark
+# 2. Inspect a specific packet
+show("Ether/IP/UDP/DNS", frompcapng("dns_traffic.pcapng", 1))
+
+# 3. Loop over all packets with a custom protocol dissector
+protocol DNSMsg
+    required uint16 txid = 0
+    required uint16 flags = 0
+end
+
+for $i in range(50):
+    show("Ether/IP/UDP/DNSMsg", frompcapng("dns_traffic.pcapng", $i))
+```
+
+In script mode the loop body ends at the first non-indented line (same as Python).
+In the interactive REPL a blank line ends the body.
+
+---
+
 ## Recap
 
 | Task | Expression |
@@ -665,5 +763,8 @@ wrpcap("replay.pcapng", client_send(s, WinHdr(flags=COMPRESSED, length=64)))
 | Parse hex dump | `show("IP/UDP/DNS", fromhex("..."))` |
 | Inspect custom | `show("IP/TCP/MyProto", fromhex("..."))` |
 | Payload only | `show("MyProto", fromhex("01 00 64"))` |
+| Read from pcapng | `frompcapng("file.pcapng", N)` or `frompcapng("file.pcapng", packet_number=N)` |
+| Loop N times | `for $i in range(N):` (1-based; body indented) |
+| Loop slice | `for $i in range(start, stop):` or `for $i in range(start, stop, step):` |
 
 Full field reference: see [bin/pcapsh.md](bin/pcapsh.md).

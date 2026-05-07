@@ -317,6 +317,44 @@ check_inline "show IP/TCP/custom protocol" \
     "$(printf 'protocol Hdr\n    required uint8 type = 0\n    required uint16 len = 0\nend\nshow("IP/TCP/Hdr", fromhex("45 00 00 2f 00 01 40 00 40 06 00 00 0a 00 00 01 0a 00 00 02 00 50 1f 90 00 00 00 01 00 00 00 00 50 18 20 00 00 00 00 00 07 00 40"))')" \
     'type=7'
 
+# ── TFTP Object<TFTP> dispatch ───────────────────────────────────────────────
+echo ""
+echo "-- TFTP Object<TFTP> dispatch --"
+
+TFTP_OUT=$("$PCAPSH" bin/tests/test_tftp.pcapsh 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+
+check_tftp() {
+    local desc="$1"; local expected="$2"
+    if echo "$TFTP_OUT" | grep -q "$expected"; then
+        ok "$desc"
+    else
+        fail "$desc — expected '$expected'"
+    fi
+}
+
+if "$PCAPSH" bin/tests/test_tftp.pcapsh > /dev/null 2>&1; then
+    ok "TFTP test script exits cleanly"
+else
+    fail "TFTP test script exited with error"
+fi
+
+# bare TFTP dispatch
+check_tftp "TFTP dispatch: ACK opcode=4 block=7"          "TFTP_ACK opcode=ACK(4) block=7"
+check_tftp "TFTP dispatch: DATA opcode=3 payload"         "TFTP_DATA opcode=DATA(3) block=1 data='Hello'"
+check_tftp "TFTP dispatch: RRQ opcode=1 filename"         "TFTP_RRQ opcode=RRQ(1) filename='test.txt'"
+check_tftp "TFTP dispatch: WRQ opcode=2 filename"         "TFTP_WRQ opcode=WRQ(2) filename='upload.txt'"
+check_tftp "TFTP dispatch: ERROR opcode=5 named code"     "TFTP_ERROR opcode=ERROR(5) code=ERR_FILE_NOT_FOUND"
+check_tftp "TFTP dispatch: ERROR message field"           "msg='File not found'"
+
+# stacked IP/UDP/TFTP dispatch
+check_tftp "IP/UDP/TFTP dispatch to ACK"                  "TFTP_ACK opcode=ACK(4) block=7"
+check_tftp "IP/UDP/TFTP dispatch to DATA with payload"    "TFTP_DATA opcode=DATA(3) block=1 data='Hello'"
+check_tftp "IP/UDP/TFTP dispatch to ERROR with code"      "TFTP_ERROR opcode=ERROR(5) code=ERR_FILE_NOT_FOUND"
+check_tftp "IP/UDP/TFTP dispatch to RRQ with filename"    "TFTP_RRQ opcode=RRQ(1) filename='test.txt'"
+
+# direct sub-protocol name still works
+check_tftp "TFTP_ACK direct (no dispatch) block=3"        "TFTP_ACK opcode=ACK(4) block=3"
+
 # ── cstring / bytes[N] / payload security ────────────────────────────────────
 echo ""
 echo "-- cstring / bytes[N] / payload security --"
@@ -374,6 +412,114 @@ check_out "payload: binary content shown as hex"         "data=<"
 
 # payload: no data after the header byte — no crash
 check_out "payload: empty — type field still shown"      "type=3"
+
+# ── for-loop and frompcapng ────────────────────────────────────────────────────
+echo ""
+echo "-- for-loop / frompcapng --"
+
+rm -f /tmp/pcapsh_forloop.pcapng
+LOOP_OUT=$("$PCAPSH" bin/tests/test_forloop.pcapsh 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+
+check_loop() {
+    local desc="$1"; local expected="$2"
+    if echo "$LOOP_OUT" | grep -q "$expected"; then
+        ok "$desc"
+    else
+        fail "$desc — expected '$expected'"
+    fi
+}
+check_loop_absent() {
+    local desc="$1"; local absent="$2"
+    if echo "$LOOP_OUT" | grep -q "$absent"; then
+        fail "$desc — '$absent' should NOT appear"
+    else
+        ok "$desc"
+    fi
+}
+
+# Script must exit cleanly
+if "$PCAPSH" bin/tests/test_forloop.pcapsh > /dev/null 2>&1; then
+    ok "for-loop script exits cleanly"
+else
+    fail "for-loop script exited with error"
+fi
+
+# range(3) starts at 1: all three packets appear
+check_loop "range(3): packet 1 shown (src=10.1.1.1)"     "src=10.1.1.1"
+check_loop "range(3): packet 2 shown (src=10.1.1.2)"     "src=10.1.1.2"
+check_loop "range(3): packet 3 shown (src=10.1.1.3)"     "src=10.1.1.3"
+check_loop "range(3): dport=1001 from packet 1"          "dport=1001"
+check_loop "range(3): dport=1002 from packet 2"          "dport=1002"
+check_loop "range(3): dport=1003 from packet 3"          "dport=1003"
+
+# range(2, 4): only packets 2 and 3 (exclusive stop — packet 1 absent)
+check_loop        "range(2,4): packet 2 present"          "10.1.1.2"
+check_loop        "range(2,4): packet 3 present"          "10.1.1.3"
+
+# range(3, 0, -1): reverse — all three appear but 3 comes before 1
+check_loop "range(3,0,-1): reverse shows packet #3 line" "packet #3"
+check_loop "range(3,0,-1): reverse shows packet #1 line" "packet #1"
+
+# $var in protocol field: dport=$i → dport=1, 2, 3
+check_loop "\$i in field: dport=1 (range starts at 1)"   "dport=1 "
+check_loop "\$i in field: dport=2"                        "dport=2 "
+check_loop "\$i in field: dport=3"                        "dport=3 "
+check_loop_absent "\$i in field: dport=0 never appears"   "dport=0 "
+
+# ── replacepkt ────────────────────────────────────────────────────────────────
+echo ""
+echo "-- replacepkt --"
+
+rm -f /tmp/pcapsh_replacepkt.pcapng
+"$PCAPSH" << 'PCAPSH_EOF' > /dev/null 2>&1
+wrpcap("/tmp/pcapsh_replacepkt.pcapng", IP(src="1.1.1.1",dst="1.1.1.1")/UDP(dport=111))
+wrpcap("/tmp/pcapsh_replacepkt.pcapng", IP(src="2.2.2.2",dst="2.2.2.2")/UDP(dport=222))
+wrpcap("/tmp/pcapsh_replacepkt.pcapng", IP(src="3.3.3.3",dst="3.3.3.3")/UDP(dport=333))
+PCAPSH_EOF
+
+REPLACE_OUT=$("$PCAPSH" << 'PCAPSH_EOF' 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+replacepkt("/tmp/pcapsh_replacepkt.pcapng", 2, IP(src="9.9.9.9",dst="8.8.8.8")/UDP(dport=9999))
+show("Ether/IP/UDP", frompcapng("/tmp/pcapsh_replacepkt.pcapng", 1))
+show("Ether/IP/UDP", frompcapng("/tmp/pcapsh_replacepkt.pcapng", 2))
+show("Ether/IP/UDP", frompcapng("/tmp/pcapsh_replacepkt.pcapng", 3))
+PCAPSH_EOF
+)
+
+check_replace() {
+    local desc="$1"; local expected="$2"
+    if echo "$REPLACE_OUT" | grep -q "$expected"; then
+        ok "$desc"
+    else
+        fail "$desc — expected '$expected'"
+    fi
+}
+check_replace_absent() {
+    local desc="$1"; local absent="$2"
+    if echo "$REPLACE_OUT" | grep -q "$absent"; then
+        fail "$desc — '$absent' should NOT appear"
+    else
+        ok "$desc"
+    fi
+}
+
+check_replace        "replacepkt: success message"                  "Replaced packet #2"
+check_replace        "replacepkt: packet 1 unchanged (src=1.1.1.1)" "src=1.1.1.1"
+check_replace        "replacepkt: packet 2 replaced (src=9.9.9.9)"  "src=9.9.9.9"
+check_replace        "replacepkt: packet 2 replaced (dport=9999)"   "dport=9999"
+check_replace        "replacepkt: packet 3 unchanged (src=3.3.3.3)" "src=3.3.3.3"
+check_replace_absent "replacepkt: old packet 2 src=2.2.2.2 gone"    "src=2.2.2.2"
+check_replace_absent "replacepkt: old packet 2 dport=222 gone"      "dport=222 "
+
+# error case: out-of-range packet number
+ERR_OUT=$("$PCAPSH" << 'PCAPSH_EOF' 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+replacepkt("/tmp/pcapsh_replacepkt.pcapng", 99, IP()/UDP())
+PCAPSH_EOF
+)
+if echo "$ERR_OUT" | grep -q "file has.*packet"; then
+    ok "replacepkt: out-of-range gives informative error"
+else
+    fail "replacepkt: out-of-range error message missing"
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
