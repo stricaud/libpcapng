@@ -1,0 +1,12 @@
+# BGP header (RFC 4271)
+# TCP port 179. Fixed 19-byte header; marker is always 16 x 0xFF.
+# KEEPALIVE has no body (length=19). OPEN/UPDATE/NOTIFICATION carry variable-length body.
+Object<main> BGP
+    required bytes<16> marker
+    required uint16    length = 19
+    required uint8     type = 4
+        OPEN          = 1
+        UPDATE        = 2
+        NOTIFICATION  = 3
+        KEEPALIVE     = 4
+        ROUTE_REFRESH = 5

@@ -1,0 +1,8 @@
+# SCTP common header (RFC 4960) — 12 bytes
+# IP protocol 132. Chunks follow the common header; each chunk has its own type/flags/length.
+# checksum uses CRC-32c (not IP checksum).
+Object<main> SCTP
+    required uint16 sport = 0
+    required uint16 dport = 0
+    required uint32 vtag = 0
+    required uint32 checksum = 0

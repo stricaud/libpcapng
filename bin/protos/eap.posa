@@ -1,0 +1,13 @@
+# EAP header (RFC 3748) — 4 bytes
+# Carried over RADIUS (attribute 79), 802.1X (EtherType 0x888E), or PPP.
+# SUCCESS and FAILURE have no data field (length=4).
+Object<main> EAP
+    required uint8  code = 1
+        REQUEST  = 1
+        RESPONSE = 2
+        SUCCESS  = 3
+        FAILURE  = 4
+        INITIATE = 5
+        FINISH   = 6
+    required uint8  identifier = 0
+    required uint16 length = 4

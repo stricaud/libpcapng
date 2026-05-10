@@ -1,0 +1,23 @@
+# DHCPv6 header (RFC 8415) — 4 bytes
+# UDP port 546 (client) / 547 (server). transaction_id is a 3-byte random value.
+# Relay messages (RELAY_FORW/RELAY_REPL) use a different structure (hop-count + link/peer addr).
+Object<main> DHCPv6
+    required uint8    msg_type = 1
+        SOLICIT      = 1
+        ADVERTISE    = 2
+        REQUEST      = 3
+        CONFIRM      = 4
+        RENEW        = 5
+        REBIND       = 6
+        REPLY        = 7
+        RELEASE      = 8
+        DECLINE      = 9
+        RECONFIGURE  = 10
+        INFO_REQUEST = 11
+        RELAY_FORW   = 12
+        RELAY_REPL   = 13
+        LEASEQUERY   = 14
+        LEASEQUERY_REPLY  = 15
+        LEASEQUERY_DONE   = 16
+        LEASEQUERY_DATA   = 17
+    required bytes<3> transaction_id

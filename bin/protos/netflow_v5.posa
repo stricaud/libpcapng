@@ -1,0 +1,15 @@
+# NetFlow v5 export header (RFC 3954) — 24 bytes
+# UDP, typically port 2055 or 9995. Flow records (48 bytes each) follow the header.
+# count = number of flow records in this datagram (max 30 per UDP packet).
+Object<main> NetFlowV5
+    required uint16 version = 5
+    required uint16 count = 0
+    required uint32 sys_uptime = 0
+    required uint32 unix_secs = 0
+    required uint32 unix_nsecs = 0
+    required uint32 flow_sequence = 0
+    required uint8  engine_type = 0
+        RP  = 0
+        VIP = 1
+    required uint8  engine_id = 0
+    required uint16 sampling_interval = 0

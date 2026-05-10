@@ -1,0 +1,23 @@
+# ICMPv6 header (RFC 4443) — 8 bytes
+# Carried over IPv6 next_header=58. checksum covers IPv6 pseudo-header + ICMPv6 message.
+# data field interpretation is type-specific: echo id+seq, ND target address, etc.
+Object<main> ICMPv6
+    required uint8  type = 128
+        DST_UNREACH      = 1
+        PKT_TOO_BIG      = 2
+        TIME_EXCEEDED    = 3
+        PARAM_PROBLEM    = 4
+        ECHO_REQUEST     = 128
+        ECHO_REPLY       = 129
+        MLD_QUERY        = 130
+        MLD_REPORT       = 131
+        MLD_DONE         = 132
+        ROUTER_SOLICIT   = 133
+        ROUTER_ADVERT    = 134
+        NEIGHBOR_SOLICIT = 135
+        NEIGHBOR_ADVERT  = 136
+        REDIRECT         = 137
+        MLDV2_REPORT     = 143
+    required uint8  code = 0
+    required uint16 checksum = 0
+    required uint32 data = 0

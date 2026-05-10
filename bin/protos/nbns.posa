@@ -1,0 +1,60 @@
+# nbns.posa — NetBIOS Name Service (RFC 1001 / RFC 1002)
+#
+# Transport: UDP port 137 (also TCP 137 for zone transfers, rare)
+#
+# NBNS is the NetBIOS layer-3 name resolution protocol used in Windows
+# networks before DNS became dominant.  It carries name registration,
+# name query, name release, and name conflict messages.
+#
+# Note: NBT (NetBIOS Session Service, TCP port 139) is a separate protocol
+# and is defined in the pcapsh built-in protocol set.
+#
+# Usage examples:
+#   # Name query broadcast (who has FILESERVER?)
+#   Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="10.0.1.1",dst="10.0.1.255")/UDP(sport=137,dport=137)/NBNS(trans_id=0x1234,flags=NAME_QUERY_REQUEST)
+#
+#   # Positive name query response
+#   Ether()/IP(src="10.0.1.10",dst="10.0.1.1")/UDP(sport=137,dport=50137)/NBNS(trans_id=0x1234,flags=NAME_QUERY_RESPONSE,ancount=1)
+#
+#   # Name registration request (announces presence on the LAN)
+#   Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="10.0.1.5",dst="10.0.1.255")/UDP(sport=137,dport=137)/NBNS(flags=NAME_REGISTRATION_REQUEST,qdcount=1,arcount=1)
+
+Object<main> NBNS
+
+    # ── Transaction ID ───────────────────────────────────────────────────────
+    # 16-bit identifier; echoed in responses to match query/response pairs.
+    required uint16 trans_id = 0
+
+    # ── Flags word ───────────────────────────────────────────────────────────
+    # Bits 15:    R   — 0 = request, 1 = response
+    # Bits 14-11: OPCODE — 0=QUERY, 5=REGISTRATION, 6=RELEASE, 7=WACK, 8=REFRESH
+    # Bit  10:    AA  — authoritative answer
+    # Bit   9:    TC  — truncated
+    # Bit   8:    RD  — recursion desired (unicast to WINS server)
+    # Bit   7:    RA  — recursion available (WINS server only)
+    # Bits 6-4:   0
+    # Bit   3:    B   — broadcast flag
+    # Bits 3-0:   RCODE — 0=ok, 1=fmterr, 2=server err, 3=name err, 4=unsupported, 5=refused, 6=active, 7=conflict
+    required uint16 flags = 0x0110
+        NAME_QUERY_REQUEST       = 0x0110   # RD=1, B=1 — broadcast query
+        NAME_QUERY_UNICAST       = 0x0100   # RD=1 — unicast query to WINS
+        NAME_QUERY_RESPONSE_POS  = 0x8500   # R=1, AA=1, RD=1, RA=1 — positive response
+        NAME_QUERY_RESPONSE_NEG  = 0x8506   # R=1, AA=1, RA=1, RCODE=6 (active) — negative
+        NAME_REGISTRATION_REQUEST= 0x2910   # OPCODE=5, RD=1, B=1
+        NAME_REGISTRATION_RESPONSE=0xAD10  # R=1, OPCODE=5, AA=1, RD=1, RA=1
+        NAME_RELEASE_REQUEST     = 0x3000   # OPCODE=6, B=1
+        NAME_RELEASE_RESPONSE    = 0xB800   # R=1, OPCODE=6, AA=1
+        NAME_WACK                = 0xBC10   # R=1, OPCODE=7, AA=1, RD=1, B=1
+        NAME_REFRESH_REQUEST     = 0x8810   # OPCODE=8(?), RD=1, B=1
+
+    # ── Section counts ───────────────────────────────────────────────────────
+    required uint16 qdcount = 1   # questions
+    required uint16 ancount = 0   # answer resource records
+    required uint16 nscount = 0   # authority resource records
+    required uint16 arcount = 0   # additional resource records
+
+    # ── Variable-length section data ─────────────────────────────────────────
+    # Contains NetBIOS-encoded question entries, resource records, etc.
+    # NetBIOS names are 32-byte "Level 2" encoded: each byte of the 16-byte
+    # padded name is split into two nibbles, each nibble + 0x41.
+    payload queries

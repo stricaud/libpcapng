@@ -1,0 +1,12 @@
+# IGMP header (RFC 2236 v2 / RFC 3376 v3)
+# IP protocol 2. max_resp_time is in tenths of a second (IGMPv2) or coded (IGMPv3).
+Object<main> IGMP
+    required uint8  type = 0x11
+        MEMBERSHIP_QUERY     = 0x11
+        V1_MEMBERSHIP_REPORT = 0x12
+        V2_MEMBERSHIP_REPORT = 0x16
+        LEAVE_GROUP          = 0x17
+        V3_MEMBERSHIP_REPORT = 0x22
+    required uint8  max_resp_time = 100
+    required uint16 checksum = 0
+    required ip4    group_addr = 0.0.0.0

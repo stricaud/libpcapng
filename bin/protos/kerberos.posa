@@ -1,0 +1,101 @@
+# kerberos.posa — Kerberos 5 protocol (RFC 4120)
+#
+# Transport: TCP or UDP port 88
+#   TCP adds a 4-byte big-endian record mark before each KRB5 message.
+#   UDP omits the record mark; set record_mark=0 and it takes no space
+#   (the field is still written — use only the TCP framing when building
+#   over TCP, and drop the record_mark for UDP by leaving it 0 and
+#   treating the first 4 bytes as irrelevant for UDP dissection).
+#
+# Encoding:
+#   KRB5 messages are ASN.1 DER.  The fixed header bytes modelled here
+#   (record_mark → msg_type) are always present and at fixed offsets.
+#   The variable-length body (padata, req-body, enc-part, ticket …)
+#   is captured in the trailing `payload body` field.
+#
+# Usage examples:
+#   # AS-REQ (client → KDC)
+#   IP(src="10.0.1.1",dst="10.0.0.1")/TCP(dport=88,flags="PA",seq=1,ack=1)/KRB5(app_tag=AS_REQ,msg_type=AS_REQUEST)
+#
+#   # TGS-REP (KDC → client)
+#   IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,flags="PA",seq=1,ack=1)/KRB5(app_tag=TGS_REP,msg_type=TGS_REPLY)
+#
+#   # KRB-ERROR (pre-authentication required)
+#   IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,flags="PA",seq=1,ack=1)/KRB5(app_tag=KRB_ERROR,msg_type=KRB_ERROR_VAL)
+
+Object<main> KRB5
+
+    # ── TCP transport record mark (RFC 4120 §7.2.2) ──────────────────────────
+    # 4-byte big-endian length of the following KRB5 PDU.
+    # Set to 0 when building test packets; Wireshark ignores it for port-88 TCP.
+    required uint32 record_mark = 0
+
+    # ── ASN.1 APPLICATION tag ────────────────────────────────────────────────
+    # Identifies the KRB5 message type at the outermost DER layer.
+    # Values: APPLICATION N SEQUENCE = 0x60 | N; N ≥ 30 uses long-form 0x7e.
+    required uint8 app_tag = 0x6a
+        AS_REQ    = 0x6a   # [APPLICATION 10] Authentication Service Request
+        AS_REP    = 0x6b   # [APPLICATION 11] Authentication Service Reply
+        TGS_REQ   = 0x6c   # [APPLICATION 12] Ticket-Granting Service Request
+        TGS_REP   = 0x6d   # [APPLICATION 13] Ticket-Granting Service Reply
+        AP_REQ    = 0x6e   # [APPLICATION 14] Application Request (authenticating to a service)
+        AP_REP    = 0x6f   # [APPLICATION 15] Application Reply
+        KRB_SAFE  = 0x74   # [APPLICATION 20] Safe (integrity-protected) message
+        KRB_PRIV  = 0x75   # [APPLICATION 21] Private (encrypted) message
+        KRB_CRED  = 0x76   # [APPLICATION 22] Credential forwarding
+        KRB_ERROR = 0x7e   # [APPLICATION 30] Error reply from KDC or application server
+
+    # ── Outer BER/DER length (short form, ≤ 127 bytes) ──────────────────────
+    # For real traffic this is multi-byte; 0 is fine for pcapsh test packets.
+    required uint8 body_len = 0
+
+    # ── SEQUENCE wrapper (0x30) ──────────────────────────────────────────────
+    required uint8 seq_tag = 0x30
+    required uint8 seq_len = 0
+
+    # ── [1] pvno — Kerberos protocol version (always 5) ─────────────────────
+    # ASN.1 encoding: CONTEXT [1] SEQUENCE { INTEGER }
+    required uint8 ctx1_tag = 0xa1   # CONTEXT [1] CONSTRUCTED
+    required uint8 ctx1_len = 0x03
+    required uint8 pvno_tag = 0x02   # UNIVERSAL INTEGER
+    required uint8 pvno_len = 0x01
+    required uint8 pvno = 5
+
+    # ── [2] msg-type — message type integer ─────────────────────────────────
+    # Must match the APPLICATION tag above (app_tag & 0x1f maps to msg_type).
+    required uint8 ctx2_tag = 0xa2   # CONTEXT [2] CONSTRUCTED
+    required uint8 ctx2_len = 0x03
+    required uint8 mtype_tag = 0x02  # UNIVERSAL INTEGER
+    required uint8 mtype_len = 0x01
+    required uint8 msg_type = 10
+        AS_REQUEST    = 10   # Authentication Service Request
+        AS_REPLY      = 11   # Authentication Service Reply
+        TGS_REQUEST   = 12   # Ticket-Granting Service Request
+        TGS_REPLY     = 13   # Ticket-Granting Service Reply
+        AP_REQUEST    = 14   # Application authentication request
+        AP_REPLY      = 15   # Application authentication reply
+        KRB_SAFE_VAL  = 20   # Integrity-protected application message
+        KRB_PRIV_VAL  = 21   # Encrypted application message
+        KRB_CRED_VAL  = 22   # Credential forwarding message
+        KRB_ERROR_VAL = 30   # Error from KDC or application server
+
+    # ── Variable body: padata + req-body / enc-part / error-data ────────────
+    # Contains everything after msg-type: PA-DATA sequences, KDC-REQ-BODY,
+    # EncryptedData, Ticket, Authenticator, KRB-ERROR fields, etc.
+    # Captured as raw bytes so pcapsh preserves the wire encoding faithfully.
+    payload body
+
+
+# ─── Encryption type constants (used in req-body etype field) ───────────────
+# Reference values for documentation; not a parseable sub-object.
+# etype values appear inside the body payload as ASN.1 SEQUENCE OF Integer:
+#   des-cbc-crc         = 1   (weak, obsolete)
+#   des-cbc-md4         = 2   (weak, obsolete)
+#   des-cbc-md5         = 3   (weak, obsolete)
+#   des3-cbc-sha1       = 16  (3DES, deprecated)
+#   aes128-cts-hmac-sha1-96 = 17  (common)
+#   aes256-cts-hmac-sha1-96 = 18  (most common in modern AD)
+#   aes128-cts-hmac-sha256-128 = 19 (RFC 8009)
+#   aes256-cts-hmac-sha384-192 = 20 (RFC 8009)
+#   arcfour-hmac        = 23  (RC4-HMAC, still seen on legacy AD)
+#   arcfour-hmac-exp    = 24  (weak export variant)

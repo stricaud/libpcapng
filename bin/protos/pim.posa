@@ -1,0 +1,18 @@
+# PIM base header (RFC 7761, PIM-SM) — 4 bytes
+# IP protocol 103, multicast 224.0.0.13. ver_type: ver(4)=2 | type(4).
+# Type-specific fields follow; HELLO carries option TLVs, JOIN_PRUNE carries group records.
+Object<main> PIM
+    required uint8  ver_type = 0x20
+        HELLO         = 0x20
+        REGISTER      = 0x21
+        REGISTER_STOP = 0x22
+        JOIN_PRUNE    = 0x23
+        BOOTSTRAP     = 0x24
+        ASSERT        = 0x25
+        GRAFT         = 0x26
+        GRAFT_ACK     = 0x27
+        CANDIDATE_RP  = 0x28
+        STATE_REFRESH = 0x29
+        DF_ELECTION   = 0x2A
+    required uint8  reserved = 0
+    required uint16 checksum = 0

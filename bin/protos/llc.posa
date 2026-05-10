@@ -1,0 +1,13 @@
+# LLC header (IEEE 802.2) — 3 bytes
+# Appears after 802.3 Ethernet (Dot3), 802.11 WiFi data frames, and Token Ring.
+# ctrl=0x03 = UI (unnumbered information), the most common form.
+Object<main> LLC
+    required uint8 dsap = 0x42
+        NULL_LSAP = 0x00
+        STP       = 0x42
+        SNAP      = 0xAA
+        IPX       = 0xE0
+        NETBIOS   = 0xF0
+        GLOBAL    = 0xFF
+    required uint8 ssap = 0x42
+    required uint8 ctrl = 0x03

@@ -1,0 +1,27 @@
+# EAPOL-Key frame (IEEE 802.1X / WPA/WPA2 4-way handshake) — 95 bytes
+# Carried inside EAPOL (type=KEY=3, EtherType 0x888E).
+# descriptor_type: 1=WPA, 2=RSN (WPA2/WPA3).
+# key_info bitmask (big-endian):
+#   bits 0-2: Key Descriptor Version (1=TKIP, 2=AES-CCMP, 3=AES-CCMP-256)
+#   bit  3:   Key Type (1=Pairwise, 0=Group)
+#   bit  6:   Install
+#   bit  7:   Key Ack
+#   bit  8:   Key MIC
+#   bit  9:   Secure
+#   bit 12:   Encrypted Key Data
+# 4-way handshake key_info values (WPA2/AES):
+#   M1 (AP→STA,  ANonce):       0x008A  Pairwise|Ack|Ver2
+#   M2 (STA→AP,  SNonce+MIC):   0x010A  Pairwise|MIC|Ver2
+#   M3 (AP→STA,  GTK+MIC+Enc):  0x13CA  Pairwise|Install|Ack|MIC|Secure|Enc|Ver2
+#   M4 (STA→AP,  MIC+Secure):   0x030A  Pairwise|MIC|Secure|Ver2
+Object<main> EAPOL_KEY
+    required uint8     descriptor_type  = 2
+    required uint16    key_info         = 0x008A
+    required uint16    key_length       = 16
+    required bytes<8>  replay_counter
+    required bytes<32> key_nonce
+    required bytes<16> key_iv
+    required bytes<8>  key_rsc
+    required bytes<8>  key_id
+    required bytes<16> key_mic
+    required uint16    key_data_length  = 0

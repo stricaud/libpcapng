@@ -1,0 +1,23 @@
+# HSRPv1 header (RFC 2281) — 20 bytes
+# UDP port 1985, multicast 224.0.0.2. auth_data is an 8-byte plaintext password (zero-padded).
+# Default priority 100; higher wins. Active router sends HELLO every helo_time seconds.
+Object<main> HSRP
+    required uint8    version = 0
+    required uint8    op_code = 0
+        HELLO  = 0
+        COUP   = 1
+        RESIGN = 2
+    required uint8    state = 0
+        INITIAL = 0
+        LEARN   = 1
+        LISTEN  = 2
+        SPEAK   = 4
+        STANDBY = 8
+        ACTIVE  = 16
+    required uint8    helo_time = 3
+    required uint8    hold_time = 10
+    required uint8    priority = 100
+    required uint8    group = 0
+    required uint8    reserved = 0
+    required bytes<8> auth_data
+    required ip4      virtual_ip = 0.0.0.0

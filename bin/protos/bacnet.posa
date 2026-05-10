@@ -1,0 +1,19 @@
+# BACnet/IP — BVLL header (ASHRAE 135)
+# UDP port 47808 (0xBAC0). bvlc_type is always 0x81 for BACnet/IP.
+# length includes the 4-byte BVLL header itself.
+Object<main> BACnet
+    required uint8  bvlc_type = 0x81
+    required uint8  function = 0x0A
+        RESULT                   = 0x00
+        WRITE_BDT                = 0x01
+        READ_BDT                 = 0x02
+        READ_BDT_ACK             = 0x03
+        FORWARDED_NPDU           = 0x04
+        REGISTER_FD              = 0x05
+        READ_FDT                 = 0x06
+        READ_FDT_ACK             = 0x07
+        DELETE_FDT_ENTRY         = 0x08
+        DISTRIBUTE_BCAST_TO_NET  = 0x09
+        ORIGINAL_UNICAST_NPDU    = 0x0A
+        ORIGINAL_BCAST_NPDU      = 0x0B
+    required uint16 length = 4

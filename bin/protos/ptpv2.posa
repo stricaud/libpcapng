@@ -1,0 +1,28 @@
+# PTPv2 header (IEEE 1588-2008) — 34 bytes
+# Over Ethernet (EtherType 0x88F7), UDP port 319 (event) / 320 (general), or raw IPv4/IPv6.
+# ts_msg_type: transportSpecific(4) | messageType(4). version is always 2.
+# correction_field is in nanoseconds scaled by 2^16 (subnanosecond precision).
+Object<main> PTPv2
+    required uint8     ts_msg_type = 0x00
+        SYNC              = 0x00
+        DELAY_REQ         = 0x01
+        PDELAY_REQ        = 0x02
+        PDELAY_RESP       = 0x03
+        FOLLOW_UP         = 0x08
+        DELAY_RESP        = 0x09
+        PDELAY_RESP_FUP   = 0x0A
+        ANNOUNCE          = 0x0B
+        SIGNALING         = 0x0C
+        MANAGEMENT        = 0x0D
+    required uint8     version = 0x02
+    required uint16    message_len = 44
+    required uint8     domain_num = 0
+    required uint8     minor_sdoid = 0
+    required uint16    flags = 0
+    required bytes<8>  correction_field
+    required uint32    msg_type_specific = 0
+    required bytes<8>  src_clock_id
+    required uint16    src_port_num = 1
+    required uint16    seq_id = 0
+    required uint8     control = 0
+    required uint8     log_interval = 0x7F

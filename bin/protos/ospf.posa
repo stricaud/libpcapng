@@ -1,0 +1,20 @@
+# OSPF header (RFC 2328 / RFC 5340 for OSPFv3)
+# Carried directly over IP protocol 89.
+# authentication field meaning depends on autype.
+Object<main> OSPF
+    required uint8  version = 2
+    required uint8  type = 1
+        HELLO  = 1
+        DBD    = 2
+        LSR    = 3
+        LSU    = 4
+        LSACK  = 5
+    required uint16 packet_len = 0
+    required ip4    router_id = 0.0.0.0
+    required ip4    area_id = 0.0.0.0
+    required uint16 checksum = 0
+    required uint16 autype = 0
+        NO_AUTH       = 0
+        SIMPLE        = 1
+        CRYPTOGRAPHIC = 2
+    required uint64 authentication = 0

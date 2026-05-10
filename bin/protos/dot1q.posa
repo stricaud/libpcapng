@@ -1,0 +1,13 @@
+# 802.1Q VLAN tag (IEEE 802.1Q)
+# Sits between Ethernet header and payload; EtherType 0x8100 on the outer frame.
+# tci = PCP(3 bits) | DEI(1 bit) | VID(12 bits) — VID 0 means no VLAN.
+Object<main> Dot1Q
+    required uint16 tci = 0
+    required uint16 etype = 0x0800
+        IPV4       = 0x0800
+        IPV6       = 0x86DD
+        ARP        = 0x0806
+        MPLS       = 0x8847
+        MPLS_MCAST = 0x8848
+        VLAN       = 0x8100
+        QINQ       = 0x88A8

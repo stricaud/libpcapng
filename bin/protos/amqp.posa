@@ -1,0 +1,11 @@
+# AMQP 0-9-1 frame header (used by RabbitMQ, ActiveMQ)
+# TCP port 5672 (plain) or 5671 (TLS). frame_size = payload length (excludes 8-byte framing).
+# Each frame ends with a 1-byte frame-end marker (0xCE), not modelled here.
+Object<main> AMQP
+    required uint8  frame_type = 1
+        METHOD    = 1
+        HEADER    = 2
+        BODY      = 3
+        HEARTBEAT = 8
+    required uint16 channel = 0
+    required uint32 frame_size = 0

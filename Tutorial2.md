@@ -139,19 +139,75 @@ the numeric value is annotated with its name — the same behaviour Spicy achiev
 
 ## Part 4 — Multiple packet types with automatic dispatch
 
-In Spicy a single `Packet` unit has a `switch(self.opcode)` that dispatches to sub-units at
-parse time. posa achieves the same with **`Object<parent>`** — tagging each sub-protocol with
-its parent name enables automatic opcode-based dispatch in `show()`.
+### What `Object<TFTP>` actually means
 
-The key idea: declare each packet shape as `Object<TFTP>` instead of `Object<main>`. pcapsh
-then dispatches `show("…/TFTP", data)` to the matching sub-protocol by reading the first field
-and comparing it to each sub-protocol's default value.
+`TFTP` is **not a protocol with fields**. It is a dispatch group — a name that pcapsh uses
+to find the right sub-protocol when given raw bytes. You cannot write `TFTP()` or
+`ls(TFTP fields)`. What you can do is ask pcapsh to *route* bytes through the group with
+`show("TFTP", …)`.
+
+`Object<TFTP> TFTP_ACK` means:
+
+> "Define a protocol called `TFTP_ACK` **and register it as a member of the TFTP group**."
+
+`TFTP_ACK` does not inherit any fields from `TFTP`. The `<TFTP>` tag is purely a membership
+label — it tells pcapsh "when dispatching through TFTP, consider me as a candidate."
+
+### The dispatch rule
+
+When pcapsh sees `show("TFTP", bytes)` it does the following:
+
+1. Peek at the bytes using the **first field's type** of every `Object<TFTP>` member (here a `uint16`, so read 2 bytes big-endian).
+2. Compare the value against each member's **first-field default**.
+3. Dissect using the first match.
+
+So the first field in every member **must share the same type** (all `uint16` for TFTP), and
+its default value is the dispatch key:
+
+```
+Object<TFTP> TFTP_ACK        ← member name
+    required uint16 opcode = 4   ← first field: type=uint16, default=4  → dispatch key
+        ACK = 4                  ← enum alias for the value 4
+    required uint16 block  = 0   ← second field (not involved in dispatch)
+```
+
+When bytes `00 04 …` arrive at the TFTP dispatcher, pcapsh reads 2 bytes → 4, finds
+`TFTP_ACK` with default=4, and parses the rest as `TFTP_ACK`.
+
+A minimal working example with just one member:
+
+```
+pcapsh >>> load("bin/tests/tftp_protos.posa")   # loads all Object<TFTP> members
+
+pcapsh >>> ls(TFTP)
+TFTP sub-protocols:
+  TFTP_ACK             (first field opcode = 4)
+  … (others)
+
+pcapsh >>> show("TFTP", fromhex("00 04 00 07"))
+<TFTP_ACK opcode=ACK(4) block=7 |
+                ↑ dispatch matched on value 4
+```
+
+You can also name the sub-protocol directly — dispatch is optional:
+
+```
+pcapsh >>> show("TFTP_ACK", fromhex("00 04 00 07"))
+<TFTP_ACK opcode=ACK(4) block=7 |
+```
+
+### No inheritance — each member is self-contained
+
+Every `Object<TFTP>` member defines all its own fields from scratch. There are no shared
+fields. TFTP_RRQ and TFTP_ACK happen to both have an `opcode` first field, but that is a
+deliberate repetition required by the dispatch rule — not inheritance.
 
 | Concept | Spicy | pcapsh/posa |
 |---------|-------|-------------|
 | Dispatch | `switch(self.opcode)` in grammar | `Object<parent>` grouping + first-field match |
 | Variable-length fields | `bytes &until=b"\x00"` | `cstring` (null-terminated), `payload` (rest of packet) |
 | Sub-units | named types referenced in switch | `Object<TFTP>` sub-protocols |
+| Field inheritance | none | none — each member is fully independent |
 
 ### Define each packet shape as `Object<TFTP>`
 

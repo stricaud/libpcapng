@@ -1,0 +1,23 @@
+# DCCP header (RFC 4340) — 10 bytes (fixed part only)
+# IP protocol 33. offset = header length in 32-bit words (min 3 for short, 4 for long seqno).
+# res_type_x: Res(4)|Type(4)|X(1) — X=1 uses 6-byte sequence numbers (long form).
+# Type 0=REQUEST, 1=RESPONSE, 2=DATA, 3=ACK, 4=DATAACK, 5=CLOSEREQ, 6=CLOSE,
+#      7=RESET, 8=SYNC, 9=SYNCACK.
+Object<main> DCCP
+    required uint16 sport = 0
+    required uint16 dport = 0
+    required uint8  offset = 4
+    required uint8  cscov = 0
+    required uint16 checksum = 0
+    required uint8  res_type_x = 0x00
+        REQUEST  = 0x00
+        RESPONSE = 0x02
+        DATA     = 0x04
+        ACK      = 0x06
+        DATAACK  = 0x08
+        CLOSEREQ = 0x0A
+        CLOSE    = 0x0C
+        RESET    = 0x0E
+        SYNC     = 0x10
+        SYNCACK  = 0x12
+    required uint8  reserved = 0

@@ -1,0 +1,54 @@
+# SOCKS5 (RFC 1928) — client/server handshake and CONNECT request
+# Default port 1080. Used by proxies, SOCKS tunnels, EarthWorm C2 pivots.
+# Three message types:
+#   SOCKS5_HELLO   — client auth method negotiation (3 bytes)
+#   SOCKS5_SERVER  — server selected method (2 bytes)
+#   SOCKS5_CONNECT — client CONNECT request with IPv4 dst (10 bytes)
+#   SOCKS5_REPLY   — server response with IPv4 bind addr (10 bytes)
+Object<main> SOCKS5_HELLO
+    required uint8 version = 5
+    required uint8 nmethods = 1
+    required uint8 method = 0x00
+        NO_AUTH    = 0x00
+        GSSAPI     = 0x01
+        USERPASS   = 0x02
+        NO_METHODS = 0xFF
+
+Object<main> SOCKS5_SERVER
+    required uint8 version = 5
+    required uint8 method = 0x00
+        NO_AUTH    = 0x00
+        GSSAPI     = 0x01
+        USERPASS   = 0x02
+        NO_METHODS = 0xFF
+
+Object<main> SOCKS5_CONNECT
+    required uint8  version = 5
+    required uint8  cmd = 1
+        CONNECT   = 1
+        BIND      = 2
+        UDP_ASSOC = 3
+    required uint8  rsv = 0
+    required uint8  atyp = 1
+        IPv4       = 1
+        DOMAINNAME = 3
+        IPv6       = 4
+    required ip4    dst_addr = 0.0.0.0
+    required uint16 dst_port = 0
+
+Object<main> SOCKS5_REPLY
+    required uint8  version = 5
+    required uint8  rep = 0
+        SUCCESS              = 0
+        GENERAL_FAILURE      = 1
+        CONN_NOT_ALLOWED     = 2
+        NETWORK_UNREACHABLE  = 3
+        HOST_UNREACHABLE     = 4
+        CONN_REFUSED         = 5
+        TTL_EXPIRED          = 6
+        CMD_NOT_SUPPORTED    = 7
+        ATYP_NOT_SUPPORTED   = 8
+    required uint8  rsv = 0
+    required uint8  atyp = 1
+    required ip4    bnd_addr = 0.0.0.0
+    required uint16 bnd_port = 0

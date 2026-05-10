@@ -1,0 +1,38 @@
+# CoAP header (RFC 7252) — 4 bytes
+# UDP port 5683 (plain) or 5684 (DTLS). ver_type_tkl: Ver(2)=1 | T(2) | TKL(4).
+# T: 0=CON, 1=NON, 2=ACK, 3=RST. TKL = token length (0-8 bytes follow the header).
+# Default 0x40 = Ver=1, T=CON, TKL=0.
+Object<main> CoAP
+    required uint8  ver_type_tkl = 0x40
+    required uint8  code = 0
+        EMPTY                    = 0
+        GET                      = 1
+        POST                     = 2
+        PUT                      = 3
+        DELETE                   = 4
+        FETCH                    = 5
+        PATCH                    = 6
+        CREATED                  = 0x41
+        DELETED                  = 0x42
+        VALID                    = 0x43
+        CHANGED                  = 0x44
+        CONTENT                  = 0x45
+        CONTINUE                 = 0x5F
+        BAD_REQUEST              = 0x80
+        UNAUTHORIZED             = 0x81
+        BAD_OPTION               = 0x82
+        FORBIDDEN                = 0x83
+        NOT_FOUND                = 0x84
+        METHOD_NOT_ALLOWED       = 0x85
+        NOT_ACCEPTABLE           = 0x86
+        CONFLICT                 = 0x89
+        PRECONDITION_FAILED      = 0x8C
+        REQUEST_TOO_LARGE        = 0x8D
+        UNSUPPORTED_CONTENT_FMT  = 0x8F
+        INTERNAL_SERVER_ERROR    = 0xA0
+        NOT_IMPLEMENTED          = 0xA1
+        BAD_GATEWAY              = 0xA2
+        SERVICE_UNAVAILABLE      = 0xA3
+        GATEWAY_TIMEOUT          = 0xA4
+        PROXYING_NOT_SUPPORTED   = 0xA5
+    required uint16 message_id = 0

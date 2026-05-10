@@ -1,0 +1,10 @@
+# DNP3 link-layer frame header (IEEE 1815 / IEC 60870-5)
+# TCP port 20000, UDP port 20000. start is always 0x0564.
+# control byte direction: 0x44 = primary→secondary data frame.
+Object<main> DNP3
+    required uint16 start = 0x0564
+    required uint8  length = 5
+    required uint8  control = 0x44
+    required uint16 dst = 0
+    required uint16 src = 0
+    required uint16 crc = 0

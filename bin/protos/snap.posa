@@ -1,0 +1,12 @@
+# SNAP header (RFC 1042) — 5 bytes
+# Follows an LLC header with DSAP=SSAP=0xAA. oui=0x000000 means the etype field is
+# interpreted as a standard IEEE EtherType (same values as Ethernet II).
+Object<main> SNAP
+    required bytes<3> oui
+    required uint16   etype = 0x0800
+        IPV4       = 0x0800
+        IPV6       = 0x86DD
+        ARP        = 0x0806
+        APPLETALK  = 0x809B
+        IPX        = 0x8137
+        MPLS       = 0x8847

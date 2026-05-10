@@ -1,0 +1,22 @@
+# MQTT fixed header (OASIS MQTT v3.1.1 / v5.0)
+# TCP port 1883 (plain) or 8883 (TLS). remaining_len uses variable-length encoding
+# in the wire format but is stored here as a single byte for the common case (< 128 bytes).
+# type_flags upper nibble = packet type; lower nibble = flags (QoS, retain, dup).
+Object<main> MQTT
+    required uint8  type_flags = 0x10
+        CONNECT     = 0x10
+        CONNACK     = 0x20
+        PUBLISH     = 0x30
+        PUBACK      = 0x40
+        PUBREC      = 0x50
+        PUBREL      = 0x62
+        PUBCOMP     = 0x70
+        SUBSCRIBE   = 0x82
+        SUBACK      = 0x90
+        UNSUBSCRIBE = 0xA2
+        UNSUBACK    = 0xB0
+        PINGREQ     = 0xC0
+        PINGRESP    = 0xD0
+        DISCONNECT  = 0xE0
+        AUTH        = 0xF0
+    required uint8  remaining_len = 0

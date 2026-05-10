@@ -1,0 +1,5 @@
+# MPLS label stack entry (RFC 3032)
+# Single 32-bit word: label(20 bits) | exp/TC(3 bits) | S/bottom-of-stack(1 bit) | TTL(8 bits)
+# S=1 means this is the bottom label; the next header is IP or another MPLS label.
+Object<main> MPLS
+    required uint32 label_exp_s_ttl = 0

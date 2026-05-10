@@ -1,0 +1,21 @@
+# RSVP header (RFC 2205) — 8 bytes
+# IP protocol 46. version_flags: Ver(4)=1 | Flags(4). Objects follow the header.
+# send_ttl copies the IP TTL so intermediate nodes can detect routing loops.
+Object<main> RSVP
+    required uint8  version_flags = 0x10
+    required uint8  msg_type = 1
+        PATH      = 1
+        RESV      = 2
+        PATHERR   = 3
+        RESVERR   = 4
+        PATHTEAR  = 5
+        RESVTEAR  = 6
+        RESVCONF  = 7
+        BUNDLE    = 12
+        ACK       = 13
+        SREFRESH  = 15
+        HELLO     = 20
+    required uint16 checksum = 0
+    required uint8  send_ttl = 64
+    required uint8  reserved = 0
+    required uint16 rsvp_length = 0

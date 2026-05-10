@@ -1,0 +1,20 @@
+# EIGRP header (RFC 7868, Cisco EIGRP) — 20 bytes
+# IP protocol 88, multicast 224.0.0.10. TLVs follow the header.
+# version is always 2. sequence and ack are 0 for HELLO packets.
+Object<main> EIGRP
+    required uint8  version = 2
+    required uint8  opcode = 5
+        UPDATE    = 1
+        REQUEST   = 2
+        QUERY     = 3
+        REPLY     = 4
+        HELLO     = 5
+        PROBE     = 7
+        SIA_QUERY = 10
+        SIA_REPLY = 11
+    required uint16 checksum = 0
+    required uint32 flags = 0
+    required uint32 sequence = 0
+    required uint32 ack = 0
+    required uint16 vrid = 0
+    required uint16 as_number = 0

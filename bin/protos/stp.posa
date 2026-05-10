@@ -1,0 +1,22 @@
+# STP / RSTP BPDU (IEEE 802.1D)
+# Sent to multicast 01:80:C2:00:00:00, LLC DSAP/SSAP 0x42.
+# max_age/hello_time/forward_delay are in 1/256 seconds (e.g. 5120 = 20s, 512 = 2s, 3840 = 15s).
+Object<main> STP
+    required uint16   protocol_id = 0
+    required uint8    version = 0
+        STP  = 0
+        RSTP = 2
+        MSTP = 3
+    required uint8    bpdu_type = 0
+        CONFIG     = 0x00
+        TCN        = 0x80
+        RAPID_PVST = 0x02
+    required uint8    flags = 0
+    required bytes<8> root_id
+    required uint32   root_path_cost = 0
+    required bytes<8> bridge_id
+    required uint16   port_id = 0
+    required uint16   message_age = 0
+    required uint16   max_age = 5120
+    required uint16   hello_time = 512
+    required uint16   forward_delay = 3840

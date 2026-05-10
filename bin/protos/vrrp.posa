@@ -1,0 +1,14 @@
+# VRRPv2 header (RFC 3768) — 8 bytes (plus count_ip x 4-byte virtual IP addresses)
+# IP protocol 112, multicast 224.0.0.18. ver_type: ver(4)=2 | type(4)=1 (ADVERTISEMENT).
+# adver_int in seconds; priority 255 = owner, 100 = default, 0 = release mastership.
+Object<main> VRRP
+    required uint8  ver_type = 0x21
+    required uint8  vrid = 1
+    required uint8  priority = 100
+    required uint8  count_ip = 1
+    required uint8  auth_type = 0
+        NO_AUTH     = 0
+        SIMPLE_TEXT = 1
+        IP_AUTH_HDR = 2
+    required uint8  adver_int = 1
+    required uint16 checksum = 0

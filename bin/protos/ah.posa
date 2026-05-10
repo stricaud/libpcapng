@@ -1,0 +1,15 @@
+# AH header (RFC 4302) — 12 bytes (standard, with 96-bit ICV)
+# IP protocol 51. payload_len in 32-bit words minus 2; value 4 = 12-byte fixed header + 96-bit ICV.
+# next_header is the protocol of the payload protected by AH.
+Object<main> AH
+    required uint8  next_header = 59
+        TCP    = 6
+        UDP    = 17
+        ICMP   = 1
+        ICMPV6 = 58
+        ESP    = 50
+        NONEXT = 59
+    required uint8  payload_len = 4
+    required uint16 reserved = 0
+    required uint32 spi = 0
+    required uint32 seq = 1

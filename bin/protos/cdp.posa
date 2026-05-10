@@ -1,0 +1,8 @@
+# CDP header (Cisco Discovery Protocol, v1/v2) — 4 bytes
+# Sent to multicast 01:00:0c:cc:cc:cc via LLC/SNAP (OUI 00:00:0c, proto 0x2000).
+# ttl is how long a receiving device should hold CDP information (seconds).
+# Type-Length-Value records follow the 4-byte fixed header.
+Object<main> CDP
+    required uint8  version = 2
+    required uint8  ttl = 180
+    required uint16 checksum = 0

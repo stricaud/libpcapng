@@ -1,0 +1,14 @@
+# PPPoE header (RFC 2516)
+# EtherType 0x8863 (discovery) or 0x8864 (session).
+# ver_type is always 0x11 (version=1, type=1).
+Object<main> PPPoE
+    required uint8  ver_type = 0x11
+    required uint8  code = 0x00
+        SESSION_DATA = 0x00
+        PADI         = 0x09
+        PADO         = 0x07
+        PADR         = 0x19
+        PADS         = 0x65
+        PADT         = 0xA7
+    required uint16 session_id = 0
+    required uint16 payload_len = 0

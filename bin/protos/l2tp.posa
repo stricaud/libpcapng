@@ -1,0 +1,12 @@
+# L2TPv2 header (RFC 2661) — simplified data message form (8 bytes with ns/nr)
+# UDP port 1701. flags 0x0002 = L-bit (length present); 0x0802 = L+S-bits (seq present).
+# Control messages set flags 0xC802 (L+T+S). Session data typically uses 0x0002.
+Object<main> L2TP
+    required uint16 flags = 0x0002
+        DATA_MSG    = 0x0002
+        CTRL_MSG    = 0xC802
+    required uint16 length = 12
+    required uint16 tunnel_id = 0
+    required uint16 session_id = 0
+    required uint16 ns = 0
+    required uint16 nr = 0

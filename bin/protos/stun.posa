@@ -1,0 +1,18 @@
+# STUN header (RFC 5389) — 20 bytes
+# UDP/TCP port 3478 (or 5349 for TLS). magic_cookie is always 0x2112A442.
+# Used in WebRTC ICE, SIP NAT traversal, TURN.
+Object<main> STUN
+    required uint16    type = 0x0001
+        BINDING_REQUEST          = 0x0001
+        BINDING_SUCCESS_RESPONSE = 0x0101
+        BINDING_ERROR_RESPONSE   = 0x0111
+        ALLOCATE                 = 0x0003
+        ALLOCATE_RESPONSE        = 0x0103
+        REFRESH                  = 0x0004
+        SEND                     = 0x0016
+        DATA                     = 0x0117
+        CREATE_PERMISSION        = 0x0008
+        CHANNEL_BIND             = 0x0009
+    required uint16    length = 0
+    required uint32    magic_cookie = 0x2112A442
+    required bytes<12> transaction_id

@@ -1,0 +1,14 @@
+# PPP header (RFC 1661) — 2 bytes (protocol field only; address 0xFF + control 0x03 omitted when ACFC negotiated)
+# Carried over serial links, L2TP, PPTP, and PPPoE (after the PPPoE session header).
+Object<main> PPP
+    required uint16 proto = 0x0021
+        IP       = 0x0021
+        IPV6     = 0x0057
+        IPX      = 0x002B
+        MPLS_UC  = 0x0281
+        MPLS_MC  = 0x0283
+        LCP      = 0xC021
+        PAP      = 0xC023
+        CHAP     = 0xC223
+        IPCP     = 0x8021
+        IPV6CP   = 0x8057

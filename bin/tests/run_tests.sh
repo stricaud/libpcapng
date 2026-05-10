@@ -521,6 +521,73 @@ else
     fail "replacepkt: out-of-range error message missing"
 fi
 
+# ── Wireshark sample captures — real packet bytes ────────────────────────────
+echo ""
+echo "-- Wireshark sample captures --"
+
+WS_OUT=$("$PCAPSH" bin/tests/test_wireshark_samples.pcapsh 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+
+check_ws() {
+    local desc="$1"; local expected="$2"
+    if echo "$WS_OUT" | grep -q "$expected"; then
+        ok "$desc"
+    else
+        fail "$desc — expected '$expected' in output"
+    fi
+}
+
+# BFD
+check_ws "BFD: detect_mult=5"             "detect_mult=5"
+check_ws "BFD: my_discriminator=1"        "my_discriminator=1"
+check_ws "BFD: desired_min_tx=1000000"    "desired_min_tx=1000000"
+check_ws "BFD: diag enum DIAG_NO_DIAG"   "DIAG_NO_DIAG"
+
+# OSPF
+check_ws "OSPF: version=2"                "version=2"
+check_ws "OSPF: type=HELLO"               "type=HELLO"
+check_ws "OSPF: router_id=192.168.170.8"  "router_id=192.168.170.8"
+check_ws "OSPF: area_id=0.0.0.1"          "area_id=0.0.0.1"
+
+# EIGRP
+check_ws "EIGRP: opcode=HELLO"            "opcode=HELLO"
+check_ws "EIGRP: as_number=100"           "as_number=100"
+check_ws "EIGRP: version=2"              "version=2"
+
+# IGMP
+check_ws "IGMP: type=MEMBERSHIP_QUERY"   "type=MEMBERSHIP_QUERY"
+check_ws "IGMP: max_resp_time=100"       "max_resp_time=100"
+
+# RSVP
+check_ws "RSVP: msg_type=PATH"           "msg_type=PATH"
+check_ws "RSVP: send_ttl=254"            "send_ttl=254"
+check_ws "RSVP: rsvp_length=136"         "rsvp_length=136"
+
+# PTPv2
+check_ws "PTPv2: ts_msg_type=PDELAY_REQ" "ts_msg_type=PDELAY_REQ"
+check_ws "PTPv2: version=2"              "PTPv2 ts_msg_type=PDELAY_REQ(2) version=2"
+check_ws "PTPv2: message_len=54"         "message_len=54"
+check_ws "PTPv2: seq_id=1118"            "seq_id=1118"
+
+# CDP
+check_ws "CDP: version=1"               "CDP version=1"
+check_ws "CDP: ttl=180"                 "ttl=180"
+
+# LACP
+check_ws "LACP: subtype=LACP"           "subtype=LACP"
+check_ws "LACP: actor_key=32768"        "actor_key=32768"
+check_ws "LACP: actor_port=18"          "actor_port=18"
+
+# DCCP
+check_ws "DCCP: sport=32772"            "sport=32772"
+check_ws "DCCP: dport=5001"             "dport=5001"
+
+# DHCPv6
+check_ws "DHCPv6: msg_type=SOLICIT"     "msg_type=SOLICIT"
+
+# BGP
+check_ws "BGP: type=KEEPALIVE"          "type=KEEPALIVE"
+check_ws "BGP: length=19"              "length=19"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

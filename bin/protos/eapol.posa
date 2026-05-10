@@ -1,0 +1,15 @@
+# EAPOL header (IEEE 802.1X) — 4 bytes
+# EtherType 0x888E. length = byte count of the body that follows (0 for START/LOGOFF).
+Object<main> EAPOL
+    required uint8  version = 1
+    required uint8  type = 0
+        EAP_PACKET  = 0
+        START       = 1
+        LOGOFF      = 2
+        KEY         = 3
+        ASF_ALERT   = 4
+        MKA         = 5
+        ANNOUNCEMENT_GENERIC  = 6
+        ANNOUNCEMENT_SPECIFIC = 7
+        ANNOUNCEMENT_REQ      = 8
+    required uint16 length = 0

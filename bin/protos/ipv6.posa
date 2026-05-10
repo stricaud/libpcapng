@@ -1,0 +1,23 @@
+# IPv6 fixed header (RFC 8200) — 40 bytes
+# ver_tc_fl: version(4)=6 | traffic-class(8) | flow-label(20). Default 0x60000000.
+# next_header uses the same protocol numbers as IPv4 proto field.
+# src and dst are 16-byte big-endian addresses.
+Object<main> IPv6
+    required uint32    ver_tc_fl = 0x60000000
+    required uint16    payload_len = 0
+    required uint8     next_header = 59
+        HOPBYHOP = 0
+        ICMP     = 1
+        TCP      = 6
+        UDP      = 17
+        ROUTING  = 43
+        FRAGMENT = 44
+        ESP      = 50
+        AH       = 51
+        ICMPV6   = 58
+        NONEXT   = 59
+        DSTOPTS  = 60
+        SCTP     = 132
+    required uint8     hop_limit = 64
+    required bytes<16> src
+    required bytes<16> dst

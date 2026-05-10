@@ -1,0 +1,27 @@
+# BFD Control packet (RFC 5880) — 24-byte mandatory header
+# UDP port 3784 (single-hop) or 4784 (multi-hop).
+# vers_diag: Ver(3)=1 | Diag(5). sta_flags: State(2) | P|F|C|A|D|M flags.
+# Intervals are in microseconds. Auth section (if any) follows the mandatory header.
+Object<main> BFD
+    required uint8  vers_diag = 0x20
+        DIAG_NO_DIAG            = 0x20
+        DIAG_CTRL_DETECT_EXPIRY = 0x21
+        DIAG_ECHO_FAILED        = 0x22
+        DIAG_NEIGHBOR_SIGNALED  = 0x23
+        DIAG_FWD_PLANE_RESET    = 0x24
+        DIAG_PATH_DOWN          = 0x25
+        DIAG_CONCAT_PATH_DOWN   = 0x26
+        DIAG_ADMIN_DOWN         = 0x27
+        DIAG_REVERSE_CONCAT     = 0x28
+    required uint8  sta_flags = 0xC0
+        STATE_ADMIN_DOWN = 0x00
+        STATE_DOWN       = 0x40
+        STATE_INIT       = 0x80
+        STATE_UP         = 0xC0
+    required uint8  detect_mult = 3
+    required uint8  length = 24
+    required uint32 my_discriminator = 1
+    required uint32 your_discriminator = 0
+    required uint32 desired_min_tx = 300000
+    required uint32 required_min_rx = 300000
+    required uint32 required_min_echo = 0

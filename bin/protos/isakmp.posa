@@ -1,0 +1,20 @@
+# ISAKMP header (RFC 2408, IKEv1) — 28 bytes
+# UDP port 500. version 0x10 = major 1 / minor 0. Distinguishable from IKEv2 by version field.
+# IDENTITY_PROTECT (main mode) and AGGRESSIVE are the two common exchange types.
+Object<main> ISAKMP
+    required bytes<8> initiator_cookie
+    required bytes<8> responder_cookie
+    required uint8    next_payload = 0
+    required uint8    version = 0x10
+    required uint8    exchange_type = 2
+        NONE             = 0
+        BASE             = 1
+        IDENTITY_PROTECT = 2
+        AUTH_ONLY        = 3
+        AGGRESSIVE       = 4
+        INFORMATIONAL    = 5
+        QUICK_MODE       = 32
+        NEW_GROUP_MODE   = 33
+    required uint8    flags = 0
+    required uint32   message_id = 0
+    required uint32   length = 28

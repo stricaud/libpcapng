@@ -1,0 +1,16 @@
+# IKEv2 header (RFC 7296) — 28 bytes
+# UDP port 500 (or 4500 for NAT-T). version 0x20 = major 2, minor 0.
+# flags: 0x08 = Initiator, 0x20 = Response, 0x28 = both.
+Object<main> IKEv2
+    required bytes<8> initiator_spi
+    required bytes<8> responder_spi
+    required uint8    next_payload = 0
+    required uint8    version = 0x20
+    required uint8    exchange_type = 34
+        IKE_SA_INIT     = 34
+        IKE_AUTH        = 35
+        CREATE_CHILD_SA = 36
+        INFORMATIONAL   = 37
+    required uint8    flags = 0x08
+    required uint32   message_id = 0
+    required uint32   length = 28
