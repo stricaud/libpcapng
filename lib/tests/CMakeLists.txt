@@ -35,3 +35,7 @@ add_test(Rdp-Write rdp-write)
 add_executable(reasm reasm.c)
 target_link_libraries(reasm ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(Reasm reasm)
+
+add_executable(pcapng-spec pcapng-spec.c)
+target_link_libraries(pcapng-spec ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Pcapng-Spec pcapng-spec)

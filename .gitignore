@@ -1,2 +1,19 @@
 *~
 .pcapsh_history
+
+# build output
+build/
+*.so
+*.dylib
+*.elc
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS metadata
+.DS_Store
+
+# pcapng capture files at repo root (test/scratch files)
+*.pcapng

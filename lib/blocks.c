@@ -42,9 +42,17 @@ size_t libpcapng_section_header_block_size(void)
 
 pcapng_section_header_block_light_t *libpcapng_section_header_block_read(unsigned char *inbuf, size_t inbuf_len)
 {
+	pcapng_section_header_block_t *raw;
 	pcapng_section_header_block_light_t *shb;
 
-	shb = (pcapng_section_header_block_light_t *)inbuf;
+	shb = (pcapng_section_header_block_light_t *)malloc(sizeof(*shb));
+	if (!shb) return NULL;
+
+	raw = (pcapng_section_header_block_t *)inbuf;
+	shb->magic          = raw->magic;
+	shb->major_version  = raw->major_version;
+	shb->minor_version  = raw->minor_version;
+	shb->section_length = raw->section_length;
 
 	return shb;
 }
@@ -94,6 +102,22 @@ size_t libpcapng_interface_description_block_write_with_linktype(uint32_t snaple
 size_t libpcapng_interface_description_block_size(void)
 {
 	return sizeof(pcapng_interface_description_block_t) + BLOCK_TOTAL_LENGTH_SIZE;
+}
+
+pcapng_interface_description_block_light_t *libpcapng_interface_description_block_read(unsigned char *inbuf, size_t inbuf_len)
+{
+	pcapng_interface_description_block_t *idb;
+	pcapng_interface_description_block_light_t *light;
+
+	idb = (pcapng_interface_description_block_t *)inbuf;
+	light = (pcapng_interface_description_block_light_t *)malloc(sizeof(*light));
+	if (!light) return NULL;
+
+	light->linktype = idb->linktype;
+	light->reserved = idb->reserved;
+	light->snaplen  = idb->snaplen;
+
+	return light;
 }
 
 size_t libpcapng_enhanced_packet_block_write_time(const unsigned char *packet, const size_t packet_len, uint32_t timestamp_high, uint32_t timestamp_low, unsigned char *outbuf)
