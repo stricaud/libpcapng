@@ -21,6 +21,7 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/protocols/dhcp.h
   include/libpcapng/protocols/ntp.h
   include/libpcapng/protocols/ssl.h
+  include/libpcapng/protocols/ssh.h
   include/libpcapng/protocols/http2.h
   include/libpcapng/protocols/http2_hpack.h
   include/libpcapng/protocols/http2_stream.h
@@ -45,6 +46,7 @@ set(LIBPCAPNG_SOURCES
   protocols/dhcp.c
   protocols/ntp.c
   protocols/ssl.c
+  protocols/ssh.c
   protocols/http2.c
   protocols/http2_hpack.c
   protocols/http2_stream.c

@@ -2,6 +2,7 @@
  * Included as part of the pcapsh unity build (see pcapsh.c). */
 #include "pcapsh.h"
 #include <libpcapng/protocols/ssl.h>
+#include <libpcapng/protocols/ssh.h>
 
 int g_tls_used = 0; /* set when any TLS_* function or TLS() layer is used */
 
@@ -529,10 +530,26 @@ EvalResult eval_primary(Lex *L) {
             }
             /* TLS handshake record builders */
             if (!strcmp(name,"TLS_CLIENT_HELLO")) {
+                /* Optional: TLS_CLIENT_HELLO(sni="hostname") */
+                char sni[256] = "";
+                while (L->cur.type != T_RPAREN && L->cur.type != T_EOF) {
+                    if (L->cur.type == T_IDENT && !strcmp(L->cur.s, "sni")) {
+                        lex_adv(L);
+                        if (L->cur.type == T_EQ) lex_adv(L);
+                        if (L->cur.type == T_STR) {
+                            strncpy(sni, L->cur.s, sizeof(sni)-1);
+                            lex_adv(L);
+                        }
+                    } else {
+                        lex_adv(L);
+                    }
+                    if (L->cur.type == T_COMMA) lex_adv(L);
+                }
                 if (L->cur.type == T_RPAREN) lex_adv(L);
                 uint8_t *buf = malloc(1024);
                 if (!buf) { r.is_none = 1; return r; }
-                size_t n = tls_build_client_hello(buf, 1024);
+                size_t n = sni[0] ? tls_build_client_hello_sni(buf, 1024, sni)
+                                  : tls_build_client_hello(buf, 1024);
                 r.raw = buf; r.raw_len = n; r.is_raw = 1;
                 g_tls_used = 1;
                 return r;
@@ -546,10 +563,26 @@ EvalResult eval_primary(Lex *L) {
                 return r;
             }
             if (!strcmp(name,"TLS_CERTIFICATE")) {
+                /* Optional: TLS_CERTIFICATE(cn="Common Name") */
+                char cn[256] = "";
+                while (L->cur.type != T_RPAREN && L->cur.type != T_EOF) {
+                    if (L->cur.type == T_IDENT && !strcmp(L->cur.s, "cn")) {
+                        lex_adv(L);
+                        if (L->cur.type == T_EQ) lex_adv(L);
+                        if (L->cur.type == T_STR) {
+                            strncpy(cn, L->cur.s, sizeof(cn)-1);
+                            lex_adv(L);
+                        }
+                    } else {
+                        lex_adv(L);
+                    }
+                    if (L->cur.type == T_COMMA) lex_adv(L);
+                }
                 if (L->cur.type == T_RPAREN) lex_adv(L);
                 uint8_t *buf = malloc(4096);
                 if (!buf) { r.is_none = 1; return r; }
-                size_t n = tls_build_certificate(buf, 4096, NULL, 0);
+                size_t n = cn[0] ? tls_build_certificate_with_cn(buf, 4096, cn)
+                                 : tls_build_certificate(buf, 4096, NULL, 0);
                 r.raw = buf; r.raw_len = n; r.is_raw = 1;
                 return r;
             }
@@ -566,6 +599,38 @@ EvalResult eval_primary(Lex *L) {
                 uint8_t *buf = malloc(256);
                 if (!buf) { r.is_none = 1; return r; }
                 size_t n = tls_build_finished(buf, 256);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                return r;
+            }
+            /* SSH binary packet builders */
+            if (!strcmp(name,"SSH_KEXINIT")) {
+                /* Optional: SSH_KEXINIT(side="server")  default: client */
+                int is_server = 0;
+                while (L->cur.type != T_RPAREN && L->cur.type != T_EOF) {
+                    if (L->cur.type == T_IDENT && !strcmp(L->cur.s, "side")) {
+                        lex_adv(L);
+                        if (L->cur.type == T_EQ) lex_adv(L);
+                        if (L->cur.type == T_STR) {
+                            if (!strcmp(L->cur.s, "server")) is_server = 1;
+                            lex_adv(L);
+                        }
+                    } else {
+                        lex_adv(L);
+                    }
+                    if (L->cur.type == T_COMMA) lex_adv(L);
+                }
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                uint8_t *buf = malloc(2048);
+                if (!buf) { r.is_none = 1; return r; }
+                size_t n = ssh_build_kexinit(buf, 2048, is_server);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                return r;
+            }
+            if (!strcmp(name,"SSH_NEWKEYS")) {
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                uint8_t *buf = malloc(32);
+                if (!buf) { r.is_none = 1; return r; }
+                size_t n = ssh_build_newkeys(buf, 32);
                 r.raw = buf; r.raw_len = n; r.is_raw = 1;
                 return r;
             }
@@ -767,6 +832,19 @@ EvalResult eval_primary(Lex *L) {
                        CBYEL "Operators:\n" CR
                        "  " CCYN "/" CR "         stack layers:  IP()/UDP()/DNS()\n"
                        "  " CCYN "=" CR "         assign:        a = Ether()/IP()/TCP()\n"
+                       "\n"
+                       CBYEL "TLS helpers:\n" CR
+                       "  " CCYN "TLS_CLIENT_HELLO" CR "([sni=\"host\"])   "
+                       CCYN "TLS_SERVER_HELLO" CR "()\n"
+                       "  " CCYN "TLS_CERTIFICATE" CR "([cn=\"Common Name\"])   "
+                       CCYN "TLS_CHANGE_CIPHER_SPEC" CR "()\n"
+                       "  " CCYN "TLS_FINISHED" CR "()\n"
+                       "\n"
+                       CBYEL "SSH helpers (binary packet framing, RFC 4253):\n" CR
+                       "  " CCYN "SSH_KEXINIT" CR "([side=\"server\"])   "
+                       CCYN "SSH_NEWKEYS" CR "()\n"
+                       "  Banner (plain text, use string literal): "
+                       "\"SSH-2.0-OpenSSH_9.5\\r\\n\"\n"
                        "\n"
                        CBYEL "Functions:\n" CR
                        "  " CCYN "hexdump" CR "(pkt)              hex dump bytes\n"
