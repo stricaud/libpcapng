@@ -611,15 +611,87 @@ size_t pkt_to_raw_ex(layer_t *pkt, uint8_t *buf, size_t bufsz, int keep_eth) {
             if (flg->type==FT_STR && flg->s[0]) tf = parse_tcp_flags(flg->s);
             else if (flg->type==FT_U64) tf = (uint8_t)flg->n;
         }
-        uint32_t sip = get_ip4(l_ip, "src", "127.0.0.1");
-        uint32_t dip = get_ip4(l_ip, "dst", "127.0.0.1");
-        libpcapng_tcp_packet_build(src_mac, dst_mac, sip, dip,
-            (uint16_t)get_u64(l_tcp,"sport",20),
-            (uint16_t)get_u64(l_tcp,"dport",80),
-            (uint32_t)get_u64(l_tcp,"seq",0),
-            (uint32_t)get_u64(l_tcp,"ack",0),
-            tf,
-            payload, plen, buf, &frame_len);
+
+        uint32_t sip   = get_ip4(l_ip, "src", "127.0.0.1");
+        uint32_t dip   = get_ip4(l_ip, "dst", "127.0.0.1");
+        uint16_t sport = (uint16_t)get_u64(l_tcp, "sport",  20);
+        uint16_t dport = (uint16_t)get_u64(l_tcp, "dport",  80);
+        uint32_t seq_n = (uint32_t)get_u64(l_tcp, "seq",     0);
+        uint32_t ack_n = (uint32_t)get_u64(l_tcp, "ack",     0);
+        uint16_t win   = (uint16_t)get_u64(l_tcp, "window", 65535);
+        uint8_t  ttl   = (uint8_t) get_u64(l_ip,  "ttl",    64);
+
+        /* IP id: use the layer value only when explicitly set */
+        field_t *id_f   = find_field(l_ip, "id");
+        int      has_id = id_f && !id_f->is_auto && id_f->type == FT_U64;
+        uint16_t ip_id  = has_id ? (uint16_t)id_f->n : (uint16_t)(rand() & 0xffff);
+
+        /* TCP options: MSS and SACK_PERM */
+        uint8_t opts[40]; int optlen = 0;
+        uint16_t mss       = (uint16_t)get_u64(l_tcp, "mss",       0);
+        int      sack_perm = (int)     get_u64(l_tcp, "sack_perm", 0);
+        if (mss) {
+            opts[optlen++] = 0x02; opts[optlen++] = 0x04;
+            opts[optlen++] = (uint8_t)(mss >> 8); opts[optlen++] = (uint8_t)mss;
+        }
+        if (sack_perm) {
+            opts[optlen++] = 0x01; opts[optlen++] = 0x01; /* NOP NOP */
+            opts[optlen++] = 0x04; opts[optlen++] = 0x02; /* SACK_PERM */
+        }
+        while (optlen & 3) opts[optlen++] = 0x01; /* NOP pad to 4-byte boundary */
+
+        /* Build Ethernet + IP + TCP frame in buf */
+        size_t tcp_seg_len = 20 + optlen + plen;
+        size_t ip_total    = 20 + tcp_seg_len;
+        size_t off = 0;
+
+        /* Ethernet */
+        memcpy(buf+off, dst_mac, 6); off += 6;
+        memcpy(buf+off, src_mac, 6); off += 6;
+        buf[off++] = 0x08; buf[off++] = 0x00;
+
+        /* IPv4 */
+        struct libpcapng_ipv4_hdr *iph = (struct libpcapng_ipv4_hdr *)(buf+off);
+        libpcapng_fill_ipv4_header(iph, sip, dip, (uint16_t)ip_total, IPPROTO_TCP);
+        iph->ttl = ttl;
+        iph->id  = htons(ip_id);
+        /* IP flags: DF=2, MF=1 → frag_off bits */
+        uint8_t ip_flags = (uint8_t)get_u64(l_ip, "flags", 0);
+        uint16_t frag_word = 0;
+        if (ip_flags & 2) frag_word |= 0x4000; /* DF */
+        if (ip_flags & 1) frag_word |= 0x2000; /* MF */
+        iph->frag_off = htons(frag_word);
+        iph->checksum = 0;
+        iph->checksum = libpcapng_ip_checksum(iph, 20);
+        off += 20;
+
+        /* TCP header */
+        struct tcp_hdr *tcph = (struct tcp_hdr *)(buf+off);
+        libpcapng_fill_tcp_header(tcph, sport, dport, seq_n, ack_n, tf, win);
+        tcph->doff = (uint8_t)((20 + optlen) / 4);
+        off += 20;
+
+        /* TCP options */
+        if (optlen) { memcpy(buf+off, opts, optlen); off += optlen; }
+
+        /* Payload */
+        if (payload && plen) { memcpy(buf+off, payload, plen); off += plen; }
+
+        /* TCP checksum over pseudo-header + full TCP segment (header+opts+payload) */
+        tcph->checksum = 0;
+        uint32_t chk = 0;
+        chk += (sip >> 16) & 0xffff; chk += sip & 0xffff;
+        chk += (dip >> 16) & 0xffff; chk += dip & 0xffff;
+        chk += htons(IPPROTO_TCP);
+        chk += htons((uint16_t)tcp_seg_len);
+        const uint8_t *seg = buf + 14 + 20;
+        for (size_t i = 0; i + 1 < tcp_seg_len; i += 2)
+            chk += (uint32_t)((seg[i] << 8) | seg[i+1]);
+        if (tcp_seg_len & 1) chk += (uint32_t)(seg[tcp_seg_len-1] << 8);
+        while (chk >> 16) chk = (chk & 0xffff) + (chk >> 16);
+        tcph->checksum = htons(~chk & 0xffff);
+
+        frame_len = off;
         prepended_eth = 1;
     } else if (l_udp && l_ip) {
         uint32_t sip = get_ip4(l_ip, "src", "127.0.0.1");
@@ -783,6 +855,8 @@ static const proto_field_info_t tcp_fields[] = {
     {"window",  "Window size",              FT_U64,  2,   8192, NULL},
     {"chksum",  "Checksum",                 FT_U64,  2,      0, "(auto)"},
     {"urgptr",  "Urgent pointer",           FT_U64,  2,      0, NULL},
+    {"mss",     "Max segment size option",  FT_U64,  2,      0, "0=none"},
+    {"sack_perm","SACK permitted option",   FT_U64,  1,      0, "0=none"},
     {NULL,NULL,0}
 };
 static const proto_field_info_t udp_fields[] = {
