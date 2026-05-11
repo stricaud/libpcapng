@@ -1,0 +1,46 @@
+# test_wireshark_samples.pcapsh — decode real bytes from Wireshark sample captures
+
+# BFD (RFC 5880) — 24-byte mandatory header, UDP 3784
+# vers_diag=0x20 (version=1, diag=0), sta_flags=0x44, detect_mult=5, length=33
+# my_discriminator=1, desired_min_tx=1000000 (0x000F4240)
+show("BFD", fromhex("20 44 05 21 00 00 00 01 00 00 00 00 00 0f 42 40 00 0f 42 40 00 00 00 00"))
+
+# OSPF Hello (RFC 2328) — 24-byte header, IP proto 89
+# version=2, type=HELLO, router_id=192.168.170.8, area_id=0.0.0.1
+show("OSPF", fromhex("02 01 00 2c c0 a8 aa 08 00 00 00 01 27 3b 00 00 00 00 00 00 00 00 00 00"))
+
+# EIGRP Hello (RFC 7868) — 20-byte header, IP proto 88
+# version=2, opcode=HELLO, as_number=100
+show("EIGRP", fromhex("02 05 ee 68 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 64"))
+
+# IGMP Membership Query — 8 bytes, IP proto 2
+# type=MEMBERSHIP_QUERY(0x11), max_resp_time=100 (10 seconds), group=0.0.0.0
+show("IGMP", fromhex("11 64 ee 9b 00 00 00 00"))
+
+# RSVP Path — 8-byte header, IP proto 46
+# version_flags=0x10, msg_type=PATH, send_ttl=254, rsvp_length=136
+show("RSVP", fromhex("10 01 0a 55 fe 00 00 88"))
+
+# PTPv2 Pdelay_Req (IEEE 1588-2008) — 34-byte header, EtherType 0x88F7
+# ts_msg_type=PDELAY_REQ(2), version=2, message_len=54, seq_id=1118
+show("PTPv2", fromhex("02 02 00 36 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 63 ff ff 00 09 ba 00 02 04 5e 05 0f"))
+
+# CDP (Cisco Discovery Protocol) — 4-byte header
+# version=1, ttl=180
+show("CDP", fromhex("01 b4 df f0"))
+
+# LACP (IEEE 802.3ad) — subtype+version+actor TLV, EtherType 0x8809
+# subtype=LACP(1), actor_key=32768, actor_port=18
+show("LACP", fromhex("01 01 01 14 91 f4 00 04 96 1f 50 6a 80 00 00 00 00 12 47 00 00 00"))
+
+# DCCP — 10-byte fixed header, IP proto 33
+# sport=32772 (0x8004), dport=5001 (0x1389)
+show("DCCP", fromhex("80 04 13 89 05 00 08 db 01 00"))
+
+# DHCPv6 Solicit — 4-byte header, UDP 546/547
+# msg_type=SOLICIT(1), transaction_id=0x123456
+show("DHCPv6", fromhex("01 12 34 56"))
+
+# BGP Keepalive — 19-byte message (marker + length + type)
+# type=KEEPALIVE(4), length=19
+show("BGP", fromhex("ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff 00 13 04"))

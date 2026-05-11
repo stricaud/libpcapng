@@ -26,6 +26,7 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/protocols/http2_stream.h
   include/libpcapng/protocols/tls_stream.h
   include/libpcapng/protocols/tcp_mss.h
+  include/libpcapng/reassembly.h
 )
 
 set(LIBPCAPNG_SOURCES
@@ -49,6 +50,7 @@ set(LIBPCAPNG_SOURCES
   protocols/http2_stream.c
   protocols/tls_stream.c
   protocols/tcp_mss.c
+  reassembly.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})

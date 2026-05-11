@@ -45,7 +45,7 @@ Object<main> NBNS
         NAME_RELEASE_REQUEST     = 0x3000   # OPCODE=6, B=1
         NAME_RELEASE_RESPONSE    = 0xB800   # R=1, OPCODE=6, AA=1
         NAME_WACK                = 0xBC10   # R=1, OPCODE=7, AA=1, RD=1, B=1
-        NAME_REFRESH_REQUEST     = 0x8810   # OPCODE=8(?), RD=1, B=1
+        NAME_REFRESH_REQUEST     = 0x4108   # R=0, OPCODE=8, RD=1, B=1
 
     # ── Section counts ───────────────────────────────────────────────────────
     required uint16 qdcount = 1   # questions

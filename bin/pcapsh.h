@@ -183,7 +183,8 @@ typedef struct { const char *name; int proto; const proto_field_info_t *fields; 
 typedef enum {
     T_EOF, T_IDENT, T_NUM, T_STR,
     T_LPAREN, T_RPAREN, T_COMMA, T_EQ, T_SLASH, T_DOT,
-    T_VAR
+    T_VAR,
+    T_PLUS, T_MINUS, T_STAR
 } TT;
 
 typedef struct {

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <libpcapng/protocols/rdp.h>
+#include <libpcapng/reassembly.h>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
@@ -168,6 +169,25 @@ private:
   uint16_t _rdp_s_port;
 
   static int foreach_packet_cb(uint32_t block_counter, uint32_t block_type, uint32_t block_total_length, unsigned char *data, void *userdata);
+};
+
+/* ── IP fragment reassembler ──────────────────────────────────────────────── */
+class Reassembler {
+public:
+    Reassembler();
+    ~Reassembler();
+
+    /* Feed a packet (raw Ethernet frame or raw IPv4 datagram).
+     * Returns the reassembled IPv4 datagram as bytes when complete,
+     * or None while waiting for more fragments.
+     * Non-fragment packets return None without buffering anything. */
+    py::object add(py::bytes pkt);
+
+    /* Discard all incomplete reassembly state. */
+    void reset();
+
+private:
+    libpcapng_reasm_t *_ctx;
 };
 
 #endif // _PCAPNGPP_H_

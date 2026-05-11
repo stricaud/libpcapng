@@ -887,6 +887,33 @@ void PcapNG::SimulateRdpLogout(const std::string &c_mac, const std::string &s_ma
                                   &_rdp_cfg, &_rdp_sess);
 }
 
+/* ── Reassembler ──────────────────────────────────────────────────────────── */
+
+Reassembler::Reassembler() : _ctx(libpcapng_reasm_new()) {}
+Reassembler::~Reassembler() { libpcapng_reasm_free(_ctx); }
+
+py::object Reassembler::add(py::bytes pkt)
+{
+    std::string raw = pkt;
+    uint8_t *out = nullptr;
+    size_t   out_len = 0;
+    int r = libpcapng_reasm_add(_ctx,
+                                 (const uint8_t *)raw.data(), raw.size(),
+                                 &out, &out_len);
+    if (r == 1 && out) {
+        py::bytes result((const char *)out, (Py_ssize_t)out_len);
+        free(out);
+        return result;
+    }
+    return py::none();
+}
+
+void Reassembler::reset()
+{
+    libpcapng_reasm_free(_ctx);
+    _ctx = libpcapng_reasm_new();
+}
+
 PYBIND11_MODULE(pycapng, m) {
     m.doc() = "libpcapng Python Bindings";
 
@@ -1124,6 +1151,18 @@ PYBIND11_MODULE(pycapng, m) {
     m.attr("PTRFLAGS_MOVE")     = py::int_(PTRFLAGS_MOVE);
     m.attr("PTRFLAGS_BUTTON1")  = py::int_(PTRFLAGS_BUTTON1);
     m.attr("PTRFLAGS_BUTTON2")  = py::int_(PTRFLAGS_BUTTON2);
+
+    py::class_<Reassembler>(m, "Reassembler",
+        "IP fragment reassembler.\n\n"
+        "Feed raw packets with add(); receive the reassembled IPv4 datagram\n"
+        "once the last fragment arrives.  Non-fragment packets return None.")
+      .def(py::init<>())
+      .def("add", &Reassembler::add, py::arg("pkt"),
+           "Feed a packet (Ethernet frame or raw IPv4 datagram).\n"
+           "Returns the reassembled IPv4 datagram (bytes) when complete,\n"
+           "or None while buffering fragments.")
+      .def("reset", &Reassembler::reset,
+           "Discard all incomplete reassembly state.");
 }
 
 

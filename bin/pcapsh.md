@@ -61,6 +61,109 @@ a = IP()   # inline comment
 
 Inside quoted strings: `\r` → CR, `\n` → LF, `\t` → tab, `\xNN` → hex byte, `\\` → backslash.
 
+### Arithmetic in field values
+
+Numeric field values accept `+`, `-`, and `*` expressions. Operands can be integer
+literals, hex literals, or `$variables`:
+
+```
+UDP(sport=49000+7)              # → sport=49007
+TCP(seq=1+$i*68)                # → seq varies with loop variable
+UDP(sport=0xC000+3)             # → sport=49155
+IP(id=0x100*2+1)                # → id=513
+```
+
+Operator precedence follows standard rules: `*` binds tighter than `+`/`-`.
+Division inside field values is not supported (the `/` character is reserved for
+layer stacking).
+
+---
+
+## Scripting
+
+### Variables
+
+Variables are assigned with `=`. A variable can hold a packet, raw bytes, a
+TCPSession, or a numeric value. In scripts, numeric variables are most commonly
+set by for-loop counters.
+
+```
+a = Ether()/IP()/TCP()        # packet variable
+n = 42                        # numeric variable
+wrpcap("out.pcapng", a)
+hexdump(a)
+```
+
+### For-loops
+
+```
+for $varname in range(stop):
+    BODY_LINE
+    BODY_LINE
+```
+
+- `$varname` is set to **1, 2, … stop** (inclusive) on each iteration.
+- Body lines must be indented with at least one space or tab.
+- An empty line or an un-indented line ends the loop body.
+
+**range variants:**
+
+| Form | Values |
+|------|--------|
+| `range(N)` | 1, 2, … N |
+| `range(start, stop)` | start, start+1, … stop-1 |
+| `range(start, stop, step)` | start, start+step, … while < stop |
+
+**Notes:**
+- `$varname` substitutes **only into numeric fields** — it cannot be interpolated
+  into string fields such as IP addresses or MAC addresses.
+- Combine with arithmetic to avoid low well-known port numbers:
+  `sport=49000+$i` instead of `sport=$i`.
+
+**Examples:**
+
+```
+# 20 NTP requests from ports 49152-49171
+for $i in range(20):
+    wrpcap("ntp.pcapng", Ether()/IP()/UDP(sport=49151+$i,dport=123)/NTP(li_vn_mode=CLIENT))
+
+# DNS queries with varying transaction IDs
+for $i in range(10):
+    wrpcap("dns.pcapng", IP()/UDP(dport=53)/DNS(id=$i,rd=1,qd=DNSQR(qname="example.com")))
+
+# Explicit start and step
+for $i in range(1, 100, 10):
+    wrpcap("out.pcapng", UDP(sport=5000+$i,dport=9000))
+```
+
+### Inline protocol definition
+
+Define a protocol directly inside a script or the REPL without a separate `.posa` file:
+
+```
+protocol NAME
+    required TYPE fieldname = default
+        ENUM_NAME = value
+    required TYPE field2 = default
+end
+```
+
+The protocol is immediately available as `NAME(...)` and visible in `ls()`.
+
+```
+protocol MyHdr
+    required uint8  version = 1
+    required uint8  flags = 0
+        FLAG_URGENT = 0x01
+        FLAG_RETRY  = 0x02
+    required uint16 length = 0
+    required uint32 session_id = 0
+end
+
+hexdump(IP()/UDP(dport=9000)/MyHdr(flags=FLAG_URGENT, session_id=0xdeadbeef))
+wrpcap("custom.pcapng", Ether()/IP()/UDP(dport=9000)/MyHdr(version=2))
+```
+
 ---
 
 ## Built-in Protocols
@@ -372,15 +475,43 @@ IP(src="10.0.0.1",dst="10.0.0.2")/UDP(sport=49152,dport=1812)/RADIUS(code=ACCESS
 
 ### SYSLOG
 
-```
-IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=514)/SYSLOG(severity=WARNING, facility=1)
-```
+> **Note:** The `SYSLOG()` object emits only the PRI byte (one byte encoding facility
+> and severity). It does **not** produce a complete RFC 3164 or RFC 5424 message body
+> (no timestamp, hostname, or message text), so Wireshark will report
+> *"Message conforms to neither RFC 5424 nor RFC 3164"*.
+>
+> For RFC 3164-compliant output, use a raw string payload instead:
+>
+> ```
+> # facility=4 (auth), severity=INFO=6 → PRI = 4*8+6 = 38
+> IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=514)/"<38>May 11 10:00:01 host tag: message"
+> ```
+>
+> The `SYSLOG()` object is useful when you only need to mark the protocol for
+> custom dissectors or tooling that does not validate the message body:
+>
+> ```
+> IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=514)/SYSLOG(severity=WARNING, facility=1)
+> ```
 
 | Field    | Type   | Default | Enums |
 |----------|--------|---------|-------|
 | severity | uint8  | 6       | EMERGENCY=0, ALERT=1, CRITICAL=2, ERROR=3, WARNING=4, NOTICE=5, INFO=6, DEBUG=7 |
-| facility | uint8  | 1       | |
-| message  | string | ""      | |
+| facility | uint8  | 1       | User=1, Mail=2, Daemon=3, Auth=4, Syslog=5, LPR=6, News=7 |
+| message  | string | ""      | (not included in wire output — use raw string for full RFC 3164 body) |
+
+**RFC 3164 PRI calculation:** `PRI = facility × 8 + severity`
+
+| Facility | Code | Severity | Code |
+|----------|------|----------|------|
+| kernel   | 0    | EMERGENCY | 0  |
+| user     | 1    | ALERT     | 1  |
+| mail     | 2    | CRITICAL  | 2  |
+| daemon   | 3    | ERROR     | 3  |
+| auth     | 4    | WARNING   | 4  |
+| syslog   | 5    | NOTICE    | 5  |
+| lpr      | 6    | INFO      | 6  |
+| news     | 7    | DEBUG     | 7  |
 
 ### NBT (NetBIOS Session Service)
 
@@ -456,6 +587,125 @@ IP()/TCP(dport=636)/LDAP(op_tag=BIND_REQUEST, message_id=1)
 | op_tag     | uint8 | 0x60    | BIND_REQUEST=0x60, BIND_RESPONSE=0x61, UNBIND_REQUEST=0x42, SEARCH_REQUEST=0x63, SEARCH_RESULT_ENTRY=0x64, SEARCH_RESULT_DONE=0x65, MODIFY_REQUEST=0x66, MODIFY_RESPONSE=0x67, ADD_REQUEST=0x68, ADD_RESPONSE=0x69, DEL_REQUEST=0x4A, DEL_RESPONSE=0x6B |
 | op_len     | uint8 | 0       | operation length |
 
+### NBNS (NetBIOS Name Service)
+
+NetBIOS Name Service — RFC 1001/1002, **UDP port 137**.
+This is the layer-3 name resolution protocol used in Windows networks (distinct from
+NBT Session Service on TCP 139, which is the `NBT` built-in).
+
+```
+# Name query broadcast (who has FILESERVER?)
+Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="10.0.1.1",dst="10.0.1.255")/UDP(sport=137,dport=137)/NBNS(trans_id=0x1234,flags=NAME_QUERY_REQUEST,qdcount=1)
+
+# Name registration (workstation announces itself)
+Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="10.0.1.5",dst="10.0.1.255")/UDP(sport=137,dport=137)/NBNS(flags=NAME_REGISTRATION_REQUEST,qdcount=1,arcount=1)
+
+# Positive query response
+Ether()/IP(src="10.0.0.1",dst="10.0.1.1")/UDP(sport=137,dport=137)/NBNS(trans_id=0x1234,flags=NAME_QUERY_RESPONSE_POS,ancount=1)
+```
+
+| Field    | Type   | Default | Notes |
+|----------|--------|---------|-------|
+| trans_id | uint16 | 0       | echoed in responses |
+| flags    | uint16 | 0x0110  | see enum table below |
+| qdcount  | uint16 | 1       | question count |
+| ancount  | uint16 | 0       | answer records |
+| nscount  | uint16 | 0       | authority records |
+| arcount  | uint16 | 0       | additional records |
+| queries  | payload| —       | NetBIOS-encoded names and resource records |
+
+**flags enum values:**
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| NAME_QUERY_REQUEST | 0x0110 | R=0, RD=1, B=1 — broadcast query |
+| NAME_QUERY_UNICAST | 0x0100 | R=0, RD=1 — unicast query to WINS |
+| NAME_QUERY_RESPONSE_POS | 0x8500 | R=1, AA=1, RD=1, RA=1 — positive |
+| NAME_QUERY_RESPONSE_NEG | 0x8506 | R=1, AA=1, RA=1, RCODE=6 — negative |
+| NAME_REGISTRATION_REQUEST | 0x2910 | R=0, OPCODE=5, RD=1, B=1 |
+| NAME_REGISTRATION_RESPONSE | 0xAD10 | R=1, OPCODE=5, AA=1, RD=1 |
+| NAME_RELEASE_REQUEST | 0x3000 | R=0, OPCODE=6, B=1 |
+| NAME_RELEASE_RESPONSE | 0xB800 | R=1, OPCODE=6, AA=1 |
+| NAME_WACK | 0xBC10 | R=1, OPCODE=7, AA=1, RD=1, B=1 |
+| NAME_REFRESH_REQUEST | 0x4108 | R=0, OPCODE=8, RD=1, B=1 |
+
+### KRB5 (Kerberos 5)
+
+Kerberos 5 — RFC 4120, **TCP or UDP port 88**.
+
+The `KRB5` object models the fixed-position ASN.1 DER bytes that appear at the start
+of every Kerberos PDU: the 4-byte TCP record mark, APPLICATION tag, outer length, SEQUENCE
+wrapper, `pvno` (always 5), and `msg-type`. The variable body (PA-DATA, KDC-REQ-BODY,
+EncryptedData, error fields, etc.) is captured in the trailing `payload body` field.
+
+Total fixed header size: **18 bytes**.
+
+On **TCP**, each KRB5 PDU is preceded by a 4-byte big-endian length (`record_mark`).
+On **UDP**, set `record_mark=0` — it occupies no wire space and can be ignored.
+
+```
+# AS-REQ (client → KDC, TCP)
+IP(src="10.0.1.1",dst="10.0.0.1")/TCP(dport=88,flags="PA",seq=1,ack=1)/KRB5(app_tag=AS_REQ,msg_type=AS_REQUEST)
+
+# KRB-ERROR PREAUTH_REQUIRED (KDC → client)
+IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,flags="PA",seq=1,ack=19)/KRB5(app_tag=KRB_ERROR,msg_type=KRB_ERROR_VAL)
+
+# TGS-REP (KDC → client)
+IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,flags="PA")/KRB5(app_tag=TGS_REP,msg_type=TGS_REPLY)
+```
+
+| Field      | Type   | Default | Notes |
+|------------|--------|---------|-------|
+| record_mark | uint32 | 0      | TCP: big-endian PDU length; set 0 for UDP or test packets |
+| app_tag    | uint8  | 0x6a   | ASN.1 APPLICATION tag (see enum below) |
+| body_len   | uint8  | 0      | outer BER/DER length (0 = acceptable for test packets) |
+| seq_tag    | uint8  | 0x30   | SEQUENCE wrapper tag |
+| seq_len    | uint8  | 0      | |
+| ctx1_tag   | uint8  | 0xa1   | CONTEXT [1] — pvno |
+| ctx1_len   | uint8  | 0x03   | |
+| pvno_tag   | uint8  | 0x02   | UNIVERSAL INTEGER |
+| pvno_len   | uint8  | 0x01   | |
+| pvno       | uint8  | 5      | Kerberos protocol version (always 5) |
+| ctx2_tag   | uint8  | 0xa2   | CONTEXT [2] — msg-type |
+| ctx2_len   | uint8  | 0x03   | |
+| mtype_tag  | uint8  | 0x02   | UNIVERSAL INTEGER |
+| mtype_len  | uint8  | 0x01   | |
+| msg_type   | uint8  | 10     | message type (see enum below) |
+| body       | payload| —      | PA-DATA, KDC-REQ-BODY, EncryptedData, etc. |
+
+**app_tag enum values:**
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| AS_REQ   | 0x6a  | [APPLICATION 10] Authentication Service Request |
+| AS_REP   | 0x6b  | [APPLICATION 11] Authentication Service Reply |
+| TGS_REQ  | 0x6c  | [APPLICATION 12] Ticket-Granting Service Request |
+| TGS_REP  | 0x6d  | [APPLICATION 13] Ticket-Granting Service Reply |
+| AP_REQ   | 0x6e  | [APPLICATION 14] Application Request |
+| AP_REP   | 0x6f  | [APPLICATION 15] Application Reply |
+| KRB_SAFE | 0x74  | [APPLICATION 20] Integrity-protected message |
+| KRB_PRIV | 0x75  | [APPLICATION 21] Encrypted message |
+| KRB_CRED | 0x76  | [APPLICATION 22] Credential forwarding |
+| KRB_ERROR | 0x7e | [APPLICATION 30] Error reply |
+
+**msg_type enum values:**
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| AS_REQUEST | 10 | Authentication Service Request |
+| AS_REPLY | 11 | Authentication Service Reply |
+| TGS_REQUEST | 12 | Ticket-Granting Service Request |
+| TGS_REPLY | 13 | Ticket-Granting Service Reply |
+| AP_REQUEST | 14 | Application authentication request |
+| AP_REPLY | 15 | Application authentication reply |
+| KRB_SAFE_VAL | 20 | Integrity-protected application message |
+| KRB_PRIV_VAL | 21 | Encrypted application message |
+| KRB_CRED_VAL | 22 | Credential forwarding message |
+| KRB_ERROR_VAL | 30 | Error from KDC or application server |
+
+**TCP seq/ack accounting:** each `KRB5()` header serializes to exactly **18 bytes**, so
+the next segment's seq/ack advances by 18 per data packet.
+
 ---
 
 ## Functions Reference
@@ -504,6 +754,37 @@ and tshark dissect all layers correctly.
 wrpcap("out.pcapng", IP()/TCP())
 wrpcap("out.pcapng", Ether()/IP()/UDP(dport=53)/DNS(id=0x1234,rd=1,qd=DNSQR(qname="example.com")))
 wrpcap("out.pcapng", a)    # append second packet
+```
+
+### frompcapng("file.pcapng", N)
+
+Read packet number N from an existing pcapng file as raw bytes. The result can be
+passed to `show()`, `hexdump()`, `wrpcap()`, or `raw()`.
+
+- Packet numbering is **1-based**.
+- Returns the raw Ethernet frame (link-layer bytes, no pcapng framing).
+
+```
+# Read packet 1 and dissect it
+d = frompcapng("capture.pcapng", 1)
+show("Ether/IP/TCP", d)
+
+# Read packet 3 and hexdump it
+hexdump(frompcapng("capture.pcapng", 3))
+
+# Copy a packet from one file and write it to another
+d = frompcapng("original.pcapng", 5)
+wrpcap("copy.pcapng", d)
+```
+
+### replacepkt("file.pcapng", N, pkt)
+
+Replace packet number N in an existing pcapng file with a new packet, **in-place**.
+The file must already exist and contain at least N packets.
+
+```
+# Replace packet 2 with a modified version
+replacepkt("out.pcapng", 2, Ether()/IP(dst="10.0.0.99")/TCP(dport=8080,flags="S"))
 ```
 
 ### fromhex("hex string")
@@ -820,6 +1101,56 @@ wrpcap("smb2.pcapng", client_send(s, "\x00\x00\x00\x24\xfeSMB\x40\x00\x01\x00\x0
 wrpcap("smb2.pcapng", server_fin_ack(s))
 ```
 
+### Kerberos AS exchange (PREAUTH_REQUIRED → retry)
+
+```
+# krb5_auth.pcapsh — KDC returns error, client retries with pre-auth data
+# KRB5 header = 18 bytes, so seq/ack advances by 18 per data packet
+wrpcap("krb5.pcapng", Ether(src="02:00:00:01:00:01",dst="02:00:00:00:00:01")/IP(src="10.0.1.1",dst="10.0.0.1")/TCP(sport=52001,dport=88,flags="S",seq=0))
+wrpcap("krb5.pcapng", Ether(src="02:00:00:00:00:01",dst="02:00:00:01:00:01")/IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,dport=52001,flags="SA",seq=0,ack=1))
+wrpcap("krb5.pcapng", Ether(src="02:00:00:01:00:01",dst="02:00:00:00:00:01")/IP(src="10.0.1.1",dst="10.0.0.1")/TCP(sport=52001,dport=88,flags="A",seq=1,ack=1))
+# initial AS-REQ (no pre-auth)
+wrpcap("krb5.pcapng", Ether(src="02:00:00:01:00:01",dst="02:00:00:00:00:01")/IP(src="10.0.1.1",dst="10.0.0.1")/TCP(sport=52001,dport=88,flags="PA",seq=1,ack=1)/KRB5(app_tag=AS_REQ,msg_type=AS_REQUEST))
+# KDC replies PREAUTH_REQUIRED
+wrpcap("krb5.pcapng", Ether(src="02:00:00:00:00:01",dst="02:00:00:01:00:01")/IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,dport=52001,flags="PA",seq=1,ack=19)/KRB5(app_tag=KRB_ERROR,msg_type=KRB_ERROR_VAL))
+# client retries with pre-auth data
+wrpcap("krb5.pcapng", Ether(src="02:00:00:01:00:01",dst="02:00:00:00:00:01")/IP(src="10.0.1.1",dst="10.0.0.1")/TCP(sport=52001,dport=88,flags="PA",seq=19,ack=19)/KRB5(app_tag=AS_REQ,msg_type=AS_REQUEST))
+wrpcap("krb5.pcapng", Ether(src="02:00:00:00:00:01",dst="02:00:00:01:00:01")/IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,dport=52001,flags="PA",seq=19,ack=37)/KRB5(app_tag=AS_REP,msg_type=AS_REPLY))
+# TGS exchange
+wrpcap("krb5.pcapng", Ether(src="02:00:00:01:00:01",dst="02:00:00:00:00:01")/IP(src="10.0.1.1",dst="10.0.0.1")/TCP(sport=52001,dport=88,flags="PA",seq=37,ack=37)/KRB5(app_tag=TGS_REQ,msg_type=TGS_REQUEST))
+wrpcap("krb5.pcapng", Ether(src="02:00:00:00:00:01",dst="02:00:00:01:00:01")/IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,dport=52001,flags="PA",seq=37,ack=55)/KRB5(app_tag=TGS_REP,msg_type=TGS_REPLY))
+wrpcap("krb5.pcapng", Ether(src="02:00:00:01:00:01",dst="02:00:00:00:00:01")/IP(src="10.0.1.1",dst="10.0.0.1")/TCP(sport=52001,dport=88,flags="FA",seq=55,ack=55))
+wrpcap("krb5.pcapng", Ether(src="02:00:00:00:00:01",dst="02:00:00:01:00:01")/IP(src="10.0.0.1",dst="10.0.1.1")/TCP(sport=88,dport=52001,flags="FA",seq=55,ack=56))
+```
+
+### NBNS name query broadcast
+
+```
+# nbns.pcapsh
+wrpcap("nbns.pcapng", Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="10.0.1.1",dst="10.0.1.255",ttl=1)/UDP(sport=137,dport=137)/NBNS(trans_id=0x1234,flags=NAME_QUERY_REQUEST,qdcount=1))
+wrpcap("nbns.pcapng", Ether(src="00:11:22:33:44:55")/IP(src="10.0.0.10",dst="10.0.1.1")/UDP(sport=137,dport=137)/NBNS(trans_id=0x1234,flags=NAME_QUERY_RESPONSE_POS,ancount=1))
+```
+
+### NTP with for-loop and arithmetic (avoid well-known port conflicts)
+
+```
+# ntp_20_hosts.pcapsh
+# sport=49151+$i gives ports 49152-49171 (safe ephemeral range)
+for $i in range(20):
+    wrpcap("ntp.pcapng", Ether()/IP(src="10.0.1.1",dst="10.0.0.2")/UDP(sport=49151+$i,dport=123)/NTP(li_vn_mode=CLIENT,stratum=0))
+    wrpcap("ntp.pcapng", Ether()/IP(src="10.0.0.2",dst="10.0.1.1")/UDP(sport=123,dport=49151+$i)/NTP(li_vn_mode=SERVER,stratum=1))
+```
+
+### RFC 3164 syslog messages
+
+```
+# syslog_rfc3164.pcapsh
+# PRI = facility*8 + severity (auth=4, info=6 → <38>; notice=5 → <37>; warning=4 → <36>)
+wrpcap("syslog.pcapng", Ether()/IP(src="10.0.0.1",dst="10.0.0.254")/UDP(sport=514,dport=514)/"<38>May 11 10:00:01 dc01 sshd[1234]: Accepted publickey for admin")
+wrpcap("syslog.pcapng", Ether()/IP(src="10.0.0.1",dst="10.0.0.254")/UDP(sport=514,dport=514)/"<37>May 11 10:00:02 dc01 kernel: eth0: link up 1Gbps")
+wrpcap("syslog.pcapng", Ether()/IP(src="10.0.0.1",dst="10.0.0.254")/UDP(sport=514,dport=514)/"<36>May 11 10:00:03 dc01 named[567]: error parsing dns query")
+```
+
 ### GRE tunnel
 
 ```
@@ -986,3 +1317,10 @@ ls(DCERPC)
 - **Script + interactive**: run your script first to build the pcapng file, then open it with Wireshark.
 - **ANSI colors**: the REPL uses colors for protocol display; pipe through `cat` for plain text if needed.
 - **Protocol registry**: adding a posa protocol auto-registers it for name/color lookup — no code changes required.
+- **For-loop sport arithmetic**: `sport=$i` hits well-known ports (Echo=7, Discard=9, Daytime=13, Chargen=19, …). Always offset: `sport=49000+$i`.
+- **ARP Ether type**: `Ether()` defaults to `type=0x0800` (IPv4). ARP frames require `type=0x0806` explicitly — Wireshark will try to parse ARP bytes as IPv4 otherwise.
+- **SMB2 NEGOTIATE body**: the `SMB2(command=NEGOTIATE)` header alone (64 bytes) is not RFC-compliant — Wireshark marks it malformed because the NEGOTIATE command body (36 bytes for request, 65 for response) is missing. For clean captures, start SMB2 sessions at SESSION_SETUP.
+- **KRB5 TCP seq accounting**: each `KRB5()` object serializes to exactly 18 bytes. Advance seq/ack by 18 per data exchange: SYN(seq=0) → data starts at seq=1, next ack=1+18=19, etc.
+- **Syslog RFC compliance**: the `SYSLOG()` built-in emits only the PRI byte. Use a raw string payload for RFC 3164-compliant output: `UDP(dport=514)/"<38>May 11 10:00:01 host tag: msg"`.
+- **Reading existing captures**: `frompcapng("file.pcapng", N)` extracts packet N as raw bytes for `show()`, `hexdump()`, or `wrpcap()`. Packet numbers are 1-based.
+- **In-place packet editing**: `replacepkt("file.pcapng", N, newpkt)` replaces packet N without rewriting the whole file.

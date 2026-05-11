@@ -172,6 +172,9 @@ void lex_adv(Lex *L) {
         case '=': L->cur.type = T_EQ;     break;
         case '/': L->cur.type = T_SLASH;  break;
         case '.': L->cur.type = T_DOT;    break;
+        case '+': L->cur.type = T_PLUS;   break;
+        case '-': L->cur.type = T_MINUS;  break;
+        case '*': L->cur.type = T_STAR;   break;
         default:
             snprintf(L->err,255,"unexpected '%c'",c);
             L->cur.type = T_EOF; break;
@@ -185,34 +188,64 @@ void lex_init(Lex *L, const char *src) {
 
 /* ─── apply a named/positional arg to a layer ───────────────────────────────── */
 
-void apply_field(layer_t *l, const char *name, Lex *L) {
+/* Read one numeric atom (T_NUM or T_VAR) and return its value.
+ * Returns 0 and leaves L unchanged if the current token is neither. */
+static int read_num_atom(Lex *L, int64_t *out) {
     if (L->cur.type == T_NUM) {
-        set_u64(l, name, L->cur.n);
+        *out = (int64_t)L->cur.n;
         lex_adv(L);
+        return 1;
+    }
+    if (L->cur.type == T_VAR) {
+        var_t *v = var_find(L->cur.s);
+        *out = (v && v->is_num) ? (int64_t)v->numval : 0;
+        lex_adv(L);
+        return 1;
+    }
+    return 0;
+}
+
+void apply_field(layer_t *l, const char *name, Lex *L) {
+    int64_t atom;
+    if (read_num_atom(L, &atom)) {
+        /* evaluate optional arithmetic chain: expr = atom [op atom]* */
+        /* precedence: first collect all * terms, then + / - */
+        int64_t product = atom;
+        while (L->cur.type == T_STAR) {
+            lex_adv(L);
+            int64_t rhs; if (!read_num_atom(L, &rhs)) break;
+            product *= rhs;
+        }
+        int64_t result = product;
+        while (L->cur.type == T_PLUS || L->cur.type == T_MINUS) {
+            TT op = L->cur.type;
+            lex_adv(L);
+            int64_t rhs; if (!read_num_atom(L, &rhs)) break;
+            /* consume any following * for the right-hand term */
+            while (L->cur.type == T_STAR) {
+                lex_adv(L);
+                int64_t f; if (!read_num_atom(L, &f)) break;
+                rhs *= f;
+            }
+            result = (op == T_PLUS) ? result + rhs : result - rhs;
+        }
+        set_u64(l, name, (uint64_t)result);
     } else if (L->cur.type == T_STR) {
         const char *val = L->cur.s;
         size_t slen = L->cur.slen;
-        /* detect IP */
         struct in_addr addr;
         if (inet_aton(val, &addr)) {
             set_ip4(l, name, val);
         } else if (strlen(val) == 17 && val[2] == ':' && val[5] == ':') {
             set_mac(l, name, val);
         } else if (slen != strlen(val)) {
-            /* binary string (has embedded NULs or \x escapes) */
             set_bytes(l, name, (const uint8_t*)val, slen);
         } else {
             set_str(l, name, val);
         }
         lex_adv(L);
     } else if (L->cur.type == T_IDENT) {
-        /* variable reference (e.g. flags=SYN not supported yet, treat as str) */
         set_str(l, name, L->cur.s);
-        lex_adv(L);
-    } else if (L->cur.type == T_VAR) {
-        /* $varname — look up numeric variable and use its value */
-        var_t *v = var_find(L->cur.s);
-        if (v && v->is_num) set_u64(l, name, (uint64_t)(int64_t)v->numval);
         lex_adv(L);
     }
 }
@@ -1044,6 +1077,10 @@ EvalResult eval_chain(Lex *L) {
         if (rhs.pkt) {
             if (r.pkt) chain_append(r.pkt, rhs.pkt);
             else r.pkt = rhs.pkt;
+        } else if (rhs.is_raw && rhs.raw && rhs.raw_len) {
+            layer_t *raw_lay = make_raw_layer(rhs.raw, rhs.raw_len);
+            if (r.pkt) chain_append(r.pkt, raw_lay);
+            else r.pkt = raw_lay;
         }
     }
     return r;
