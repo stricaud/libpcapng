@@ -228,6 +228,11 @@ layer_t *make_icmp(void) {
     return l;
 }
 
+layer_t *make_tls_layer(void) {
+    layer_t *l = new_layer(PROTO_TLS);
+    return l;
+}
+
 layer_t *make_raw_layer(const uint8_t *data, size_t len) {
     layer_t *l = new_layer(PROTO_RAW);
     set_bytes(l, "load", data, len);

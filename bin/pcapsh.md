@@ -708,6 +708,99 @@ the next segment's seq/ack advances by 18 per data packet.
 
 ---
 
+## TLS (Native)
+
+pcapsh includes built-in TLS 1.2 functions that generate proper TLS handshake and
+application-data records. The default cipher is `TLS_NULL_WITH_NULL_NULL` (0x0000) —
+no encryption — so Wireshark dissects the inner protocol (LDAP, HTTP, etc.) directly
+without needing a key file.
+
+### TLS handshake functions
+
+Each function returns raw bytes that can be stacked directly under a TCP layer:
+
+```
+Ether()/IP()/TCP(flags="PA")/TLS_CLIENT_HELLO()
+Ether()/IP()/TCP(flags="PA")/TLS_SERVER_HELLO()
+Ether()/IP()/TCP(flags="PA")/TLS_CERTIFICATE()
+Ether()/IP()/TCP(flags="PA")/TLS_CHANGE_CIPHER_SPEC()
+Ether()/IP()/TCP(flags="PA")/TLS_FINISHED()
+```
+
+| Function | TLS record type | tcp.len | Notes |
+|----------|----------------|---------|-------|
+| `TLS_CLIENT_HELLO()` | Handshake (22) | 50 | TLS 1.2, cipher 0x0000, fixed 32-byte client random |
+| `TLS_SERVER_HELLO()` | Handshake (22) | 47 | TLS 1.2, cipher 0x0000, fixed 32-byte server random |
+| `TLS_CERTIFICATE()`  | Handshake (22) | 12 | Empty certificate list (valid for NULL cipher) |
+| `TLS_CHANGE_CIPHER_SPEC()` | ChangeCipherSpec (20) | 6 | Single byte 0x01 |
+| `TLS_FINISHED()` | Handshake (22) | 21 | 12-byte verify_data (0xaa × 12) |
+
+### TLS() — application data layer
+
+`TLS()` wraps the payload of whatever comes after it in a TLS Application Data record
+(type=0x17, version=TLS 1.2). Use it to enclose an inner protocol inside a TLS stream:
+
+```
+Ether()/IP()/TCP(flags="PA")/TLS()/LDAP(op_tag=BIND_REQUEST, message_id=1)
+Ether()/IP()/TCP(flags="PA")/TLS()/"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+```
+
+The inner payload is wrapped as-is (NULL cipher — no encryption). Wireshark decodes the
+inner content directly without requiring a key file.
+
+### Typical LDAPS session skeleton
+
+```
+# TCP handshake
+wrpcap("ldaps.pcapng", Ether(src=C,dst=S)/IP(src=ci,dst=si)/TCP(sport=sp,dport=636,seq=csn,flags="S",...))
+wrpcap("ldaps.pcapng", Ether(src=S,dst=C)/IP(src=si,dst=ci)/TCP(sport=636,dport=sp,seq=ssn,ack=csn+1,flags="SA",...))
+wrpcap("ldaps.pcapng", Ether(src=C,dst=S)/IP(src=ci,dst=si)/TCP(sport=sp,dport=636,seq=csn+1,ack=ssn+1,flags="A"))
+# TLS handshake
+wrpcap("ldaps.pcapng", .../TCP(seq=csn+1,ack=ssn+1,flags="PA")/TLS_CLIENT_HELLO())   # +50 bytes
+wrpcap("ldaps.pcapng", .../TCP(seq=ssn+1,ack=csn+51,flags="PA")/TLS_SERVER_HELLO())  # +47 bytes
+wrpcap("ldaps.pcapng", .../TCP(seq=ssn+48,ack=csn+51,flags="PA")/TLS_CERTIFICATE())  # +12 bytes
+wrpcap("ldaps.pcapng", .../TCP(seq=csn+51,ack=ssn+60,flags="PA")/TLS_CHANGE_CIPHER_SPEC())  # +6 bytes
+wrpcap("ldaps.pcapng", .../TCP(seq=csn+57,ack=ssn+60,flags="PA")/TLS_FINISHED())     # +21 bytes
+wrpcap("ldaps.pcapng", .../TCP(seq=ssn+60,ack=csn+78,flags="PA")/TLS_CHANGE_CIPHER_SPEC())  # +6 bytes
+wrpcap("ldaps.pcapng", .../TCP(seq=ssn+66,ack=csn+78,flags="PA")/TLS_FINISHED())     # +21 bytes
+# LDAP over TLS
+wrpcap("ldaps.pcapng", .../TCP(seq=csn+78,ack=ssn+87,flags="PA")/TLS()/LDAP(op_tag=BIND_REQUEST,message_id=1))
+```
+
+### Session key output (-s flag)
+
+Running pcapsh with `-s` prints NSS Key Log format to stderr after the script completes.
+Since the default cipher is NULL (no encryption), Wireshark decodes the Application Data
+payload without a key — the output is informational:
+
+```
+pcapsh -s my_tls_session.pcapsh
+```
+
+Output (to stderr):
+```
+# TLS Session Keys (NSS Key Log format)
+# Load in Wireshark: Edit > Preferences > Protocols > TLS
+# > (Pre)-Master-Secret Log filename
+# NOTE: This capture uses TLS_NULL_WITH_NULL_NULL (no encryption).
+# Wireshark decodes Application Data directly — no key file needed.
+CLIENT_RANDOM 1111...1111 0000...0000
+```
+
+The CLIENT_RANDOM is fixed at 32 bytes of `0x11` for reproducibility.
+
+### Full LDAPS DirSync example
+
+See `ldap-controls-dirsync-01.pcapsh` for a complete 18-packet session:
+TCP handshake → TLS handshake → LDAP Bind → DirSync SearchRequest → Unbind → TCP close.
+
+```
+pcapsh ldap-controls-dirsync-01.pcapsh -o dirsync.pcapng
+tshark -r dirsync.pcapng    # shows 18 clean packets, LDAP decoded inside TLS AppData
+```
+
+---
+
 ## Functions Reference
 
 ### hexdump(pkt)

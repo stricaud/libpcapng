@@ -1,6 +1,9 @@
 /* pcapsh_eval.c — variable storage, lexer, evaluator, TCP session builders
  * Included as part of the pcapsh unity build (see pcapsh.c). */
 #include "pcapsh.h"
+#include <libpcapng/protocols/ssl.h>
+
+int g_tls_used = 0; /* set when any TLS_* function or TLS() layer is used */
 
 /* ─── Variable storage ──────────────────────────────────────────────────────── */
 
@@ -432,6 +435,7 @@ EvalResult eval_primary(Lex *L) {
         else if (!strcmp(name,"UDP"))   lay = make_udp();
         else if (!strcmp(name,"Ether")) lay = make_ether();
         else if (!strcmp(name,"ICMP"))  lay = make_icmp();
+        else if (!strcmp(name,"TLS"))   { lay = make_tls_layer(); g_tls_used = 1; }
         else if (!strcmp(name,"Raw")) {
             /* Raw(load="...") or Raw("...") */
             if (L->cur.type == T_STR) {
@@ -523,6 +527,49 @@ EvalResult eval_primary(Lex *L) {
                 r.raw = buf; r.raw_len = n; r.is_raw = 1;
                 return r;
             }
+            /* TLS handshake record builders */
+            if (!strcmp(name,"TLS_CLIENT_HELLO")) {
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                uint8_t *buf = malloc(1024);
+                if (!buf) { r.is_none = 1; return r; }
+                size_t n = tls_build_client_hello(buf, 1024);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                g_tls_used = 1;
+                return r;
+            }
+            if (!strcmp(name,"TLS_SERVER_HELLO")) {
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                uint8_t *buf = malloc(1024);
+                if (!buf) { r.is_none = 1; return r; }
+                size_t n = tls_build_server_hello(buf, 1024);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                return r;
+            }
+            if (!strcmp(name,"TLS_CERTIFICATE")) {
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                uint8_t *buf = malloc(4096);
+                if (!buf) { r.is_none = 1; return r; }
+                size_t n = tls_build_certificate(buf, 4096, NULL, 0);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                return r;
+            }
+            if (!strcmp(name,"TLS_CHANGE_CIPHER_SPEC")) {
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                uint8_t *buf = malloc(64);
+                if (!buf) { r.is_none = 1; return r; }
+                size_t n = tls_build_change_cipher_spec(buf, 64);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                return r;
+            }
+            if (!strcmp(name,"TLS_FINISHED")) {
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                uint8_t *buf = malloc(256);
+                if (!buf) { r.is_none = 1; return r; }
+                size_t n = tls_build_finished(buf, 256);
+                r.raw = buf; r.raw_len = n; r.is_raw = 1;
+                return r;
+            }
+
             /* frompcapng("file.pcapng", packet_number=N) — extract raw bytes from pcapng */
             if (!strcmp(name,"frompcapng")) {
                 char filename[MAXPATH] = "";

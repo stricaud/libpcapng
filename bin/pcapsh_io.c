@@ -1,6 +1,7 @@
 /* pcapsh_io.c — packet I/O, serialization, dissection, display, ls()
  * Included as part of the pcapsh unity build (see pcapsh.c). */
 #include "pcapsh.h"
+#include <libpcapng/protocols/ssl.h>
 
 /* ─── DNS layer serializer ──────────────────────────────────────────────────── */
 
@@ -552,7 +553,7 @@ size_t pkt_to_raw(layer_t *pkt, uint8_t *buf, size_t bufsz) {
 }
 size_t pkt_to_raw_ex(layer_t *pkt, uint8_t *buf, size_t bufsz, int keep_eth) {
     layer_t *l_ether = NULL, *l_ip = NULL, *l_tcp = NULL;
-    layer_t *l_udp = NULL, *l_icmp = NULL, *l_raw = NULL;
+    layer_t *l_udp = NULL, *l_icmp = NULL, *l_raw = NULL, *l_tls = NULL;
     for (layer_t *l = pkt; l; l = l->next) {
         switch (l->proto) {
             case PROTO_ETHER: l_ether = l; break;
@@ -561,6 +562,7 @@ size_t pkt_to_raw_ex(layer_t *pkt, uint8_t *buf, size_t bufsz, int keep_eth) {
             case PROTO_UDP:   l_udp   = l; break;
             case PROTO_ICMP:  l_icmp  = l; break;
             case PROTO_RAW:   l_raw   = l; break;
+            case PROTO_TLS:   l_tls   = l; break;
         }
     }
 
@@ -598,6 +600,20 @@ size_t pkt_to_raw_ex(layer_t *pkt, uint8_t *buf, size_t bufsz, int keep_eth) {
             memcpy(pay_combined+pay_len, rf->s, sl); pay_len += sl;
         }
     }
+    /* TLS Application Data: wrap accumulated payload in a TLS record */
+    if (l_tls && pay_len > 0) {
+        field_t *kf = find_field(l_tls, "key");
+        if (kf && kf->type == FT_STR && kf->s[0])
+            tls_set_key_label(kf->s);
+        uint8_t tls_out[8200];
+        size_t tls_len = tls_build_application_data(tls_out, sizeof(tls_out),
+                                                     pay_combined, pay_len);
+        if (tls_len > 0 && tls_len <= sizeof(pay_combined)) {
+            memcpy(pay_combined, tls_out, tls_len);
+            pay_len = tls_len;
+        }
+    }
+
     uint8_t *payload = pay_len ? pay_combined : NULL;
     size_t   plen    = pay_len;
 

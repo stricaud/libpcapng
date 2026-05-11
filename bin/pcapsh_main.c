@@ -1,6 +1,29 @@
 /* pcapsh_main.c — completion, for-loop, REPL, script runner, entry point
  * Included as part of the pcapsh unity build (see pcapsh.c). */
 #include "pcapsh.h"
+#include <libpcapng/protocols/ssl.h>
+
+extern int g_tls_used;
+
+static int g_session_keys = 0; /* -s flag: print TLS session key info after run */
+
+static void print_tls_session_keys(void)
+{
+    char cr_hex[65] = {0};
+    tls_get_client_random_hex(cr_hex);
+    const char *label = tls_get_key_label();
+
+    fprintf(stderr, "\n# TLS Session Keys (NSS Key Log format)\n");
+    fprintf(stderr, "# Load in Wireshark: Edit > Preferences > Protocols > TLS\n");
+    fprintf(stderr, "# > (Pre)-Master-Secret Log filename\n");
+    if (label && label[0])
+        fprintf(stderr, "# Key label: %s\n", label);
+    fprintf(stderr, "# NOTE: This capture uses TLS_NULL_WITH_NULL_NULL (no encryption).\n");
+    fprintf(stderr, "# Wireshark decodes Application Data directly — no key file needed.\n");
+    fprintf(stderr, "CLIENT_RANDOM %s %s\n", cr_hex,
+            "000000000000000000000000000000000000000000000000"
+            "000000000000000000000000000000000000000000000000");
+}
 
 /* ─── Completion callback ────────────────────────────────────────────────────── */
 
@@ -199,10 +222,35 @@ int run_script(const char *path) {
     int64_t for_start = 0, for_stop = 0, for_step = 1;
     int  in_for = 0;
 
+    char cont[65536] = "";   /* multi-line continuation buffer */
+    int  cont_len = 0;
+
     while (fgets(line, sizeof(line), f)) {
         /* strip trailing CR/LF */
         size_t len = strlen(line);
         while (len > 0 && (line[len-1]=='\n'||line[len-1]=='\r')) line[--len]='\0';
+
+        /* backslash line continuation: append to cont buffer and keep reading */
+        if (len > 0 && line[len-1] == '\\') {
+            line[len-1] = ' '; /* replace backslash with space */
+            if (cont_len + (int)len < (int)sizeof(cont) - 1) {
+                memcpy(cont + cont_len, line, len);
+                cont_len += (int)len;
+                cont[cont_len] = '\0';
+            }
+            continue;
+        }
+        /* if we have accumulated continuation lines, append current line and use */
+        if (cont_len > 0) {
+            if (cont_len + (int)len < (int)sizeof(cont) - 1) {
+                memcpy(cont + cont_len, line, len);
+                cont_len += (int)len;
+                cont[cont_len] = '\0';
+            }
+            memcpy(line, cont, cont_len + 1);
+            len = cont_len;
+            cont_len = 0; cont[0] = '\0';
+        }
 
         char *p = line;
         while (*p==' '||*p=='\t') p++;
@@ -289,6 +337,7 @@ void usage(const char *prog) {
         "  -p, --proto FILE.posa   load protocol definitions from FILE.posa\n"
         "  -e EXPR                 evaluate EXPR and exit\n"
         "  -o, --output FILE       redirect all wrpcap() output to FILE\n"
+        "  -s                      print TLS session keys after run (for Wireshark)\n"
         "  -h, --help              show this help\n"
         "\n"
         "Script files (.pcapsh) are executed non-interactively.\n"
@@ -305,6 +354,7 @@ int main(int argc, char **argv) {
     proto_register(PROTO_ICMP,  "ICMP",  CBRED);
     proto_register(PROTO_RAW,   "Raw",   CWHT);
     proto_register(PROTO_DNS,   "DNS",   CBCYN);
+    proto_register(PROTO_TLS,   "TLS",   CBCYN);
 
     /* register built-in posa-defined protocols */
     parse_posa_src(BUILTIN_POSA);
@@ -365,6 +415,10 @@ int main(int argc, char **argv) {
             eval_expr_s = argv[++i];
             continue;
         }
+        if (!strcmp(argv[i],"-s")) {
+            g_session_keys = 1;
+            continue;
+        }
         if ((!strcmp(argv[i],"-o")||!strcmp(argv[i],"--output")) && i+1 < argc) {
             strncpy(wrpcap_override, argv[++i], sizeof(wrpcap_override)-1);
             continue;
@@ -388,12 +442,17 @@ int main(int argc, char **argv) {
     /* ── -e one-liner mode ── */
     if (eval_expr_s) {
         eval_line(eval_expr_s);
+        if (g_session_keys && g_tls_used) print_tls_session_keys();
         return 0;
     }
 
     /* ── script mode ── */
     if (script_file) {
-        return run_script(script_file);
+        int rc = run_script(script_file);
+        if (g_session_keys && g_tls_used) print_tls_session_keys();
+        else if (g_tls_used)
+            fprintf(stderr, "# Tip: run with -s to print TLS session key info\n");
+        return rc;
     }
 
     /* ── interactive REPL ── */

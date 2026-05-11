@@ -59,6 +59,7 @@
 #define PROTO_RAW   6
 #define PROTO_DNS   7
 #define PROTO_ARP   8
+#define PROTO_TLS   9
 
 /* ─── Layer field types ─────────────────────────────────────────────────────── */
 typedef enum { FT_U64 = 1, FT_STR, FT_IP4, FT_MAC, FT_BYTES } ftype_t;
@@ -251,6 +252,7 @@ layer_t    *make_ip(void);
 layer_t    *make_tcp(void);
 layer_t    *make_udp(void);
 layer_t    *make_icmp(void);
+layer_t    *make_tls_layer(void);
 layer_t    *make_raw_layer(const uint8_t *data, size_t len);
 void        free_layer(layer_t *l);
 layer_t    *clone_chain(layer_t *l);
