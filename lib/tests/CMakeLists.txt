@@ -31,3 +31,7 @@ add_test(Ssl-Http2-Write ssl-http2-write)
 add_executable(rdp-write rdp-write.c)
 target_link_libraries(rdp-write ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(Rdp-Write rdp-write)
+
+add_executable(reasm reasm.c)
+target_link_libraries(reasm ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Reasm reasm)
