@@ -199,8 +199,8 @@ layer_t *make_tcp(void) {
     layer_t *l = new_layer(PROTO_TCP);
     set_u64(l, "sport", 20);
     set_u64(l, "dport", 80);
-    set_u64(l, "seq", 0);
-    set_u64(l, "ack", 0);
+    set_auto(l, "seq", FT_U64);
+    set_auto(l, "ack", FT_U64);
     set_u64(l, "dataofs", 5);
     set_str(l, "flags", "S");
     set_u64(l, "window", 8192);

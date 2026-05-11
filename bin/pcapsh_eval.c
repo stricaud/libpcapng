@@ -6,6 +6,126 @@
 
 int g_tls_used = 0; /* set when any TLS_* function or TLS() layer is used */
 
+/* ─── Automatic TCP seq/ack tracking table ──────────────────────────────────── */
+#define TCP_AUTOTRACK_MAX 64
+
+typedef struct {
+    uint32_t a_ip,  b_ip;    /* a = SYN sender, b = responder */
+    uint16_t a_port, b_port;
+    uint32_t a_seq, b_seq;   /* next seq to emit from each side */
+    int      active;
+} tcp_autotrack_t;
+
+static tcp_autotrack_t tcp_autotrack[TCP_AUTOTRACK_MAX];
+
+static tcp_autotrack_t *autotrack_find(uint32_t src, uint16_t sport,
+                                       uint32_t dst, uint16_t dport,
+                                       int *from_a)
+{
+    for (int i = 0; i < TCP_AUTOTRACK_MAX; i++) {
+        if (!tcp_autotrack[i].active) continue;
+        tcp_autotrack_t *e = &tcp_autotrack[i];
+        if (e->a_ip==src && e->a_port==sport && e->b_ip==dst && e->b_port==dport)
+            { *from_a=1; return e; }
+        if (e->b_ip==src && e->b_port==sport && e->a_ip==dst && e->a_port==dport)
+            { *from_a=0; return e; }
+    }
+    return NULL;
+}
+
+static tcp_autotrack_t *autotrack_new(uint32_t src, uint16_t sport,
+                                      uint32_t dst, uint16_t dport)
+{
+    for (int i = 0; i < TCP_AUTOTRACK_MAX; i++) {
+        if (!tcp_autotrack[i].active) {
+            tcp_autotrack_t *e = &tcp_autotrack[i];
+            memset(e, 0, sizeof(*e));
+            e->active=1; e->a_ip=src; e->a_port=sport; e->b_ip=dst; e->b_port=dport;
+            return e;
+        }
+    }
+    return NULL;
+}
+
+/* Called from wrpcap() before serialization.
+ * For each TCP field (seq, ack): if is_auto=1, fill from session table;
+ * if is_auto=0 (user wrote explicit value), keep it and sync the tracker. */
+static void tcp_autotrack_fixup(layer_t *chain)
+{
+    layer_t *ip_lay=NULL, *tcp_lay=NULL;
+    for (layer_t *l=chain; l; l=l->next) {
+        if (l->proto==PROTO_IP  && !ip_lay)  ip_lay=l;
+        if (l->proto==PROTO_TCP && !tcp_lay) tcp_lay=l;
+    }
+    if (!tcp_lay) return;
+
+    field_t *f_sport = find_field(tcp_lay,"sport");
+    field_t *f_dport = find_field(tcp_lay,"dport");
+    field_t *f_seq   = find_field(tcp_lay,"seq");
+    field_t *f_ack   = find_field(tcp_lay,"ack");
+    field_t *f_flags = find_field(tcp_lay,"flags");
+    if (!f_sport || !f_dport || !f_seq || !f_ack) return;
+
+    uint32_t src_ip = (ip_lay && find_field(ip_lay,"src")) ? (uint32_t)find_field(ip_lay,"src")->n : 0;
+    uint32_t dst_ip = (ip_lay && find_field(ip_lay,"dst")) ? (uint32_t)find_field(ip_lay,"dst")->n : 0;
+    uint16_t sport  = (uint16_t)f_sport->n;
+    uint16_t dport  = (uint16_t)f_dport->n;
+
+    int has_syn=0, has_ack=0, has_fin=0, has_rst=0;
+    if (f_flags && f_flags->type==FT_STR) {
+        for (const char *p=f_flags->s; *p; p++) {
+            if (*p=='S'||*p=='s') has_syn=1;
+            if (*p=='A'||*p=='a') has_ack=1;
+            if (*p=='F'||*p=='f') has_fin=1;
+            if (*p=='R'||*p=='r') has_rst=1;
+        }
+    }
+    if (has_rst) return;
+
+    /* Sum payload bytes in all raw layers after TCP */
+    size_t data_len=0; int past=0;
+    for (layer_t *l=chain; l; l=l->next) {
+        if (l==tcp_lay) { past=1; continue; }
+        if (!past) continue;
+        if (l->proto==PROTO_RAW) {
+            field_t *rf=find_field(l,"load");
+            if (rf && rf->raw) data_len+=rf->raw_len;
+        }
+    }
+
+    int from_a=1;
+    tcp_autotrack_t *e = autotrack_find(src_ip,sport,dst_ip,dport,&from_a);
+
+    if (!e) {
+        /* First time we see this 4-tuple — create entry on SYN, ignore others */
+        if (!has_syn) return;
+        e = autotrack_new(src_ip,sport,dst_ip,dport);
+        if (!e) return;
+        /* Seed initial seq from user's explicit value or a fixed default */
+        uint32_t init = f_seq->is_auto ? 0xdeadbe00u : (uint32_t)f_seq->n;
+        if (f_seq->is_auto) { f_seq->n=init; f_seq->is_auto=0; }
+        e->a_seq = init + 1; /* SYN consumes 1 */
+        e->b_seq = 0;
+        return;
+    }
+
+    uint32_t *my_seq   = from_a ? &e->a_seq : &e->b_seq;
+    uint32_t *peer_seq = from_a ? &e->b_seq : &e->a_seq;
+
+    /* Resolve seq: auto → fill from table; explicit → sync table from packet */
+    if (f_seq->is_auto) { f_seq->n=*my_seq; f_seq->is_auto=0; }
+    else                { *my_seq=(uint32_t)f_seq->n; }
+
+    /* Resolve ack */
+    if (has_ack) {
+        if (f_ack->is_auto) { f_ack->n=*peer_seq; f_ack->is_auto=0; }
+        else                { *peer_seq=(uint32_t)f_ack->n; }
+    }
+
+    /* Advance my_seq by what this packet consumed in sequence space */
+    *my_seq = (uint32_t)f_seq->n + (uint32_t)data_len + has_fin + has_syn;
+}
+
 /* ─── Variable storage ──────────────────────────────────────────────────────── */
 
 var_t *var_find(const char *name) {
@@ -768,6 +888,7 @@ EvalResult eval_primary(Lex *L) {
                     uint8_t *buf = malloc(MAX_PKT_BYTES); size_t len = 0;
                     if (!buf) { if (arg.pkt) free_layer(arg.pkt); if (arg.raw) free(arg.raw); fclose(fp); r.is_none=1; return r; }
                     if (arg.pkt) {
+                        tcp_autotrack_fixup(arg.pkt);
                         len = pkt_to_raw_ex(arg.pkt, buf, MAX_PKT_BYTES, 1);
                         free_layer(arg.pkt);
                     } else if (arg.raw) {

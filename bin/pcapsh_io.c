@@ -58,7 +58,15 @@ size_t fromhex_parse(const char *s, uint8_t *out, size_t max) {
             while (*p == ' ' || *p == '\t') p++;
         }
         while (*p && *p != '\n' && *p != '\r' && n < max) {
-            if (p[0]==' ' && p[1]==' ' && p[2]==' ') break;
+            /* Three+ consecutive spaces normally means hex→ASCII separator in a
+             * Wireshark dump.  But if more hex follows (e.g. backslash-continuation
+             * indent in a pcapsh script), skip the spaces and keep parsing. */
+            if (p[0]==' ' && p[1]==' ' && p[2]==' ') {
+                const char *q = p;
+                while (*q == ' ' || *q == '\t') q++;
+                if (hexval(q[0]) >= 0 && hexval(q[1]) >= 0) { p = q; continue; }
+                break;
+            }
             if (*p == ' ' || *p == '\t') { p++; continue; }
             int hi = hexval(p[0]);
             int lo = hexval(p[1]);
