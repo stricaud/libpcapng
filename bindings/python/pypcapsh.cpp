@@ -19,6 +19,8 @@ extern "C" {
 #include <libpcapng/protocols/ssl.h>
 }
 
+#include "builtin_protos.h"
+
 namespace py = pybind11;
 
 /* Per-run context threaded through g_packet_cb_userdata. */
@@ -56,7 +58,11 @@ static void teardown() {
 
 class PcapSH {
 public:
-    PcapSH() { pcapsh_init(); }
+    PcapSH() {
+        pcapsh_init();
+        for (int i = 0; g_builtin_posa_protos[i]; i++)
+            parse_posa_src(g_builtin_posa_protos[i]);
+    }
 
     /* Load all .posa protocol files from a directory. Returns count loaded. */
     int load_protos(const std::string &dir) {

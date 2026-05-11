@@ -7,6 +7,18 @@ execute_process(
 )
 message(STATUS "PYTHON_SITE_PACKAGES='${PYTHON_SITE_PACKAGES}'")
 
+# ── Embed all .posa protocol definitions as C strings (self-contained module) ─
+file(GLOB POSA_FILES "${CMAKE_SOURCE_DIR}/bin/protos/*.posa")
+set(BUILTIN_PROTOS_H "${CMAKE_CURRENT_BINARY_DIR}/builtin_protos.h")
+
+add_custom_command(
+    OUTPUT "${BUILTIN_PROTOS_H}"
+    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/embed_protos.py"
+            "${CMAKE_SOURCE_DIR}/bin/protos"
+            "${BUILTIN_PROTOS_H}"
+    DEPENDS ${POSA_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/embed_protos.py"
+    COMMENT "Embedding .posa protocol definitions into builtin_protos.h")
+
 # ── pycapng — pcapng file I/O + pcapsh script engine (from pycapng import pcapsh)
 set(PYCAPNG_SRC
     pycapng.cpp
@@ -20,22 +32,20 @@ set(PYCAPNG_SRC
     ${CMAKE_SOURCE_DIR}/bin/linenoise/linenoise.c
 )
 
-add_library(pycapng MODULE ${PYCAPNG_SRC})
+add_library(pycapng MODULE ${PYCAPNG_SRC} "${BUILTIN_PROTOS_H}")
+set_source_files_properties("${BUILTIN_PROTOS_H}" PROPERTIES HEADER_FILE_ONLY TRUE)
 
 target_include_directories(pycapng PRIVATE
     ${CMAKE_SOURCE_DIR}/bin
     ${LIBPCAPNG_INCLUDE_DIRS}
-    ${Python_INCLUDE_DIRS})
+    ${Python_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_BINARY_DIR})
 
 target_link_libraries(pycapng PRIVATE pybind11::module pcapng_static)
 
 set_target_properties(pycapng PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}"
     SUFFIX "${PYTHON_MODULE_EXTENSION}"
     COMPILE_FLAGS "-DPYBIND11_PYTHON_VERSION=${PYBIND11_PYTHON_VERSION}")
-
-target_compile_definitions(pycapng PRIVATE
-    PCAPSH_PROTOS_INSTALL_DIR="${CMAKE_INSTALL_FULL_DATAROOTDIR}/pcapsh/protos"
-    PCAPSH_PROTOS_SRC_DIR="${CMAKE_SOURCE_DIR}/bin/protos")
 
 install(TARGETS pycapng LIBRARY
     DESTINATION "${PYTHON_SITE_PACKAGES}"
