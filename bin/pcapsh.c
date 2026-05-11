@@ -34,4 +34,17 @@ int         nvars = 0;
 pdef_t      pdefs[MAX_PDEFS];
 int         npdefs = 0;
 
-char        wrpcap_override[MAXPATH] = "";
+char            wrpcap_override[MAXPATH] = "";
+pcapsh_packet_cb g_packet_cb       = NULL;
+void            *g_packet_cb_userdata = NULL;
+
+void pcapsh_reset(void) {
+    nsessions = 0;
+    memset(sessions, 0, sizeof(sessions));
+    nvars = 0;
+    memset(vars, 0, sizeof(vars));
+    wrpcap_override[0] = '\0';
+    g_packet_cb = NULL;
+    g_packet_cb_userdata = NULL;
+    pcapsh_eval_reset();
+}

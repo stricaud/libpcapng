@@ -126,6 +126,11 @@ static void tcp_autotrack_fixup(layer_t *chain)
     *my_seq = (uint32_t)f_seq->n + (uint32_t)data_len + has_fin + has_syn;
 }
 
+void pcapsh_eval_reset(void) {
+    memset(tcp_autotrack, 0, sizeof(tcp_autotrack));
+    g_tls_used = 0;
+}
+
 /* ─── Variable storage ──────────────────────────────────────────────────────── */
 
 var_t *var_find(const char *name) {
@@ -644,7 +649,8 @@ EvalResult eval_primary(Lex *L) {
                     fprintf(stderr, CBRED "fromhex: no bytes parsed\n" CR);
                     free(buf); r.is_none = 1; return r;
                 }
-                printf(CMAG "<raw %zu bytes>" CR "\n", n);
+                if (!g_packet_cb)
+                    printf(CMAG "<raw %zu bytes>" CR "\n", n);
                 r.raw = buf; r.raw_len = n; r.is_raw = 1;
                 return r;
             }
@@ -778,7 +784,8 @@ EvalResult eval_primary(Lex *L) {
                 size_t n = 0;
                 uint8_t *buf = frompcapng_read(filename, pktnum, &n);
                 if (!buf) { r.is_none = 1; return r; }
-                printf(CMAG "<raw %zu bytes from %s packet #%u>" CR "\n", n, filename, pktnum);
+                if (!g_packet_cb)
+                    printf(CMAG "<raw %zu bytes from %s packet #%u>" CR "\n", n, filename, pktnum);
                 r.raw = buf; r.raw_len = n; r.is_raw = 1;
                 return r;
             }
@@ -879,14 +886,9 @@ EvalResult eval_primary(Lex *L) {
                 if (L->cur.type == T_COMMA) lex_adv(L);
                 EvalResult arg = eval_expr(L);
                 if (L->cur.type == T_RPAREN) lex_adv(L);
-                if (filename[0] && (arg.pkt || arg.raw)) {
-                    struct stat _st; int exists = (stat(filename, &_st) == 0);
-                    FILE *fp = fopen(filename, exists ? "ab" : "wb");
-                    if (!fp) { perror("wrpcap"); r.is_none=1; return r; }
-                    /* always LINKTYPE_ETHERNET; keep Ethernet header even for IP-only packets */
-                    if (!exists) libpcapng_write_header_to_file_with_linktype(fp, LINKTYPE_ETHERNET);
+                if ((filename[0] || g_packet_cb) && (arg.pkt || arg.raw)) {
                     uint8_t *buf = malloc(MAX_PKT_BYTES); size_t len = 0;
-                    if (!buf) { if (arg.pkt) free_layer(arg.pkt); if (arg.raw) free(arg.raw); fclose(fp); r.is_none=1; return r; }
+                    if (!buf) { if (arg.pkt) free_layer(arg.pkt); if (arg.raw) free(arg.raw); r.is_none=1; return r; }
                     if (arg.pkt) {
                         tcp_autotrack_fixup(arg.pkt);
                         len = pkt_to_raw_ex(arg.pkt, buf, MAX_PKT_BYTES, 1);
@@ -896,10 +898,20 @@ EvalResult eval_primary(Lex *L) {
                         memcpy(buf, arg.raw, len);
                         free(arg.raw);
                     }
-                    libpcapng_write_enhanced_packet_to_file(fp, buf, len);
+                    if (g_packet_cb) {
+                        /* embedded / Python mode: deliver raw bytes via callback */
+                        g_packet_cb(buf, len, g_packet_cb_userdata);
+                    } else {
+                        /* CLI mode: write to pcapng file */
+                        struct stat _st; int exists = (stat(filename, &_st) == 0);
+                        FILE *fp = fopen(filename, exists ? "ab" : "wb");
+                        if (!fp) { perror("wrpcap"); free(buf); r.is_none=1; return r; }
+                        if (!exists) libpcapng_write_header_to_file_with_linktype(fp, LINKTYPE_ETHERNET);
+                        libpcapng_write_enhanced_packet_to_file(fp, buf, len);
+                        fclose(fp);
+                        printf(CGRN "%s %zu bytes to %s\n" CR, exists ? "Appended" : "Wrote", len, filename);
+                    }
                     free(buf);
-                    fclose(fp);
-                    printf(CGRN "%s %zu bytes to %s\n" CR, exists ? "Appended" : "Wrote", len, filename);
                 }
                 r.is_none = 1; return r;
             }

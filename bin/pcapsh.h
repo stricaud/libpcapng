@@ -214,16 +214,21 @@ typedef struct eval_result {
     int      is_num;
 } EvalResult;
 
+/* ─── Embedded / callback API ───────────────────────────────────────────────── */
+typedef void (*pcapsh_packet_cb)(const uint8_t *buf, size_t len, void *userdata);
+
 /* ─── Global state (defined in pcapsh.c) ───────────────────────────────────── */
-extern sess_t      sessions[MAX_SESSIONS];
-extern int         nsessions;
-extern proto_reg_t proto_reg[MAX_PROTO_REG];
-extern int         nproto_reg;
-extern var_t       vars[MAX_VARS];
-extern int         nvars;
-extern pdef_t      pdefs[MAX_PDEFS];
-extern int         npdefs;
-extern char        wrpcap_override[MAXPATH];
+extern sess_t           sessions[MAX_SESSIONS];
+extern int              nsessions;
+extern proto_reg_t      proto_reg[MAX_PROTO_REG];
+extern int              nproto_reg;
+extern var_t            vars[MAX_VARS];
+extern int              nvars;
+extern pdef_t           pdefs[MAX_PDEFS];
+extern int              npdefs;
+extern char             wrpcap_override[MAXPATH];
+extern pcapsh_packet_cb g_packet_cb;
+extern void            *g_packet_cb_userdata;
 
 /* ─── pcapsh_layer.c ────────────────────────────────────────────────────────── */
 void        proto_register(int id, const char *name, const char *color);
@@ -290,3 +295,11 @@ var_t      *var_set_num(const char *name, int64_t val);
 void        lex_adv(Lex *L);
 void        lex_init(Lex *L, const char *src);
 EvalResult  eval_expr(Lex *L);
+void        pcapsh_eval_reset(void);
+
+/* ─── pcapsh_main.c ─────────────────────────────────────────────────────────── */
+void pcapsh_init(void);
+void pcapsh_reset(void);
+int  run_script(const char *path);
+int  run_script_from_buffer(const char *src, size_t len);
+void eval_line(const char *src);

@@ -208,31 +208,26 @@ void eval_protocol_block(const char *name, const char *body) {
 
 /* ─── Script execution ───────────────────────────────────────────────────────── */
 
-int run_script(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) { fprintf(stderr, CBRED "pcapsh: cannot open script '%s': %s\n" CR, path, strerror(errno)); return 1; }
-
+static void run_script_f(FILE *f) {
     char line[4096];
     char proto_name[64]   = {0};
     char proto_body[8192] = {0};
     int  in_proto = 0;
 
-    char for_var[64]        = {0};
-    char for_body[65536]    = {0};
+    char for_var[64]     = {0};
+    char for_body[65536] = {0};
     int64_t for_start = 0, for_stop = 0, for_step = 1;
     int  in_for = 0;
 
-    char cont[65536] = "";   /* multi-line continuation buffer */
+    char cont[65536] = "";
     int  cont_len = 0;
 
     while (fgets(line, sizeof(line), f)) {
-        /* strip trailing CR/LF */
         size_t len = strlen(line);
         while (len > 0 && (line[len-1]=='\n'||line[len-1]=='\r')) line[--len]='\0';
 
-        /* backslash line continuation: append to cont buffer and keep reading */
         if (len > 0 && line[len-1] == '\\') {
-            line[len-1] = ' '; /* replace backslash with space */
+            line[len-1] = ' ';
             if (cont_len + (int)len < (int)sizeof(cont) - 1) {
                 memcpy(cont + cont_len, line, len);
                 cont_len += (int)len;
@@ -240,7 +235,6 @@ int run_script(const char *path) {
             }
             continue;
         }
-        /* if we have accumulated continuation lines, append current line and use */
         if (cont_len > 0) {
             if (cont_len + (int)len < (int)sizeof(cont) - 1) {
                 memcpy(cont + cont_len, line, len);
@@ -267,13 +261,10 @@ int run_script(const char *path) {
         }
 
         if (in_for) {
-            /* body lines must be indented; a non-empty, non-indented line ends the loop */
             int indented = (line[0] == ' ' || line[0] == '\t');
             if (!indented && *p && *p != '#') {
-                /* flush and execute the loop, then fall through to process this line */
                 run_for_body(for_var, for_start, for_stop, for_step, for_body);
                 in_for = 0; for_var[0] = 0; for_body[0] = 0;
-                /* fall through — process 'line' normally below */
             } else {
                 if (*p && *p != '#') {
                     strncat(for_body, line, sizeof(for_body) - strlen(for_body) - 2);
@@ -307,9 +298,29 @@ int run_script(const char *path) {
         eval_line(line);
     }
     if (in_proto)
-        fprintf(stderr, CBRED "pcapsh: unterminated 'protocol %s' block (missing 'end')\n" CR, proto_name);
+        fprintf(stderr, CBRED "pcapsh: unterminated 'protocol' block\n" CR);
     if (in_for)
         run_for_body(for_var, for_start, for_stop, for_step, for_body);
+}
+
+int run_script(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, CBRED "pcapsh: cannot open script '%s': %s\n" CR, path, strerror(errno));
+        return 1;
+    }
+    run_script_f(f);
+    fclose(f);
+    return 0;
+}
+
+int run_script_from_buffer(const char *src, size_t len) {
+    FILE *f = fmemopen((void *)src, len, "r");
+    if (!f) {
+        fprintf(stderr, CBRED "pcapsh: fmemopen failed: %s\n" CR, strerror(errno));
+        return 1;
+    }
+    run_script_f(f);
     fclose(f);
     return 0;
 }
@@ -345,8 +356,7 @@ void usage(const char *prog) {
         prog, prog);
 }
 
-int main(int argc, char **argv) {
-    /* register built-in protocols in the name/color registry */
+void pcapsh_init(void) {
     proto_register(PROTO_ETHER, "Ether", CBYEL);
     proto_register(PROTO_IP,    "IP",    CBCYN);
     proto_register(PROTO_TCP,   "TCP",   CBGRN);
@@ -356,10 +366,8 @@ int main(int argc, char **argv) {
     proto_register(PROTO_DNS,   "DNS",   CBCYN);
     proto_register(PROTO_TLS,   "TLS",   CBCYN);
 
-    /* register built-in posa-defined protocols */
     parse_posa_src(BUILTIN_POSA);
 
-    /* load shared protocol definitions — try candidates in order, stop at first hit */
     {
         const char *candidates[] = {
             getenv("PCAPSH_PROTOS_DIR"),
@@ -377,14 +385,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* auto-load ~/.pcapsh_protos.posa; create with defaults if missing */
     {
         const char *home = getenv("HOME");
         if (home) {
             char p[MAXPATH]; snprintf(p, sizeof(p), "%s/.pcapsh_protos.posa", home);
             struct stat _s;
             if (stat(p, &_s) != 0) {
-                /* file does not exist — seed it with TFTP + Telnet examples */
                 FILE *fp = fopen(p, "w");
                 if (fp) {
                     fputs(DEFAULT_USER_POSA, fp);
@@ -395,7 +401,10 @@ int main(int argc, char **argv) {
             parse_posa_file(p);
         }
     }
+}
 
+int main(int argc, char **argv) {
+    pcapsh_init();
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     /* ── parse arguments ── */
