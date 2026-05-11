@@ -12,7 +12,7 @@ import time
 
 sys.path.insert(0, "../")          # find libpcapng/ package from source tree
 
-from libpcapng import pcapsh
+from pycapng import pcapsh
 
 
 def write_pcapng(path: str, raw_frames: list[bytes]) -> None:

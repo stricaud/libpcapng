@@ -13,7 +13,7 @@ import struct
 _HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(_HERE, ".."))
 
-from libpcapng import pcapsh
+from pycapng import pcapsh
 
 LAN_CORP = """\
 # lan_corp — realistic Windows Active Directory LAN traffic simulation

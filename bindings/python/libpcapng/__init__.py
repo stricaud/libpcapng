@@ -1,1 +1,0 @@
-# libpcapng Python package

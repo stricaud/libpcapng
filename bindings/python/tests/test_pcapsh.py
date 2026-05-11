@@ -1,5 +1,5 @@
 """
-Tests for the libpcapng.pcapsh Python binding.
+Tests for the pycapng.pcapsh Python binding.
 
 Run with:
     python3 -m pytest bindings/python/tests/          # from repo root
@@ -16,7 +16,7 @@ _HERE   = os.path.dirname(__file__)
 _BINDIR = os.path.normpath(os.path.join(_HERE, ".."))      # bindings/python/
 sys.path.insert(0, _BINDIR)
 
-from libpcapng import pcapsh
+from pycapng import pcapsh
 
 # ── Embedded script buffers ───────────────────────────────────────────────────
 

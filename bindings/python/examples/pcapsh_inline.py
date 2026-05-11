@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, "../")
 
-from libpcapng import pcapsh
+from pycapng import pcapsh
 def main():
     output = sys.argv[1] if len(sys.argv) > 1 else "pcapsh_inline_out.pcapng"
 

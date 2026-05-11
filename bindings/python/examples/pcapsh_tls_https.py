@@ -20,7 +20,7 @@ import os
 
 sys.path.insert(0, "../")
 
-from libpcapng import pcapsh
+from pycapng import pcapsh
 
 
 # ── Certificate generation ────────────────────────────────────────────────────

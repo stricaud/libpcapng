@@ -1,6 +1,6 @@
-/* pypcapsh.cpp — Python bindings for the pcapsh script engine.
+/* pypcapsh.cpp — pcapsh submodule registered inside pycapng.
  *
- * from libpcapng import pcapsh
+ * from pycapng import pcapsh
  * sh = pcapsh.PcapSH()
  * packets = sh.run_script("foo.pcapsh")
  * packets = sh.run_script("foo.pcapsh", on_packet=lambda p: print(len(p)))
@@ -104,8 +104,8 @@ static py::bytes _build_tls(size_t max,
     return py::bytes(reinterpret_cast<char *>(buf.data()), n);
 }
 
-PYBIND11_MODULE(pcapsh, m) {
-    m.doc() =
+void register_pcapsh_submodule(py::module_ &parent) {
+    auto m = parent.def_submodule("pcapsh",
         "pcapsh — execute .pcapsh scripts and receive raw Ethernet frames.\n\n"
         "Protocol definitions (.posa files) are loaded from, in order:\n"
         "  1. PCAPSH_PROTOS_DIR environment variable (if set)\n"
@@ -113,7 +113,7 @@ PYBIND11_MODULE(pcapsh, m) {
         "  3. The build-tree bin/protos/ directory (in-tree builds)\n"
         "  4. ~/.pcapsh_protos.posa (user overrides)\n"
         "\n"
-        "Additional directories can be loaded at runtime via PcapSH.load_protos().";
+        "Additional directories can be loaded at runtime via PcapSH.load_protos().");
 
     py::class_<PcapSH>(m, "PcapSH",
         "Script engine instance. Protocol definitions are loaded once at construction.\n\n"

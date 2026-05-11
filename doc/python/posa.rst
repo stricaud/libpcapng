@@ -141,7 +141,7 @@ Use it in a Python script::
     import os
     os.environ["PCAPSH_PROTOS_DIR"] = os.path.expanduser("~/my_protos")
 
-    from libpcapng import pcapsh
+    from pycapng import pcapsh
 
     sh = pcapsh.PcapSH()
     # or load at any time:
@@ -178,7 +178,7 @@ You can define protocols directly inside a ``.pcapsh`` file or
 Defining the protocol inline does not persist across ``run_script()`` /
 ``run_string()`` calls because each call resets per-run state.  For
 persistent definitions use a ``.posa`` file loaded via
-:meth:`~libpcapng.pcapsh.PcapSH.load_posa` or
+:meth:`~pycapng.pcapsh.PcapSH.load_posa` or
 ``$PCAPSH_PROTOS_DIR``.
 
 Little-endian example — Windows SMB2 dialect
@@ -205,7 +205,7 @@ Loading from Python
 
 ::
 
-    from libpcapng import pcapsh
+    from pycapng import pcapsh
 
     sh = pcapsh.PcapSH()
 

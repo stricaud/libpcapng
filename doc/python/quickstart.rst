@@ -27,7 +27,7 @@ Run a script, get packets
 
 ::
 
-    from libpcapng import pcapsh
+    from pycapng import pcapsh
 
     sh = pcapsh.PcapSH()
     packets = sh.run_string("""
@@ -52,7 +52,7 @@ Per-packet callback
 
 For large scripts or streaming use-cases, pass ``on_packet``::
 
-    from libpcapng import pcapsh
+    from pycapng import pcapsh
 
     sh = pcapsh.PcapSH()
 
@@ -73,7 +73,7 @@ Inline pcapsh code
 
 ::
 
-    from libpcapng import pcapsh
+    from pycapng import pcapsh
 
     sh = pcapsh.PcapSH()
     packets = sh.run_string("""
