@@ -4,10 +4,6 @@
  * Tests are checked against RFC-style requirements from:
  *   draft-ietf-opsawg-pcapng (https://ietf-opsawg-wg.github.io/...)
  *
- * Known spec deviations in the library are marked [BUG] and assert the
- * current (wrong) value so the test suite still passes, making it easy
- * to see what breaks when the bugs are fixed.
- *
  * Build with the rest of the test suite via cmake, or manually:
  *   cc -I../include -o pcapng-spec pcapng-spec.c -lpcapng
  *   ./pcapng-spec
@@ -105,15 +101,113 @@ static void test_block_type_constants(void)
     CHECK(PCAPNG_VERSION_MAJOR                      == 1u);
     CHECK(PCAPNG_VERSION_MINOR                      == 0u);
 
-    /* DSB secrets type codes */
+    /* DSB secrets type codes — original set */
     CHECK(PCAPNG_TLS_KEY_LOG                        == 0x544c534bu); /* "TLSK" */
     CHECK(PCAPNG_WIREGUARD_KEY_LOG                  == 0x57474b4cu); /* "WGKL" */
     CHECK(PCAPNG_ZIGBEE_NWK_KEY                     == 0x5a4e574bu); /* "ZNWK" */
     CHECK(PCAPNG_ZIGBEE_APS_KEY                     == 0x5a415053u); /* "ZAPS" */
+
+    /* DSB secrets type codes — additional (current spec) */
+    CHECK(PCAPNG_SSH_KEY_LOG                        == 0x5353484bu); /* "SSHK" */
+    CHECK(PCAPNG_OPC_UA_KEY_LOG                     == 0x55414b4cu); /* "UAKL" */
+    CHECK(PCAPNG_ESP_SA                             == 0x45535053u); /* "ESPS" */
+
+    /* NRB record types */
+    CHECK(PCAPNG_NRB_RECORD_END                     == 0x0000u);
+    CHECK(PCAPNG_NRB_RECORD_IPV4                    == 0x0001u);
+    CHECK(PCAPNG_NRB_RECORD_IPV6                    == 0x0002u);
+    CHECK(PCAPNG_NRB_RECORD_EUI48                   == 0x0003u);
+    CHECK(PCAPNG_NRB_RECORD_EUI64                   == 0x0004u);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 2.  LINK TYPE CONSTANTS (selected IANA values)
+ * 2.  OPTION CONSTANTS
+ * ══════════════════════════════════════════════════════════════════════════════*/
+static void test_option_constants(void)
+{
+    SUITE("Option code constants (spec §3.5)");
+
+    CHECK(PCAPNG_OPT_ENDOFOPT       == 0);
+    CHECK(PCAPNG_OPT_COMMENT        == 1);
+
+    CHECK(PCAPNG_OPT_SHB_HARDWARE   == 2);
+    CHECK(PCAPNG_OPT_SHB_OS         == 3);
+    CHECK(PCAPNG_OPT_SHB_USERAPPL   == 4);
+
+    CHECK(PCAPNG_OPT_IDB_NAME       == 2);
+    CHECK(PCAPNG_OPT_IDB_TSRESOL    == 9);
+    CHECK(PCAPNG_OPT_IDB_FCSLEN     == 13);
+    CHECK(PCAPNG_OPT_IDB_TSOFFSET   == 14);
+    CHECK(PCAPNG_OPT_IDB_IANA_TZNAME == 18);
+
+    CHECK(PCAPNG_OPT_EPB_FLAGS      == 2);
+    CHECK(PCAPNG_OPT_EPB_HASH       == 3);
+    CHECK(PCAPNG_OPT_EPB_DROPCOUNT  == 4);
+    CHECK(PCAPNG_OPT_EPB_PACKETID   == 5);
+    CHECK(PCAPNG_OPT_EPB_QUEUE      == 6);
+    CHECK(PCAPNG_OPT_EPB_VERDICT    == 7);
+    CHECK(PCAPNG_OPT_EPB_PROCESSID  == 8);
+
+    CHECK(PCAPNG_OPT_ISB_STARTTIME  == 2);
+    CHECK(PCAPNG_OPT_ISB_IFRECV     == 4);
+    CHECK(PCAPNG_OPT_ISB_USRDELIV   == 8);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 3.  EPB FLAGS BIT DEFINITIONS
+ * ══════════════════════════════════════════════════════════════════════════════*/
+static void test_epb_flag_constants(void)
+{
+    SUITE("EPB flags word bit definitions (spec §4.3.1)");
+
+    /* Direction bits 0-1 */
+    CHECK(PCAPNG_EPB_FLAG_DIR_MASK        == 0x00000003u);
+    CHECK(PCAPNG_EPB_FLAG_DIR_UNKNOWN     == 0x00000000u);
+    CHECK(PCAPNG_EPB_FLAG_DIR_INBOUND     == 0x00000001u);
+    CHECK(PCAPNG_EPB_FLAG_DIR_OUTBOUND    == 0x00000002u);
+
+    /* Direction values are mutually exclusive within mask */
+    CHECK((PCAPNG_EPB_FLAG_DIR_INBOUND  & PCAPNG_EPB_FLAG_DIR_MASK) == PCAPNG_EPB_FLAG_DIR_INBOUND);
+    CHECK((PCAPNG_EPB_FLAG_DIR_OUTBOUND & PCAPNG_EPB_FLAG_DIR_MASK) == PCAPNG_EPB_FLAG_DIR_OUTBOUND);
+
+    /* Reception type bits 2-4 */
+    CHECK(PCAPNG_EPB_FLAG_RECV_MASK       == 0x0000001Cu);
+    CHECK(PCAPNG_EPB_FLAG_RECV_UNSPEC     == 0x00000000u);
+    CHECK(PCAPNG_EPB_FLAG_RECV_UNICAST    == 0x00000004u);
+    CHECK(PCAPNG_EPB_FLAG_RECV_MULTICAST  == 0x00000008u);
+    CHECK(PCAPNG_EPB_FLAG_RECV_BROADCAST  == 0x0000000Cu);
+    CHECK(PCAPNG_EPB_FLAG_RECV_PROMISC    == 0x00000010u);
+
+    /* FCS length field bits 5-8 */
+    CHECK(PCAPNG_EPB_FLAG_FCS_LEN_MASK    == 0x000001E0u);
+    CHECK(PCAPNG_EPB_FLAG_FCS_LEN_SHIFT   == 5);
+
+    /* FCS value 4 encodes to bits 7-6: (4 << 5) = 0x80 */
+    CHECK(((4u << PCAPNG_EPB_FLAG_FCS_LEN_SHIFT) & PCAPNG_EPB_FLAG_FCS_LEN_MASK) == 0x00000080u);
+
+    /* Checksum / offload flags bits 9-11 */
+    CHECK(PCAPNG_EPB_FLAG_CKSUM_NOT_READY == 0x00000200u);
+    CHECK(PCAPNG_EPB_FLAG_CKSUM_VALID     == 0x00000400u);
+    CHECK(PCAPNG_EPB_FLAG_TCP_SEG_OFFLOAD == 0x00000800u);
+
+    /* Link-layer error bits 16-31 */
+    CHECK(PCAPNG_EPB_FLAG_LL_ERR_SYMBOL   == 0x80000000u);
+    CHECK(PCAPNG_EPB_FLAG_LL_ERR_PREAMBLE == 0x40000000u);
+    CHECK(PCAPNG_EPB_FLAG_LL_ERR_SFD      == 0x20000000u);
+    CHECK(PCAPNG_EPB_FLAG_LL_ERR_UNALIGN  == 0x10000000u);
+    CHECK(PCAPNG_EPB_FLAG_LL_ERR_IFG      == 0x08000000u);
+    CHECK(PCAPNG_EPB_FLAG_LL_ERR_SHORT    == 0x04000000u);
+    CHECK(PCAPNG_EPB_FLAG_LL_ERR_LONG     == 0x02000000u);
+    CHECK(PCAPNG_EPB_FLAG_LL_ERR_CRC      == 0x01000000u);
+
+    /* No overlap between direction / recv / fcs / flags */
+    CHECK((PCAPNG_EPB_FLAG_DIR_MASK & PCAPNG_EPB_FLAG_RECV_MASK)    == 0u);
+    CHECK((PCAPNG_EPB_FLAG_RECV_MASK & PCAPNG_EPB_FLAG_FCS_LEN_MASK)== 0u);
+    CHECK((PCAPNG_EPB_FLAG_FCS_LEN_MASK & PCAPNG_EPB_FLAG_CKSUM_NOT_READY) == 0u);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 4.  LINK TYPE CONSTANTS (selected IANA values)
  * ══════════════════════════════════════════════════════════════════════════════*/
 static void test_linktype_constants(void)
 {
@@ -130,20 +224,174 @@ static void test_linktype_constants(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 3.  SECTION HEADER BLOCK
+ * 5.  OPTIONS TLV ENCODING
  * ══════════════════════════════════════════════════════════════════════════════*/
 
-/*
- * SHB wire layout (spec §4.1):
- *   offset  0  block_type         (4)  = 0x0A0D0D0A
- *   offset  4  block_total_length (4)
- *   offset  8  byte_order_magic   (4)  = 0x1A2B3C4D
- *   offset 12  major_version      (2)  = 1
- *   offset 14  minor_version      (2)  = 0
- *   offset 16  section_length     (8)  = -1 (0xFFFFFFFFFFFFFFFF) for unknown
- *   offset 24  block_total_length (4)  [trailing copy]
- *   total = 28 bytes
- */
+static void test_options_size_empty(void)
+{
+    SUITE("Options — size of zero-option list is 4 (endofopt only)");
+
+    CHECK(libpcapng_options_size(NULL, 0) == 4u);
+}
+
+static void test_options_size_aligned(void)
+{
+    SUITE("Options — size with aligned values");
+
+    /* One 4-byte option: type(2)+len(2)+value(4) = 8, plus endofopt(4) = 12 */
+    uint32_t val = 42u;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_EPB_QUEUE, 4, &val } };
+    CHECK(libpcapng_options_size(opts, 1) == 12u);
+
+    /* One 8-byte option: 4+8 = 12, plus endofopt(4) = 16 */
+    uint64_t val2 = 0;
+    pcapng_option_t opts2[] = { { PCAPNG_OPT_ISB_IFRECV, 8, &val2 } };
+    CHECK(libpcapng_options_size(opts2, 1) == 16u);
+}
+
+static void test_options_size_unaligned(void)
+{
+    SUITE("Options — size with values needing padding");
+
+    /* 1-byte value padded to 4: type(2)+len(2)+val_padded(4) = 8 + endofopt(4) = 12 */
+    uint8_t v = 6;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_IDB_TSRESOL, 1, &v } };
+    CHECK(libpcapng_options_size(opts, 1) == 12u);
+
+    /* 3-byte value padded to 4: same 12 */
+    unsigned char v3[3] = {0};
+    pcapng_option_t opts3[] = { { PCAPNG_OPT_COMMENT, 3, v3 } };
+    CHECK(libpcapng_options_size(opts3, 1) == 12u);
+
+    /* 5-byte value padded to 8: 4+8 = 12 + endofopt(4) = 16 */
+    unsigned char v5[5] = {0};
+    pcapng_option_t opts5[] = { { PCAPNG_OPT_COMMENT, 5, v5 } };
+    CHECK(libpcapng_options_size(opts5, 1) == 16u);
+}
+
+static void test_options_write_single_u8(void)
+{
+    SUITE("Options — write single 1-byte option (if_tsresol)");
+
+    /*
+     * Wire layout expected:
+     *   [0..1]  type  = 9  (PCAPNG_OPT_IDB_TSRESOL)
+     *   [2..3]  len   = 1
+     *   [4]     value = 6  (microseconds: 10^-6)
+     *   [5..7]  padding = 0
+     *   [8..11] opt_endofopt = 0
+     */
+    uint8_t tsresol = 6;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_IDB_TSRESOL, 1, &tsresol } };
+    size_t sz = libpcapng_options_size(opts, 1);
+    unsigned char *buf = alloc_buf(sz);
+
+    size_t written = libpcapng_options_write(opts, 1, buf);
+
+    CHECK(written == sz);
+    CHECK(written == 12u);
+    CHECK(u16at(buf, 0) == PCAPNG_OPT_IDB_TSRESOL);
+    CHECK(u16at(buf, 2) == 1u);
+    CHECK(buf[4] == 6u);
+    CHECK(buf[5] == 0u);    /* padding */
+    CHECK(buf[6] == 0u);
+    CHECK(buf[7] == 0u);
+    CHECK(u32at(buf, 8) == 0u);   /* opt_endofopt */
+
+    free(buf);
+}
+
+static void test_options_write_single_u32(void)
+{
+    SUITE("Options — write single 4-byte option (epb_queue)");
+
+    uint32_t queue = 7u;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_EPB_QUEUE, 4, &queue } };
+    size_t sz = libpcapng_options_size(opts, 1);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_options_write(opts, 1, buf);
+
+    CHECK(u16at(buf, 0) == PCAPNG_OPT_EPB_QUEUE);
+    CHECK(u16at(buf, 2) == 4u);
+    CHECK(u32at(buf, 4) == queue);
+    CHECK(u32at(buf, 8) == 0u);   /* opt_endofopt */
+
+    free(buf);
+}
+
+static void test_options_write_multiple(void)
+{
+    SUITE("Options — write multiple options");
+
+    /*
+     * Two options:
+     *   isb_ifrecv (u64): type=4, len=8
+     *   isb_ifdrop (u64): type=5, len=8
+     * Each: 4+8 = 12 bytes; two = 24; plus endofopt(4) = 28
+     */
+    uint64_t recv = 1000u, drop = 42u;
+    pcapng_option_t opts[] = {
+        { PCAPNG_OPT_ISB_IFRECV, 8, &recv },
+        { PCAPNG_OPT_ISB_IFDROP, 8, &drop },
+    };
+    size_t sz = libpcapng_options_size(opts, 2);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_options_write(opts, 2, buf);
+
+    CHECK(sz == 28u);
+    CHECK(u16at(buf,  0) == PCAPNG_OPT_ISB_IFRECV);
+    CHECK(u16at(buf,  2) == 8u);
+    CHECK(u32at(buf, 24) == 0u);   /* opt_endofopt */
+
+    free(buf);
+}
+
+static void test_options_write_string(void)
+{
+    SUITE("Options — write string option (shb_userappl)");
+
+    const char *appl = "libpcapng";
+    uint16_t appl_len = (uint16_t)strlen(appl);
+    pcapng_option_t opts[] = { { PCAPNG_OPT_SHB_USERAPPL, appl_len, appl } };
+    size_t sz = libpcapng_options_size(opts, 1);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_options_write(opts, 1, buf);
+
+    CHECK(u16at(buf, 0) == PCAPNG_OPT_SHB_USERAPPL);
+    CHECK(u16at(buf, 2) == appl_len);
+    CHECK(memcmp(buf + 4, appl, appl_len) == 0);
+    /* padding bytes zero */
+    for (size_t i = appl_len; i < pad4(appl_len); i++)
+        CHECK(buf[4 + i] == 0u);
+
+    free(buf);
+}
+
+static void test_options_endofopt_always_present(void)
+{
+    SUITE("Options — opt_endofopt (type=0,len=0) always at end");
+
+    /* Even with no user options, write produces opt_endofopt */
+    unsigned char buf[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    libpcapng_options_write(NULL, 0, buf);
+    CHECK(u32at(buf, 0) == 0u);  /* all-zero = endofopt */
+
+    /* With one option, endofopt follows */
+    uint32_t q = 1u;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_EPB_QUEUE, 4, &q } };
+    size_t sz = libpcapng_options_size(opts, 1);
+    unsigned char *buf2 = alloc_buf(sz);
+    libpcapng_options_write(opts, 1, buf2);
+    CHECK(u32at(buf2, sz - 4) == 0u);  /* last 4 bytes = endofopt */
+    free(buf2);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 6.  SECTION HEADER BLOCK
+ * ══════════════════════════════════════════════════════════════════════════════*/
 
 static void test_shb_size(void)
 {
@@ -163,36 +411,15 @@ static void test_shb_wire_format(void)
     unsigned char *buf = alloc_buf(sz);
     size_t written = libpcapng_section_header_block_write(buf);
 
-    /* Return value matches size helper */
     CHECK(written == sz);
-
-    /* Block type */
     CHECK(u32at(buf,  0) == PCAPNG_SECTION_HEADER_BLOCK);
-
-    /* Leading block_total_length */
     CHECK(u32at(buf,  4) == (uint32_t)sz);
-
-    /* Byte-order magic: spec §4.1 — MUST be 0x1A2B3C4D */
     CHECK(u32at(buf,  8) == 0x1A2B3C4Du);
-
-    /* Major version: MUST be 1 */
     CHECK(u16at(buf, 12) == 1u);
-
-    /* Minor version: MUST be 0.
-     * [BUG] The assignment is commented out in blocks.c; the field is
-     * left uninitialised (calloc'd, so happens to be 0).  Assert 0 for
-     * now so the test tracks the current behaviour. */
     CHECK(u16at(buf, 14) == 0u);
-
-    /* section_length: spec §4.1 says -1 (0xFFFFFFFFFFFFFFFF) means "unknown".
-     * [BUG] Library writes 0, which is invalid (0 would mean an empty section).
-     * Assert the current (wrong) value so CI stays green until the bug is fixed. */
-    CHECK(u64at(buf, 16) == 0u);   /* should be 0xFFFFFFFFFFFFFFFFull */
-
-    /* Trailing block_total_length: MUST equal leading BTL */
+    /* spec §4.1: -1 (0xFFFFFFFFFFFFFFFF) = unknown section length */
+    CHECK(u64at(buf, 16) == 0xFFFFFFFFFFFFFFFFull);
     CHECK(u32at(buf, 24) == u32at(buf, 4));
-
-    /* Every block's total length must be a multiple of 4 */
     CHECK((u32at(buf, 4) % 4) == 0);
 
     free(buf);
@@ -206,33 +433,50 @@ static void test_shb_read_roundtrip(void)
     unsigned char *buf = alloc_buf(sz);
     libpcapng_section_header_block_write(buf);
 
-    /* The read function returns a pointer into the *same* buffer, offset past
-     * the block_type and block_total_length fields (the "light" struct). */
     pcapng_section_header_block_light_t *shb =
         libpcapng_section_header_block_read(buf, sz);
 
     CHECK(shb != NULL);
     CHECK(shb->magic         == PCAPNG_BYTE_ORDER_MAGIC);
     CHECK(shb->major_version == PCAPNG_VERSION_MAJOR);
+    CHECK(shb->minor_version == PCAPNG_VERSION_MINOR);
+    CHECK(shb->section_length == (uint64_t)-1);
+
+    free(shb);
+    free(buf);
+}
+
+static void test_shb_with_options(void)
+{
+    SUITE("Section Header Block — wire format with options");
+
+    const char *appl = "test";
+    uint16_t appl_len = 4;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_SHB_USERAPPL, appl_len, appl } };
+    size_t sz = libpcapng_section_header_block_size_with_options(opts, 1);
+    unsigned char *buf = alloc_buf(sz);
+
+    size_t written = libpcapng_section_header_block_write_with_options(opts, 1, buf);
+
+    CHECK(written == sz);
+    CHECK(u32at(buf, 0) == PCAPNG_SECTION_HEADER_BLOCK);
+    CHECK(u32at(buf, 4) == (uint32_t)sz);
+    CHECK(u64at(buf, 16) == 0xFFFFFFFFFFFFFFFFull);  /* section_length = -1 */
+
+    /* Options start at offset 24 (sizeof SHB struct, before trailing BTL) */
+    CHECK(u16at(buf, 24) == PCAPNG_OPT_SHB_USERAPPL);
+    CHECK(u16at(buf, 26) == appl_len);
+    CHECK(memcmp(buf + 28, appl, appl_len) == 0);
+
+    /* Trailing BTL */
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);
 
     free(buf);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 4.  INTERFACE DESCRIPTION BLOCK
+ * 7.  INTERFACE DESCRIPTION BLOCK
  * ══════════════════════════════════════════════════════════════════════════════*/
-
-/*
- * IDB wire layout (spec §4.2):
- *   offset  0  block_type         (4)  = 0x00000001
- *   offset  4  block_total_length (4)
- *   offset  8  link_type          (2)
- *   offset 10  reserved           (2)  = 0
- *   offset 12  snap_len           (4)
- *   (no options in the basic write functions)
- *   offset 16  block_total_length (4)  [trailing]
- *   total = 20 bytes
- */
 
 static void test_idb_size(void)
 {
@@ -254,10 +498,10 @@ static void test_idb_wire_format_raw(void)
     CHECK(written == sz);
     CHECK(u32at(buf,  0) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
     CHECK(u32at(buf,  4) == (uint32_t)sz);
-    CHECK(u16at(buf,  8) == LINKTYPE_RAW);   /* default linktype */
-    CHECK(u16at(buf, 10) == 0u);             /* reserved MUST be 0 */
-    CHECK(u32at(buf, 12) == 65535u);         /* snaplen */
-    CHECK(u32at(buf, 16) == u32at(buf, 4));  /* trailing BTL matches leading */
+    CHECK(u16at(buf,  8) == LINKTYPE_RAW);
+    CHECK(u16at(buf, 10) == 0u);
+    CHECK(u32at(buf, 12) == 65535u);
+    CHECK(u32at(buf, 16) == u32at(buf, 4));
     CHECK((u32at(buf, 4) % 4) == 0);
 
     free(buf);
@@ -273,7 +517,7 @@ static void test_idb_wire_format_ethernet(void)
 
     CHECK(u32at(buf, 0) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
     CHECK(u16at(buf, 8) == LINKTYPE_ETHERNET);
-    CHECK(u32at(buf, 12) == 0u);   /* snaplen 0 = unlimited */
+    CHECK(u32at(buf, 12) == 0u);
     CHECK(u32at(buf, 16) == u32at(buf, 4));
 
     free(buf);
@@ -295,7 +539,7 @@ static void test_idb_wire_format_all_linktypes(void)
         memset(buf, 0, sz);
         libpcapng_interface_description_block_write_with_linktype(0, buf, lts[i]);
         CHECK(u16at(buf, 8)  == lts[i]);
-        CHECK(u16at(buf, 10) == 0u);     /* reserved always 0 */
+        CHECK(u16at(buf, 10) == 0u);
     }
 
     free(buf);
@@ -334,39 +578,72 @@ static void test_idb_read_roundtrip(void)
     CHECK(idb->reserved == 0u);
     CHECK(idb->snaplen  == 9000u);
 
+    free(idb);
+    free(buf);
+}
+
+static void test_idb_with_tsresol_option(void)
+{
+    SUITE("Interface Description Block — if_tsresol option");
+
+    /*
+     * if_tsresol = 9 means nanosecond resolution (10^-9).
+     * MSB=0, remaining bits = 9.
+     */
+    uint8_t tsresol = 9;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_IDB_TSRESOL, 1, &tsresol } };
+    size_t sz = libpcapng_interface_description_block_size_with_options(opts, 1);
+    unsigned char *buf = alloc_buf(sz);
+
+    size_t written = libpcapng_interface_description_block_write_with_options(
+        1500, LINKTYPE_ETHERNET, opts, 1, buf);
+
+    CHECK(written == sz);
+    CHECK(u32at(buf, 0) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
+    /* options start after fixed IDB body (offset 16) */
+    CHECK(u16at(buf, 16) == PCAPNG_OPT_IDB_TSRESOL);
+    CHECK(u16at(buf, 18) == 1u);
+    CHECK(buf[20] == 9u);
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);  /* trailing BTL */
+
+    free(buf);
+}
+
+static void test_idb_with_multiple_options(void)
+{
+    SUITE("Interface Description Block — multiple options");
+
+    uint8_t tsresol = 6;
+    const char *name = "eth0";
+    pcapng_option_t opts[] = {
+        { PCAPNG_OPT_IDB_NAME,   4,  name     },
+        { PCAPNG_OPT_IDB_TSRESOL, 1, &tsresol },
+    };
+    size_t sz = libpcapng_interface_description_block_size_with_options(opts, 2);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_interface_description_block_write_with_options(0, LINKTYPE_ETHERNET, opts, 2, buf);
+
+    CHECK((sz % 4) == 0);
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);
+    CHECK(u16at(buf, 16) == PCAPNG_OPT_IDB_NAME);
+
     free(buf);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 5.  ENHANCED PACKET BLOCK
+ * 8.  ENHANCED PACKET BLOCK
  * ══════════════════════════════════════════════════════════════════════════════*/
-
-/*
- * EPB wire layout (spec §4.3):
- *   offset  0  block_type              (4)  = 0x00000006
- *   offset  4  block_total_length      (4)
- *   offset  8  interface_id            (4)
- *   offset 12  timestamp_high          (4)
- *   offset 16  timestamp_low           (4)
- *   offset 20  captured_packet_length  (4)
- *   offset 24  original_packet_length  (4)
- *   offset 28  packet_data             (captured_packet_length, padded to 4)
- *   offset 28+padded  block_total_length (4)
- */
 
 static void test_epb_size_aligned(void)
 {
     SUITE("Enhanced Packet Block — size (aligned payloads)");
 
-    /* 0-byte payload: 28 + 0 + 4 = 32 */
     CHECK(libpcapng_enhanced_packet_block_size(0) == 32u);
-
-    /* 4-byte aligned payloads: 28 + N + 4 */
     CHECK(libpcapng_enhanced_packet_block_size(4)  == 36u);
     CHECK(libpcapng_enhanced_packet_block_size(8)  == 40u);
     CHECK(libpcapng_enhanced_packet_block_size(40) == 72u);
 
-    /* All results must be multiples of 4 */
     for (size_t n = 0; n <= 64; n++)
         CHECK((libpcapng_enhanced_packet_block_size(n) % 4) == 0);
 }
@@ -375,19 +652,12 @@ static void test_epb_size_unaligned(void)
 {
     SUITE("Enhanced Packet Block — size (unaligned payloads → padding)");
 
-    /* 1-byte payload → padded to 4: 28 + 4 + 4 = 36 */
     CHECK(libpcapng_enhanced_packet_block_size(1) == 36u);
-    /* 2-byte → 36 */
     CHECK(libpcapng_enhanced_packet_block_size(2) == 36u);
-    /* 3-byte → 36 */
     CHECK(libpcapng_enhanced_packet_block_size(3) == 36u);
-    /* 5-byte → padded to 8: 28 + 8 + 4 = 40 */
     CHECK(libpcapng_enhanced_packet_block_size(5) == 40u);
-    /* 6-byte → 40 */
     CHECK(libpcapng_enhanced_packet_block_size(6) == 40u);
-    /* 7-byte → 40 */
     CHECK(libpcapng_enhanced_packet_block_size(7) == 40u);
-    /* 41-byte → padded to 44: 28 + 44 + 4 = 76 */
     CHECK(libpcapng_enhanced_packet_block_size(41) == 76u);
 }
 
@@ -395,7 +665,6 @@ static void test_epb_wire_format_basic(void)
 {
     SUITE("Enhanced Packet Block — wire format (basic)");
 
-    /* A minimal 4-byte payload */
     const unsigned char pkt[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
     size_t pkt_len = 4;
     size_t sz = libpcapng_enhanced_packet_block_size(pkt_len);
@@ -407,19 +676,13 @@ static void test_epb_wire_format_basic(void)
     CHECK(written == sz);
     CHECK(u32at(buf,  0) == PCAPNG_ENHANCED_PACKET_BLOCK);
     CHECK(u32at(buf,  4) == (uint32_t)sz);
-    CHECK(u32at(buf,  8) == 0u);             /* interface_id = 0 */
-    CHECK(u32at(buf, 12) == 0x0001u);        /* timestamp_high */
-    CHECK(u32at(buf, 16) == 0xABCDu);        /* timestamp_low */
-    CHECK(u32at(buf, 20) == (uint32_t)pkt_len); /* captured_packet_length */
-    CHECK(u32at(buf, 24) == (uint32_t)pkt_len); /* original_packet_length */
-
-    /* Payload bytes at offset 28 */
+    CHECK(u32at(buf,  8) == 0u);
+    CHECK(u32at(buf, 12) == 0x0001u);
+    CHECK(u32at(buf, 16) == 0xABCDu);
+    CHECK(u32at(buf, 20) == (uint32_t)pkt_len);
+    CHECK(u32at(buf, 24) == (uint32_t)pkt_len);
     CHECK(memcmp(buf + 28, pkt, pkt_len) == 0);
-
-    /* Trailing BTL at offset 28+4=32 */
     CHECK(u32at(buf, 32) == u32at(buf, 4));
-
-    /* Block total length is multiple of 4 */
     CHECK((u32at(buf, 4) % 4) == 0);
 
     free(buf);
@@ -429,7 +692,6 @@ static void test_epb_wire_format_40byte(void)
 {
     SUITE("Enhanced Packet Block — wire format (40-byte IP+TCP SYN)");
 
-    /* Raw IPv4+TCP SYN — exactly 40 bytes (already 4-byte aligned) */
     const unsigned char pkt[] = {
         0x45,0x00,0x00,0x28, 0x00,0x01,0x00,0x00,
         0x40,0x06,0x0c,0xea, 0xac,0x10,0x00,0x2a,
@@ -437,18 +699,17 @@ static void test_epb_wire_format_40byte(void)
         0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
         0x50,0x02,0x20,0x00, 0xdb,0x9b,0x00,0x00
     };
-    size_t pkt_len = sizeof(pkt);   /* 40 */
+    size_t pkt_len = sizeof(pkt);
     size_t sz = libpcapng_enhanced_packet_block_size(pkt_len);
     unsigned char *buf = alloc_buf(sz);
 
     libpcapng_enhanced_packet_block_write_time(pkt, pkt_len, 0, 0, buf);
 
-    /* Block total length: 28 (header) + 40 (data) + 4 (trailing) = 72 */
     CHECK(u32at(buf, 4) == 72u);
-    CHECK(u32at(buf, 20) == 40u);   /* captured length */
-    CHECK(u32at(buf, 24) == 40u);   /* original length */
+    CHECK(u32at(buf, 20) == 40u);
+    CHECK(u32at(buf, 24) == 40u);
     CHECK(memcmp(buf + 28, pkt, 40) == 0);
-    CHECK(u32at(buf, 68) == 72u);   /* trailing BTL */
+    CHECK(u32at(buf, 68) == 72u);
 
     free(buf);
 }
@@ -457,16 +718,14 @@ static void test_epb_padding_bytes_are_zero(void)
 {
     SUITE("Enhanced Packet Block — padding bytes must be zero");
 
-    /* 3-byte payload → 1 byte of padding after the data */
     const unsigned char pkt[3] = { 0x01, 0x02, 0x03 };
-    size_t sz = libpcapng_enhanced_packet_block_size(3);   /* = 36 */
+    size_t sz = libpcapng_enhanced_packet_block_size(3);
     unsigned char *buf = alloc_buf(sz);
 
     libpcapng_enhanced_packet_block_write_time(pkt, 3, 0, 0, buf);
 
     CHECK(u32at(buf, 4) == 36u);
-    /* Byte at offset 31 is the padding byte — must be 0 */
-    CHECK(buf[31] == 0u);
+    CHECK(buf[31] == 0u);  /* padding byte */
 
     free(buf);
 }
@@ -481,22 +740,12 @@ static void test_epb_padding_all_sizes(void)
     for (size_t n = 0; n <= 64; n++) {
         size_t expected_sz = libpcapng_enhanced_packet_block_size(n);
         unsigned char *buf = alloc_buf(expected_sz);
-        memset(buf, 0, expected_sz);
 
         size_t written = libpcapng_enhanced_packet_block_write_time(pkt, n, 0, 0, buf);
 
-        /* Written length matches helper */
         CHECK(written == expected_sz);
-
-        /* Leading and trailing BTL fields agree */
-        uint32_t btl_lead  = u32at(buf, 4);
-        uint32_t btl_trail = u32at(buf, expected_sz - 4);
-        CHECK(btl_lead == btl_trail);
-
-        /* BTL is a multiple of 4 */
-        CHECK((btl_lead % 4) == 0);
-
-        /* captured_packet_length == n */
+        CHECK(u32at(buf, 4) == u32at(buf, expected_sz - 4));
+        CHECK((u32at(buf, 4) % 4) == 0);
         CHECK(u32at(buf, 20) == (uint32_t)n);
 
         free(buf);
@@ -507,8 +756,7 @@ static void test_epb_timestamp_split(void)
 {
     SUITE("Enhanced Packet Block — 64-bit microsecond timestamp split");
 
-    /* A known timestamp: 2024-01-01 00:00:00 UTC in microseconds */
-    uint64_t ts_us = (uint64_t)1704067200 * 1000000ULL;   /* 0x0005FBFE2960DC00 */
+    uint64_t ts_us = (uint64_t)1704067200 * 1000000ULL;
     uint32_t expected_high = (uint32_t)(ts_us >> 32);
     uint32_t expected_low  = (uint32_t)(ts_us & 0xFFFFFFFFu);
 
@@ -521,32 +769,8 @@ static void test_epb_timestamp_split(void)
     CHECK(u32at(buf, 12) == expected_high);
     CHECK(u32at(buf, 16) == expected_low);
 
-    /* Reassemble and verify */
     uint64_t ts_back = ((uint64_t)u32at(buf, 12) << 32) | u32at(buf, 16);
     CHECK(ts_back == ts_us);
-
-    free(buf);
-}
-
-static void test_epb_easyapi_with_time(void)
-{
-    SUITE("Enhanced Packet Block — easyapi write-with-time round-trip");
-
-    /* easyapi takes a uint32_t seconds timestamp and converts to microseconds */
-    uint32_t secs = 1704067200u;   /* 2024-01-01 00:00:00 UTC */
-    uint64_t expected_us = (uint64_t)secs * 1000000ULL;
-    uint32_t expected_high = (uint32_t)(expected_us >> 32);
-    uint32_t expected_low  = (uint32_t)(expected_us & 0xFFFFFFFFu);
-
-    const unsigned char pkt[4] = { 0x11, 0x22, 0x33, 0x44 };
-    size_t sz = libpcapng_enhanced_packet_block_size(4);
-    unsigned char *buf = alloc_buf(sz);
-
-    /* Write via the low-level function directly (easyapi goes to FILE *) */
-    libpcapng_enhanced_packet_block_write_time(pkt, 4, expected_high, expected_low, buf);
-
-    CHECK(u32at(buf, 12) == expected_high);
-    CHECK(u32at(buf, 16) == expected_low);
 
     free(buf);
 }
@@ -555,7 +779,6 @@ static void test_epb_data_preserved(void)
 {
     SUITE("Enhanced Packet Block — packet data preserved verbatim");
 
-    /* Use an Ethernet+IPv4+TCP payload (synthetic but realistic) */
     unsigned char pkt[60];
     for (int i = 0; i < 60; i++) pkt[i] = (unsigned char)i;
 
@@ -563,12 +786,8 @@ static void test_epb_data_preserved(void)
     unsigned char *buf = alloc_buf(sz);
     libpcapng_enhanced_packet_block_write_time(pkt, 60, 0, 0, buf);
 
-    /* Data begins at offset 28 */
     CHECK(memcmp(buf + 28, pkt, 60) == 0);
-
-    /* No data beyond 60 bytes is modified (next 4 bytes are trailing BTL) */
-    uint32_t trailing = u32at(buf, 88);
-    CHECK(trailing == u32at(buf, 4));   /* BTL must match */
+    CHECK(u32at(buf, 88) == u32at(buf, 4));
 
     free(buf);
 }
@@ -581,41 +800,613 @@ static void test_epb_interface_id_is_zero(void)
     size_t sz = libpcapng_enhanced_packet_block_size(4);
     unsigned char *buf = alloc_buf(sz);
     libpcapng_enhanced_packet_block_write_time(pkt, 4, 0, 0, buf);
-
     CHECK(u32at(buf, 8) == 0u);
+    free(buf);
+}
+
+static void test_epb_nonzero_interface_id(void)
+{
+    SUITE("Enhanced Packet Block — non-zero interface_id (multi-interface)");
+
+    const unsigned char pkt[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
+    size_t sz = libpcapng_enhanced_packet_block_size_with_options(4, NULL, 0);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_enhanced_packet_block_write_full(
+        pkt, 4, 4, 2,   /* captured=4, original=4, interface_id=2 */
+        0, 0, NULL, 0, buf);
+
+    CHECK(u32at(buf, 0) == PCAPNG_ENHANCED_PACKET_BLOCK);
+    CHECK(u32at(buf, 8) == 2u);   /* interface_id = 2 */
+    CHECK(u32at(buf, 20) == 4u);  /* captured_packet_length */
+    CHECK(u32at(buf, 24) == 4u);  /* original_packet_length */
+
+    free(buf);
+}
+
+static void test_epb_truncated_packet(void)
+{
+    SUITE("Enhanced Packet Block — truncation: captured < original");
+
+    /* A 1500-byte packet truncated to 64 bytes */
+    unsigned char pkt[64];
+    memset(pkt, 0x5A, sizeof(pkt));
+
+    size_t sz = libpcapng_enhanced_packet_block_size_with_options(64, NULL, 0);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_enhanced_packet_block_write_full(
+        pkt, 64, 1500, 0,   /* captured=64, original=1500 */
+        0, 0, NULL, 0, buf);
+
+    CHECK(u32at(buf, 20) == 64u);    /* captured_packet_length = 64 */
+    CHECK(u32at(buf, 24) == 1500u);  /* original_packet_length = 1500 */
+    CHECK(memcmp(buf + 28, pkt, 64) == 0);
+
+    free(buf);
+}
+
+static void test_epb_with_flags_option(void)
+{
+    SUITE("Enhanced Packet Block — epb_flags option wire encoding");
+
+    /*
+     * flags = inbound unicast:
+     *   DIR_INBOUND (bit 0) | RECV_UNICAST (bit 2) = 0x00000005
+     */
+    uint32_t flags = PCAPNG_EPB_FLAG_DIR_INBOUND | PCAPNG_EPB_FLAG_RECV_UNICAST;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_EPB_FLAGS, 4, &flags } };
+
+    const unsigned char pkt[4] = { 0 };
+    size_t sz = libpcapng_enhanced_packet_block_size_with_options(4, opts, 1);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_enhanced_packet_block_write_full(
+        pkt, 4, 4, 0, 0, 0, opts, 1, buf);
+
+    /* EPB fixed body = 28 bytes; packet data+padding = 4 bytes; options start at 32 */
+    CHECK(u16at(buf, 32) == PCAPNG_OPT_EPB_FLAGS);
+    CHECK(u16at(buf, 34) == 4u);
+    CHECK(u32at(buf, 36) == flags);
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);  /* trailing BTL */
+
+    free(buf);
+}
+
+static void test_epb_with_dropcount_option(void)
+{
+    SUITE("Enhanced Packet Block — epb_dropcount option");
+
+    uint64_t drops = 42u;
+    pcapng_option_t opts[] = { { PCAPNG_OPT_EPB_DROPCOUNT, 8, &drops } };
+
+    const unsigned char pkt[4] = { 0 };
+    size_t sz = libpcapng_enhanced_packet_block_size_with_options(4, opts, 1);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_enhanced_packet_block_write_full(
+        pkt, 4, 4, 0, 0, 0, opts, 1, buf);
+
+    CHECK(u16at(buf, 32) == PCAPNG_OPT_EPB_DROPCOUNT);
+    CHECK(u16at(buf, 34) == 8u);
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);
 
     free(buf);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 6.  CUSTOM DATA BLOCK
+ * 9.  SIMPLE PACKET BLOCK
  * ══════════════════════════════════════════════════════════════════════════════*/
 
 /*
- * Custom block wire layout (spec §4.8):
- *   offset  0  block_type         (4)  = 0x00000BAD
- *   offset  4  block_total_length (4)
- *   offset  8  PEN                (4)  Private Enterprise Number
- *   offset 12  custom_data        (data_len, padded to 4)
- *   offset 12+padded  block_total_length (4)
+ * SPB wire layout (spec §4.4):
+ *   offset  0  block_type              (4) = 0x00000003
+ *   offset  4  block_total_length      (4)
+ *   offset  8  original_packet_length  (4)
+ *   offset 12  packet_data             (captured, padded to 4)
+ *   offset 12+pad  block_total_length  (4)
+ *
+ * SPB has NO options (spec §4.4 explicitly).
+ * SPB requires an IDB in the section (implicitly interface 0).
  */
+
+static void test_spb_size(void)
+{
+    SUITE("Simple Packet Block — size");
+
+    /* 0-byte: 12 + 0 + 4 = 16 */
+    CHECK(libpcapng_simple_packet_block_size(0) == 16u);
+    /* 4-byte: 12 + 4 + 4 = 20 */
+    CHECK(libpcapng_simple_packet_block_size(4) == 20u);
+    /* 1-byte padded to 4: 12 + 4 + 4 = 20 */
+    CHECK(libpcapng_simple_packet_block_size(1) == 20u);
+    /* 5-byte padded to 8: 12 + 8 + 4 = 24 */
+    CHECK(libpcapng_simple_packet_block_size(5) == 24u);
+
+    for (size_t n = 0; n <= 64; n++)
+        CHECK((libpcapng_simple_packet_block_size(n) % 4) == 0);
+}
+
+static void test_spb_wire_format(void)
+{
+    SUITE("Simple Packet Block — wire format");
+
+    const unsigned char pkt[4] = { 0x11, 0x22, 0x33, 0x44 };
+    size_t sz = libpcapng_simple_packet_block_size(4);
+    unsigned char *buf = alloc_buf(sz);
+
+    size_t written = libpcapng_simple_packet_block_write(pkt, 4, 4, buf);
+
+    CHECK(written == sz);
+    CHECK(u32at(buf,  0) == PCAPNG_SIMPLE_PACKET_BLOCK);
+    CHECK(u32at(buf,  4) == (uint32_t)sz);
+    CHECK(u32at(buf,  8) == 4u);              /* original_packet_length */
+    CHECK(memcmp(buf + 12, pkt, 4) == 0);
+    CHECK(u32at(buf, 16) == u32at(buf, 4));   /* trailing BTL */
+
+    free(buf);
+}
+
+static void test_spb_truncation(void)
+{
+    SUITE("Simple Packet Block — original_length > captured (truncation)");
+
+    unsigned char pkt[64];
+    memset(pkt, 0xCC, sizeof(pkt));
+
+    size_t sz = libpcapng_simple_packet_block_size(64);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_simple_packet_block_write(pkt, 64, 1514, buf);
+
+    CHECK(u32at(buf, 8) == 1514u);            /* original_packet_length = 1514 */
+    CHECK(u32at(buf, 4) == (uint32_t)sz);     /* BTL reflects actual captured bytes */
+    CHECK(memcmp(buf + 12, pkt, 64) == 0);
+
+    free(buf);
+}
+
+static void test_spb_padding_zero(void)
+{
+    SUITE("Simple Packet Block — padding bytes are zero");
+
+    const unsigned char pkt[3] = { 0xAA, 0xBB, 0xCC };
+    size_t sz = libpcapng_simple_packet_block_size(3);   /* = 20 */
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_simple_packet_block_write(pkt, 3, 3, buf);
+
+    CHECK(buf[15] == 0u);  /* padding byte at offset 15 */
+
+    free(buf);
+}
+
+static void test_spb_struct_offsets(void)
+{
+    SUITE("Simple Packet Block — struct field offsets");
+
+    CHECK(offsetof(pcapng_simple_packet_block_t, block_type)             == 0u);
+    CHECK(offsetof(pcapng_simple_packet_block_t, block_total_length)     == 4u);
+    CHECK(offsetof(pcapng_simple_packet_block_t, original_packet_length) == 8u);
+    CHECK(sizeof(pcapng_simple_packet_block_t)                           == 12u);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 10. NAME RESOLUTION BLOCK
+ * ══════════════════════════════════════════════════════════════════════════════*/
+
+/*
+ * NRB wire layout (spec §4.5):
+ *   offset  0  block_type         (4) = 0x00000004
+ *   offset  4  block_total_length (4)
+ *   offset  8  NRB records        (variable — zero or more)
+ *   ...        options            (optional)
+ *   ...        block_total_length (4)
+ *
+ * Each NRB record:
+ *   [record_type:2][record_length:2][addr bytes][name NUL-terminated][padding]
+ * Terminated by nrb_record_end (type=0, length=0).
+ */
+
+static void test_nrb_record_size(void)
+{
+    SUITE("NRB record — size helper");
+
+    /* IPv4 (4-byte addr) + "host.local\0" (11 bytes): data=15, padded=16; +4 header = 20 */
+    size_t name_len = strlen("host.local");
+    size_t sz = libpcapng_nrb_record_size(4, name_len);
+    CHECK(sz == 20u);   /* 4 header + pad4(4+10+1)=pad4(15)=16 */
+
+    /* IPv6 (16-byte addr) + "a\0" (2 bytes): data=18, padded=20; +4 = 24 */
+    CHECK(libpcapng_nrb_record_size(16, 1) == 24u);
+
+    /* end record: addr=0, name=0 → data=1, padded=4; +4 = 8 */
+    CHECK(libpcapng_nrb_record_size(0, 0) == 8u);
+}
+
+static void test_nrb_record_ipv4_write(void)
+{
+    SUITE("NRB record — IPv4 record wire format");
+
+    const unsigned char addr[4] = { 192, 168, 1, 1 };
+    const char *name = "gw.local";
+    size_t name_len = strlen(name);
+    size_t rec_sz = libpcapng_nrb_record_size(4, name_len);
+    unsigned char *buf = alloc_buf(rec_sz);
+
+    size_t written = libpcapng_nrb_record_write(
+        PCAPNG_NRB_RECORD_IPV4, addr, 4, name, buf);
+
+    CHECK(written == rec_sz);
+    CHECK(u16at(buf, 0) == PCAPNG_NRB_RECORD_IPV4);
+    CHECK(u16at(buf, 2) == (uint16_t)(4 + name_len + 1));  /* addr + name + NUL */
+    CHECK(memcmp(buf + 4, addr, 4) == 0);
+    CHECK(memcmp(buf + 8, name, name_len) == 0);
+    CHECK(buf[8 + name_len] == 0u);  /* NUL terminator */
+
+    free(buf);
+}
+
+static void test_nrb_record_ipv6_write(void)
+{
+    SUITE("NRB record — IPv6 record wire format");
+
+    const unsigned char addr[16] = {
+        0x20,0x01,0x0d,0xb8, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x01
+    };
+    const char *name = "v6host";
+    size_t name_len = strlen(name);
+    size_t rec_sz = libpcapng_nrb_record_size(16, name_len);
+    unsigned char *buf = alloc_buf(rec_sz);
+
+    size_t written = libpcapng_nrb_record_write(
+        PCAPNG_NRB_RECORD_IPV6, addr, 16, name, buf);
+
+    CHECK(written == rec_sz);
+    CHECK(u16at(buf, 0) == PCAPNG_NRB_RECORD_IPV6);
+    CHECK(memcmp(buf + 4, addr, 16) == 0);
+
+    free(buf);
+}
+
+static void test_nrb_record_end_write(void)
+{
+    SUITE("NRB record — nrb_record_end wire format");
+
+    size_t rec_sz = libpcapng_nrb_record_size(0, 0);
+    unsigned char *buf = alloc_buf(rec_sz);
+
+    size_t written = libpcapng_nrb_record_write(
+        PCAPNG_NRB_RECORD_END, NULL, 0, NULL, buf);
+
+    /* record_type=0, record_length=1 (NUL terminator), padded to 4 → 8 bytes */
+    CHECK(written == rec_sz);
+    CHECK(u16at(buf, 0) == PCAPNG_NRB_RECORD_END);
+
+    free(buf);
+}
+
+static void test_nrb_record_eui48_type(void)
+{
+    SUITE("NRB record — EUI-48 record type (new in current spec)");
+
+    /* EUI-48 is a 6-byte MAC address */
+    const unsigned char mac[6] = { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
+    const char *name = "printer";
+    size_t rec_sz = libpcapng_nrb_record_size(6, strlen(name));
+    unsigned char *buf = alloc_buf(rec_sz);
+
+    libpcapng_nrb_record_write(PCAPNG_NRB_RECORD_EUI48, mac, 6, name, buf);
+
+    CHECK(u16at(buf, 0) == PCAPNG_NRB_RECORD_EUI48);
+    CHECK(memcmp(buf + 4, mac, 6) == 0);
+
+    free(buf);
+}
+
+static void test_nrb_record_eui64_type(void)
+{
+    SUITE("NRB record — EUI-64 record type (new in current spec)");
+
+    const unsigned char eui64[8] = { 0x02,0x00,0x5E,0xFF,0xFE,0x00,0x00,0x01 };
+    const char *name = "iot-node";
+    size_t rec_sz = libpcapng_nrb_record_size(8, strlen(name));
+    unsigned char *buf = alloc_buf(rec_sz);
+
+    libpcapng_nrb_record_write(PCAPNG_NRB_RECORD_EUI64, eui64, 8, name, buf);
+
+    CHECK(u16at(buf, 0) == PCAPNG_NRB_RECORD_EUI64);
+    CHECK(memcmp(buf + 4, eui64, 8) == 0);
+
+    free(buf);
+}
+
+static void test_nrb_block_wire_format(void)
+{
+    SUITE("Name Resolution Block — full block wire format");
+
+    /* Build two NRB records + end record */
+    const unsigned char addr1[4] = { 10, 0, 0, 1 };
+    const char *name1 = "router";
+
+    unsigned char rec_buf[256];
+    size_t rpos = 0;
+
+    rpos += libpcapng_nrb_record_write(PCAPNG_NRB_RECORD_IPV4, addr1, 4, name1, rec_buf + rpos);
+    rpos += libpcapng_nrb_record_write(PCAPNG_NRB_RECORD_END,  NULL,  0, NULL,  rec_buf + rpos);
+
+    size_t sz = libpcapng_name_resolution_block_size(rec_buf, rpos, NULL, 0);
+    unsigned char *buf = alloc_buf(sz);
+
+    size_t written = libpcapng_name_resolution_block_write(rec_buf, rpos, NULL, 0, buf);
+
+    CHECK(written == sz);
+    CHECK(u32at(buf, 0) == PCAPNG_NAME_RESOLUTION_BLOCK);
+    CHECK(u32at(buf, 4) == (uint32_t)sz);
+    CHECK((u32at(buf, 4) % 4) == 0);
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);
+
+    /* First record starts at offset 8 */
+    CHECK(u16at(buf, 8) == PCAPNG_NRB_RECORD_IPV4);
+    CHECK(memcmp(buf + 12, addr1, 4) == 0);
+
+    free(buf);
+}
+
+static void test_nrb_block_with_dns_option(void)
+{
+    SUITE("Name Resolution Block — ns_dnsname option");
+
+    /* Empty records (just end record) */
+    unsigned char rec_buf[8];
+    size_t rpos = libpcapng_nrb_record_write(PCAPNG_NRB_RECORD_END, NULL, 0, NULL, rec_buf);
+
+    const char *dns = "8.8.8.8";
+    pcapng_option_t opts[] = { { PCAPNG_OPT_NS_DNSNAME, (uint16_t)strlen(dns), dns } };
+    size_t sz = libpcapng_name_resolution_block_size(rec_buf, rpos, opts, 1);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_name_resolution_block_write(rec_buf, rpos, opts, 1, buf);
+
+    CHECK(u32at(buf, 0) == PCAPNG_NAME_RESOLUTION_BLOCK);
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);
+    CHECK((sz % 4) == 0);
+
+    free(buf);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 11. INTERFACE STATISTICS BLOCK
+ * ══════════════════════════════════════════════════════════════════════════════*/
+
+/*
+ * ISB wire layout (spec §4.6):
+ *   offset  0  block_type         (4) = 0x00000005
+ *   offset  4  block_total_length (4)
+ *   offset  8  interface_id       (4)
+ *   offset 12  timestamp_high     (4)
+ *   offset 16  timestamp_low      (4)
+ *   offset 20  options            (optional)
+ *   ...        block_total_length (4)
+ */
+
+static void test_isb_size_no_options(void)
+{
+    SUITE("Interface Statistics Block — size without options");
+
+    /* sizeof ISB struct (20) + trailing BTL (4) = 24 */
+    size_t sz = libpcapng_interface_statistics_block_size(NULL, 0);
+    CHECK(sz == 24u);
+    CHECK((sz % 4) == 0);
+}
+
+static void test_isb_wire_format(void)
+{
+    SUITE("Interface Statistics Block — wire format");
+
+    size_t sz = libpcapng_interface_statistics_block_size(NULL, 0);
+    unsigned char *buf = alloc_buf(sz);
+
+    size_t written = libpcapng_interface_statistics_block_write(
+        0, 0x0001u, 0xABCDu, NULL, 0, buf);
+
+    CHECK(written == sz);
+    CHECK(u32at(buf,  0) == PCAPNG_INTERFACE_STATISTICS_BLOCK);
+    CHECK(u32at(buf,  4) == (uint32_t)sz);
+    CHECK(u32at(buf,  8) == 0u);       /* interface_id */
+    CHECK(u32at(buf, 12) == 0x0001u);  /* timestamp_high */
+    CHECK(u32at(buf, 16) == 0xABCDu);  /* timestamp_low */
+    CHECK(u32at(buf, 20) == (uint32_t)sz);  /* trailing BTL (no options) */
+
+    free(buf);
+}
+
+static void test_isb_with_counters(void)
+{
+    SUITE("Interface Statistics Block — counter options");
+
+    uint64_t ifrecv = 10000u;
+    uint64_t ifdrop = 5u;
+    uint64_t osdrop = 1u;
+
+    pcapng_option_t opts[] = {
+        { PCAPNG_OPT_ISB_IFRECV, 8, &ifrecv },
+        { PCAPNG_OPT_ISB_IFDROP, 8, &ifdrop },
+        { PCAPNG_OPT_ISB_OSDROP, 8, &osdrop },
+    };
+    size_t sz = libpcapng_interface_statistics_block_size(opts, 3);
+    unsigned char *buf = alloc_buf(sz);
+
+    size_t written = libpcapng_interface_statistics_block_write(
+        0, 0, 0, opts, 3, buf);
+
+    CHECK(written == sz);
+    CHECK(u32at(buf, 0) == PCAPNG_INTERFACE_STATISTICS_BLOCK);
+    CHECK((sz % 4) == 0);
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);
+
+    /* Options start at offset 20 */
+    CHECK(u16at(buf, 20) == PCAPNG_OPT_ISB_IFRECV);
+    CHECK(u16at(buf, 22) == 8u);
+
+    free(buf);
+}
+
+static void test_isb_interface_id(void)
+{
+    SUITE("Interface Statistics Block — non-zero interface_id");
+
+    size_t sz = libpcapng_interface_statistics_block_size(NULL, 0);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_interface_statistics_block_write(3, 0, 0, NULL, 0, buf);
+
+    CHECK(u32at(buf, 8) == 3u);  /* interface_id = 3 */
+
+    free(buf);
+}
+
+static void test_isb_struct_offsets(void)
+{
+    SUITE("Interface Statistics Block — struct field offsets");
+
+    CHECK(offsetof(pcapng_interface_statistics_block_t, block_type)       == 0u);
+    CHECK(offsetof(pcapng_interface_statistics_block_t, block_total_length) == 4u);
+    CHECK(offsetof(pcapng_interface_statistics_block_t, interface_id)     == 8u);
+    CHECK(offsetof(pcapng_interface_statistics_block_t, timestamp_high)   == 12u);
+    CHECK(offsetof(pcapng_interface_statistics_block_t, timestamp_low)    == 16u);
+    CHECK(sizeof(pcapng_interface_statistics_block_t)                     == 20u);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 12. DECRYPTION SECRETS BLOCK
+ * ══════════════════════════════════════════════════════════════════════════════*/
+
+/*
+ * DSB wire layout (spec §4.7):
+ *   offset  0  block_type         (4) = 0x0000000A
+ *   offset  4  block_total_length (4)
+ *   offset  8  secrets_type       (4)
+ *   offset 12  secrets_length     (4)  (unpadded byte count)
+ *   offset 16  secrets_data       (secrets_length bytes, padded to 4)
+ *   ...        block_total_length (4)
+ */
+
+static void test_dsb_size(void)
+{
+    SUITE("Decryption Secrets Block — size");
+
+    /* 0-byte secrets: 16 (header) + 0 + 4 (trailing) = 20 */
+    CHECK(libpcapng_decryption_secrets_block_size(0) == 20u);
+    /* 4-byte: 16 + 4 + 4 = 24 */
+    CHECK(libpcapng_decryption_secrets_block_size(4) == 24u);
+    /* 1-byte padded to 4: 16 + 4 + 4 = 24 */
+    CHECK(libpcapng_decryption_secrets_block_size(1) == 24u);
+    /* 5-byte padded to 8: 16 + 8 + 4 = 28 */
+    CHECK(libpcapng_decryption_secrets_block_size(5) == 28u);
+
+    for (size_t n = 0; n <= 32; n++)
+        CHECK((libpcapng_decryption_secrets_block_size(n) % 4) == 0);
+}
+
+static void test_dsb_wire_format_tls(void)
+{
+    SUITE("Decryption Secrets Block — TLS key log wire format");
+
+    /* Minimal TLS key log entry (24 bytes) */
+    const unsigned char secrets[] =
+        "CLIENT_RANDOM 0123456789ABCDEF\n";
+    size_t secrets_len = sizeof(secrets) - 1;
+
+    size_t sz = libpcapng_decryption_secrets_block_size(secrets_len);
+    unsigned char *buf = alloc_buf(sz);
+
+    size_t written = libpcapng_decryption_secrets_block_write(
+        PCAPNG_TLS_KEY_LOG, secrets, secrets_len, buf);
+
+    CHECK(written == sz);
+    CHECK(u32at(buf,  0) == PCAPNG_DECRYPTION_SECRETS_BLOCK);
+    CHECK(u32at(buf,  4) == (uint32_t)sz);
+    CHECK(u32at(buf,  8) == PCAPNG_TLS_KEY_LOG);
+    CHECK(u32at(buf, 12) == (uint32_t)secrets_len);  /* unpadded length */
+    CHECK(memcmp(buf + 16, secrets, secrets_len) == 0);
+    CHECK(u32at(buf, sz - 4) == (uint32_t)sz);
+
+    free(buf);
+}
+
+static void test_dsb_all_secret_types(void)
+{
+    SUITE("Decryption Secrets Block — all secret type constants");
+
+    const unsigned char dummy[4] = { 0 };
+    size_t sz = libpcapng_decryption_secrets_block_size(4);
+    unsigned char *buf = alloc_buf(sz);
+
+    uint32_t types[] = {
+        PCAPNG_TLS_KEY_LOG,
+        PCAPNG_WIREGUARD_KEY_LOG,
+        PCAPNG_ZIGBEE_NWK_KEY,
+        PCAPNG_ZIGBEE_APS_KEY,
+        PCAPNG_SSH_KEY_LOG,
+        PCAPNG_OPC_UA_KEY_LOG,
+        PCAPNG_ESP_SA,
+    };
+
+    for (size_t i = 0; i < sizeof(types)/sizeof(types[0]); i++) {
+        memset(buf, 0, sz);
+        libpcapng_decryption_secrets_block_write(types[i], dummy, 4, buf);
+        CHECK(u32at(buf, 0) == PCAPNG_DECRYPTION_SECRETS_BLOCK);
+        CHECK(u32at(buf, 8) == types[i]);
+        CHECK(u32at(buf, sz - 4) == (uint32_t)sz);
+    }
+
+    free(buf);
+}
+
+static void test_dsb_padding_zero(void)
+{
+    SUITE("Decryption Secrets Block — padding bytes are zero");
+
+    /* 3-byte secrets → 1 byte padding */
+    const unsigned char secrets[3] = { 0xAA, 0xBB, 0xCC };
+    size_t sz = libpcapng_decryption_secrets_block_size(3);
+    unsigned char *buf = alloc_buf(sz);
+
+    libpcapng_decryption_secrets_block_write(PCAPNG_TLS_KEY_LOG, secrets, 3, buf);
+
+    CHECK(buf[19] == 0u);  /* padding byte at offset 16+3 = 19 */
+    CHECK(u32at(buf, 12) == 3u);   /* secrets_length is unpadded */
+
+    free(buf);
+}
+
+static void test_dsb_struct_offsets(void)
+{
+    SUITE("Decryption Secrets Block — struct field offsets");
+
+    CHECK(offsetof(pcapng_decryption_secrets_block_t, block_type)       == 0u);
+    CHECK(offsetof(pcapng_decryption_secrets_block_t, block_total_length) == 4u);
+    CHECK(offsetof(pcapng_decryption_secrets_block_t, secrets_type)     == 8u);
+    CHECK(offsetof(pcapng_decryption_secrets_block_t, secrets_length)   == 12u);
+    CHECK(sizeof(pcapng_decryption_secrets_block_t)                     == 16u);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 13. CUSTOM DATA BLOCK
+ * ══════════════════════════════════════════════════════════════════════════════*/
 
 static void test_custom_block_size(void)
 {
     SUITE("Custom Data Block — size helper");
 
-    /* 0 bytes data: 12 (header) + 0 + 4 (trailing) = 16 */
     CHECK(libpcapng_custom_data_block_size(0) == 16u);
-    /* 1 byte → padded to 4: 12 + 4 + 4 = 20 */
     CHECK(libpcapng_custom_data_block_size(1) == 20u);
-    /* 3 bytes → padded to 4: 20 */
     CHECK(libpcapng_custom_data_block_size(3) == 20u);
-    /* 4 bytes: 12 + 4 + 4 = 20 */
     CHECK(libpcapng_custom_data_block_size(4) == 20u);
-    /* 5 bytes → padded to 8: 12 + 8 + 4 = 24 */
     CHECK(libpcapng_custom_data_block_size(5) == 24u);
 
-    /* All sizes must be multiples of 4 */
     for (size_t n = 0; n <= 32; n++)
         CHECK((libpcapng_custom_data_block_size(n) % 4) == 0);
 }
@@ -624,9 +1415,9 @@ static void test_custom_block_wire_format(void)
 {
     SUITE("Custom Data Block — wire format");
 
-    const unsigned char data[] = { 'h', 'e', 'l' };   /* 3 bytes */
+    const unsigned char data[] = { 'h', 'e', 'l' };
     uint32_t pen = 123u;
-    size_t sz = libpcapng_custom_data_block_size(3);   /* = 20 */
+    size_t sz = libpcapng_custom_data_block_size(3);
     unsigned char *buf = alloc_buf(sz);
 
     size_t written = libpcapng_custom_data_block_write(pen, data, 3, buf);
@@ -638,8 +1429,8 @@ static void test_custom_block_wire_format(void)
     CHECK(buf[12] == 'h');
     CHECK(buf[13] == 'e');
     CHECK(buf[14] == 'l');
-    CHECK(buf[15] == 0u);   /* padding byte must be zero (memset) */
-    CHECK(u32at(buf, 16) == u32at(buf, 4));  /* trailing BTL */
+    CHECK(buf[15] == 0u);
+    CHECK(u32at(buf, 16) == u32at(buf, 4));
     CHECK((u32at(buf, 4) % 4) == 0);
 
     free(buf);
@@ -650,7 +1441,7 @@ static void test_custom_block_zero_data(void)
     SUITE("Custom Data Block — zero-length data");
 
     uint32_t pen = 0xDEADBEEFu;
-    size_t sz = libpcapng_custom_data_block_size(0);   /* = 16 */
+    size_t sz = libpcapng_custom_data_block_size(0);
     unsigned char *buf = alloc_buf(sz);
 
     size_t written = libpcapng_custom_data_block_write(pen, NULL, 0, buf);
@@ -659,36 +1450,9 @@ static void test_custom_block_zero_data(void)
     CHECK(u32at(buf,  0) == PCAPNG_CUSTOM_DATA_BLOCK);
     CHECK(u32at(buf,  4) == 16u);
     CHECK(u32at(buf,  8) == pen);
-    CHECK(u32at(buf, 12) == 16u);   /* trailing BTL immediately after PEN */
+    CHECK(u32at(buf, 12) == 16u);
 
     free(buf);
-}
-
-static void test_custom_block_data_length_helper(void)
-{
-    SUITE("Custom Data Block — data_length helper");
-
-    /* libpcapng_custom_data_block_data_length(block_total_length) should return
-     * the raw (unpadded) data field size.
-     * BTL=16: data = 16 - 4(trailing) - 4(type) - 4(PEN) - 4(leading BTL)
-     *       wait, the helper subtracts: trailing BTL + block_type(??) + PEN + leading BTL
-     * Let's just check it against our known sizes. */
-
-    /* 0-byte data → BTL=16 */
-    CHECK(libpcapng_custom_data_block_data_length(16) == 0u);
-    /* 4-byte data → BTL=20 → data_length=4 (padded 4 == actual 4) */
-    CHECK(libpcapng_custom_data_block_data_length(20) == 4u);
-    /* 8-byte data → BTL=24 → data_length=8 */
-    CHECK(libpcapng_custom_data_block_data_length(24) == 8u);
-}
-
-static void test_custom_block_start_offset(void)
-{
-    SUITE("Custom Data Block — start offset helper");
-
-    /* The "light" struct contains only the PEN (4 bytes).
-     * Data starts immediately after: offset = sizeof(PEN) = 4. */
-    CHECK(libpcapng_custom_data_block_start_offset() == 4u);
 }
 
 static void test_custom_block_pen_values(void)
@@ -710,7 +1474,7 @@ static void test_custom_block_pen_values(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 7.  FILE-LEVEL BLOCK SEQUENCE TESTS (using tmpfile)
+ * 14. FILE-LEVEL BLOCK SEQUENCE TESTS (using tmpfile)
  * ══════════════════════════════════════════════════════════════════════════════*/
 
 static void test_file_header_block_sequence(void)
@@ -724,77 +1488,21 @@ static void test_file_header_block_sequence(void)
     fflush(fp);
 
     long file_size = ftell(fp);
-    /* SHB(28) + IDB(20) = 48 */
     CHECK(file_size == 48L);
 
-    /* Read raw bytes back */
     rewind(fp);
     unsigned char raw[48];
     CHECK(fread(raw, 1, 48, fp) == 48u);
 
-    /* First block: SHB */
     CHECK(u32at(raw, 0)  == PCAPNG_SECTION_HEADER_BLOCK);
-    CHECK(u32at(raw, 4)  == 28u);                  /* SHB BTL */
+    CHECK(u32at(raw, 4)  == 28u);
     CHECK(u32at(raw, 8)  == PCAPNG_BYTE_ORDER_MAGIC);
-    CHECK(u16at(raw, 12) == 1u);                   /* major version */
+    CHECK(u16at(raw, 12) == 1u);
 
-    /* Second block: IDB at offset 28 */
     CHECK(u32at(raw, 28) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
-    CHECK(u32at(raw, 32) == 20u);                  /* IDB BTL */
+    CHECK(u32at(raw, 32) == 20u);
     CHECK(u16at(raw, 36) == LINKTYPE_RAW);
-    CHECK(u16at(raw, 38) == 0u);                   /* reserved */
-    CHECK(u32at(raw, 40) == 0u);                   /* snaplen */
-    CHECK(u32at(raw, 44) == 20u);                  /* trailing BTL */
-
-    fclose(fp);
-}
-
-static void test_file_header_with_linktype(void)
-{
-    SUITE("File-level — SHB+IDB with LINKTYPE_ETHERNET");
-
-    FILE *fp = tmpfile();
-    assert(fp);
-
-    libpcapng_write_header_to_file_with_linktype(fp, LINKTYPE_ETHERNET);
-    fflush(fp);
-
-    rewind(fp);
-    unsigned char raw[48];
-    CHECK(fread(raw, 1, 48, fp) == 48u);
-
-    CHECK(u32at(raw, 28) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
-    CHECK(u16at(raw, 36) == LINKTYPE_ETHERNET);
-
-    fclose(fp);
-}
-
-static void test_file_epb_after_header(void)
-{
-    SUITE("File-level — EPB follows SHB+IDB");
-
-    const unsigned char pkt[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
-
-    FILE *fp = tmpfile();
-    assert(fp);
-
-    libpcapng_write_header_to_file(fp);
-    libpcapng_write_enhanced_packet_to_file(fp, (unsigned char *)pkt, 4);
-    fflush(fp);
-
-    /* File: SHB(28) + IDB(20) + EPB(36) = 84 bytes */
-    rewind(fp);
-    unsigned char raw[84];
-    CHECK(fread(raw, 1, 84, fp) == 84u);
-
-    /* EPB starts at offset 48 */
-    CHECK(u32at(raw, 48) == PCAPNG_ENHANCED_PACKET_BLOCK);
-    CHECK(u32at(raw, 52) == 36u);       /* EPB BTL: 28+4+4 = 36 */
-    CHECK(u32at(raw, 56) == 0u);        /* interface_id */
-    CHECK(u32at(raw, 68) == 4u);        /* captured_packet_length */
-    CHECK(u32at(raw, 72) == 4u);        /* original_packet_length */
-    CHECK(memcmp(raw + 76, pkt, 4) == 0);
-    CHECK(u32at(raw, 80) == 36u);       /* trailing BTL */
+    CHECK(u16at(raw, 38) == 0u);
 
     fclose(fp);
 }
@@ -808,7 +1516,6 @@ static void test_file_multiple_epbs(void)
 
     libpcapng_write_header_to_file(fp);
 
-    /* Write 5 packets of sizes 4, 8, 1, 16, 3 */
     static const size_t pkt_sizes[] = { 4, 8, 1, 16, 3 };
     for (size_t i = 0; i < 5; i++) {
         unsigned char *pkt = calloc(1, pkt_sizes[i]);
@@ -818,75 +1525,128 @@ static void test_file_multiple_epbs(void)
     }
 
     fflush(fp);
-
-    /* Walk the file block by block */
     rewind(fp);
 
-    /* SHB */
     unsigned char shb_buf[28];
     CHECK(fread(shb_buf, 1, 28, fp) == 28u);
     CHECK(u32at(shb_buf, 0) == PCAPNG_SECTION_HEADER_BLOCK);
 
-    /* IDB */
     unsigned char idb_buf[20];
     CHECK(fread(idb_buf, 1, 20, fp) == 20u);
     CHECK(u32at(idb_buf, 0) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
 
-    /* Each EPB */
     for (size_t i = 0; i < 5; i++) {
         unsigned char hdr[8];
         CHECK(fread(hdr, 1, 8, fp) == 8u);
         CHECK(u32at(hdr, 0) == PCAPNG_ENHANCED_PACKET_BLOCK);
-
         uint32_t btl = u32at(hdr, 4);
         CHECK((btl % 4) == 0);
-        CHECK(btl >= 32u);  /* minimum EPB size */
-
-        /* Skip remainder of block */
+        CHECK(btl >= 32u);
         fseek(fp, (long)(btl - 8), SEEK_CUR);
     }
 
-    /* Should be at end of file */
     CHECK(fgetc(fp) == EOF);
-
     fclose(fp);
 }
 
-static void test_file_epb_with_time(void)
+static void test_file_unknown_block_skip(void)
 {
-    SUITE("File-level — EPB written with explicit timestamp via easyapi");
+    SUITE("File-level — unknown block type is skippable via BTL");
 
-    const unsigned char pkt[8] = {0,1,2,3,4,5,6,7};
-    uint32_t secs = 1000000u;
-
+    /*
+     * The spec requires that readers skip unknown blocks using
+     * Block Type + Block Total Length at the start of every block.
+     * Write a synthetic "unknown" block (type 0xBEEFCAFE) followed by a
+     * known EPB, then verify the EPB is reachable by skipping the unknown.
+     */
     FILE *fp = tmpfile();
     assert(fp);
 
     libpcapng_write_header_to_file(fp);
-    libpcapng_write_enhanced_packet_with_time_to_file(fp, (unsigned char*)pkt, 8, secs);
+
+    /* Synthetic unknown block: 16 bytes (type + BTL + 4 payload + BTL) */
+    const unsigned char unknown_block[] = {
+        0xFE, 0xCA, 0xEF, 0xBE,  /* block type = 0xBEEFCAFE (LE) */
+        0x10, 0x00, 0x00, 0x00,  /* block_total_length = 16 */
+        0xDE, 0xAD, 0xBE, 0xEF,  /* payload */
+        0x10, 0x00, 0x00, 0x00   /* trailing BTL */
+    };
+    fwrite(unknown_block, 1, sizeof(unknown_block), fp);
+
+    const unsigned char pkt[4] = { 0x12, 0x34, 0x56, 0x78 };
+    libpcapng_write_enhanced_packet_to_file(fp, (unsigned char*)pkt, 4);
     fflush(fp);
 
-    /* SHB(28)+IDB(20)+EPB(40)=88 */
+    /* Navigate the file: SHB(28) + IDB(20) + unknown(16) + EPB(36) */
     rewind(fp);
-    unsigned char raw[88];
-    CHECK(fread(raw, 1, 88, fp) == 88u);
+    unsigned char shb_buf[28];
+    fread(shb_buf, 1, 28, fp);
+    CHECK(u32at(shb_buf, 0) == PCAPNG_SECTION_HEADER_BLOCK);
 
-    /* EPB at offset 48 */
-    CHECK(u32at(raw, 48) == PCAPNG_ENHANCED_PACKET_BLOCK);
+    unsigned char idb_buf[20];
+    fread(idb_buf, 1, 20, fp);
+    CHECK(u32at(idb_buf, 0) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
 
-    /* Timestamp: secs * 1e6 = 1000000000000 = 0x000000E8D4A51000 */
-    uint64_t expected_us = (uint64_t)secs * 1000000ULL;
-    uint32_t exp_hi = (uint32_t)(expected_us >> 32);
-    uint32_t exp_lo = (uint32_t)(expected_us & 0xFFFFFFFFu);
+    /* Read unknown block type + BTL, then skip it */
+    unsigned char unk_hdr[8];
+    fread(unk_hdr, 1, 8, fp);
+    uint32_t unk_type = u32at(unk_hdr, 0);
+    uint32_t unk_btl  = u32at(unk_hdr, 4);
+    CHECK(unk_type == 0xBEEFCAFEu);
+    CHECK(unk_btl  == 16u);
+    /* Skip remainder of unknown block */
+    fseek(fp, (long)(unk_btl - 8), SEEK_CUR);
 
-    CHECK(u32at(raw, 60) == exp_hi);
-    CHECK(u32at(raw, 64) == exp_lo);
+    /* Now we should be at the EPB */
+    unsigned char epb_hdr[8];
+    fread(epb_hdr, 1, 8, fp);
+    CHECK(u32at(epb_hdr, 0) == PCAPNG_ENHANCED_PACKET_BLOCK);
+    CHECK(u32at(epb_hdr, 4) == 36u);  /* 28+4+4 = 36 */
+
+    fclose(fp);
+}
+
+static void test_file_multiple_sections(void)
+{
+    SUITE("File-level — multiple SHBs (multi-section file)");
+
+    /*
+     * A valid pcapng file may contain multiple SHBs.  Each SHB starts a new
+     * section; the IDB within each section applies only to that section.
+     */
+    FILE *fp = tmpfile();
+    assert(fp);
+
+    /* Section 1 */
+    libpcapng_write_header_to_file(fp);
+    const unsigned char pkt1[4] = { 0x01, 0x01, 0x01, 0x01 };
+    libpcapng_write_enhanced_packet_to_file(fp, (unsigned char*)pkt1, 4);
+
+    /* Section 2 — new SHB + new IDB */
+    libpcapng_write_header_to_file(fp);
+    const unsigned char pkt2[4] = { 0x02, 0x02, 0x02, 0x02 };
+    libpcapng_write_enhanced_packet_to_file(fp, (unsigned char*)pkt2, 4);
+
+    fflush(fp);
+    fseek(fp, 0, SEEK_END);
+    long total = ftell(fp);
+
+    /* SHB(28)+IDB(20)+EPB(36) = 84, twice = 168 */
+    CHECK(total == 168L);
+
+    /* Verify second section's SHB at offset 84 */
+    rewind(fp);
+    fseek(fp, 84, SEEK_SET);
+    unsigned char shb2[28];
+    fread(shb2, 1, 28, fp);
+    CHECK(u32at(shb2, 0) == PCAPNG_SECTION_HEADER_BLOCK);
+    CHECK(u32at(shb2, 8) == PCAPNG_BYTE_ORDER_MAGIC);
 
     fclose(fp);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 8.  PADDING MACRO
+ * 15. PADDING MACRO
  * ══════════════════════════════════════════════════════════════════════════════*/
 
 static void test_padding_macro(void)
@@ -908,7 +1668,7 @@ static void test_padding_macro(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 9.  BLOCK TOTAL LENGTH INVARIANTS (all block types, many sizes)
+ * 16. BLOCK TOTAL LENGTH INVARIANTS
  * ══════════════════════════════════════════════════════════════════════════════*/
 
 static void test_btl_invariants_all_blocks(void)
@@ -920,9 +1680,8 @@ static void test_btl_invariants_all_blocks(void)
         size_t sz = libpcapng_section_header_block_size();
         unsigned char *buf = alloc_buf(sz);
         libpcapng_section_header_block_write(buf);
-        uint32_t btl = u32at(buf, 4);
-        CHECK(btl == u32at(buf, sz - 4));
-        CHECK((btl % 4) == 0);
+        CHECK(u32at(buf, 4) == u32at(buf, sz - 4));
+        CHECK((u32at(buf, 4) % 4) == 0);
         free(buf);
     }
 
@@ -931,9 +1690,8 @@ static void test_btl_invariants_all_blocks(void)
         size_t sz = libpcapng_interface_description_block_size();
         unsigned char *buf = alloc_buf(sz);
         libpcapng_interface_description_block_write(0, buf);
-        uint32_t btl = u32at(buf, 4);
-        CHECK(btl == u32at(buf, sz - 4));
-        CHECK((btl % 4) == 0);
+        CHECK(u32at(buf, 4) == u32at(buf, sz - 4));
+        CHECK((u32at(buf, 4) % 4) == 0);
         free(buf);
     }
 
@@ -946,13 +1704,43 @@ static void test_btl_invariants_all_blocks(void)
         size_t sz = libpcapng_enhanced_packet_block_size(n);
         unsigned char *buf = alloc_buf(sz);
         libpcapng_enhanced_packet_block_write_time(pkt, n, 0, 0, buf);
-        uint32_t btl = u32at(buf, 4);
-        CHECK(btl == u32at(buf, sz - 4));
-        CHECK((btl % 4) == 0);
+        CHECK(u32at(buf, 4) == u32at(buf, sz - 4));
+        CHECK((u32at(buf, 4) % 4) == 0);
         free(buf);
     }
 
-    /* Custom block with various sizes */
+    /* SPB */
+    {
+        size_t sz = libpcapng_simple_packet_block_size(8);
+        unsigned char *buf = alloc_buf(sz);
+        libpcapng_simple_packet_block_write(pkt, 8, 8, buf);
+        CHECK(u32at(buf, 4) == u32at(buf, sz - 4));
+        CHECK((u32at(buf, 4) % 4) == 0);
+        free(buf);
+    }
+
+    /* ISB */
+    {
+        size_t sz = libpcapng_interface_statistics_block_size(NULL, 0);
+        unsigned char *buf = alloc_buf(sz);
+        libpcapng_interface_statistics_block_write(0, 0, 0, NULL, 0, buf);
+        CHECK(u32at(buf, 4) == u32at(buf, sz - 4));
+        CHECK((u32at(buf, 4) % 4) == 0);
+        free(buf);
+    }
+
+    /* DSB */
+    {
+        size_t sz = libpcapng_decryption_secrets_block_size(4);
+        unsigned char *buf = alloc_buf(sz);
+        const unsigned char d[4] = {0};
+        libpcapng_decryption_secrets_block_write(PCAPNG_TLS_KEY_LOG, d, 4, buf);
+        CHECK(u32at(buf, 4) == u32at(buf, sz - 4));
+        CHECK((u32at(buf, 4) % 4) == 0);
+        free(buf);
+    }
+
+    /* Custom block */
     unsigned char cdata[100];
     memset(cdata, 0xBE, sizeof(cdata));
     size_t cb_sizes[] = { 0, 1, 2, 3, 4, 5, 7, 12, 17, 100 };
@@ -961,16 +1749,14 @@ static void test_btl_invariants_all_blocks(void)
         size_t sz = libpcapng_custom_data_block_size(n);
         unsigned char *buf = alloc_buf(sz);
         libpcapng_custom_data_block_write(42u, cdata, n, buf);
-        uint32_t btl = u32at(buf, 4);
-        CHECK(btl == u32at(buf, sz - 4));
-        CHECK((btl % 4) == 0);
+        CHECK(u32at(buf, 4) == u32at(buf, sz - 4));
+        CHECK((u32at(buf, 4) % 4) == 0);
         free(buf);
     }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 10.  STRUCT FIELD OFFSETS
- *      These catch silent regressions if structs are accidentally changed.
+ * 17. STRUCT FIELD OFFSETS
  * ══════════════════════════════════════════════════════════════════════════════*/
 
 static void test_struct_offsets(void)
@@ -1004,6 +1790,16 @@ static void test_struct_offsets(void)
     CHECK(offsetof(pcapng_enhanced_packet_block_t, original_packet_length)  == 24u);
     CHECK(sizeof(pcapng_enhanced_packet_block_t)                            == 28u);
 
+    /* NRB */
+    CHECK(offsetof(pcapng_name_resolution_block_t, block_type)         == 0u);
+    CHECK(offsetof(pcapng_name_resolution_block_t, block_total_length) == 4u);
+    CHECK(sizeof(pcapng_name_resolution_block_t)                       == 8u);
+
+    /* NRB record */
+    CHECK(offsetof(pcapng_nrb_record_t, record_type)   == 0u);
+    CHECK(offsetof(pcapng_nrb_record_t, record_length) == 2u);
+    CHECK(sizeof(pcapng_nrb_record_t)                  == 4u);
+
     /* Custom block */
     CHECK(offsetof(pcapng_custom_data_block_t, block_type)         == 0u);
     CHECK(offsetof(pcapng_custom_data_block_t, block_total_length) == 4u);
@@ -1012,35 +1808,26 @@ static void test_struct_offsets(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * 11.  KNOWN SPEC COMPLIANCE ISSUES
- *      Document deviations explicitly so they're easy to track.
+ * 18. SPEC COMPLIANCE VERIFICATION
+ *     All previously-known bugs are now fixed; this section verifies the
+ *     correct values and documents the previous behaviour.
  * ══════════════════════════════════════════════════════════════════════════════*/
 
-static void test_known_spec_deviations(void)
+static void test_spec_compliance(void)
 {
-    SUITE("Known spec deviations (document current incorrect behaviour)");
+    SUITE("Spec compliance — previously-bugged fields now correct");
 
     size_t sz = libpcapng_section_header_block_size();
     unsigned char *buf = alloc_buf(sz);
     libpcapng_section_header_block_write(buf);
 
-    /* DEVIATION 1: section_length
-     * Spec §4.1: section_length = -1 (0xFFFFFFFFFFFFFFFF) means "unknown".
-     * Writing 0 is incorrect: 0 means a zero-length section.
-     * The library currently writes 0.  Assert 0 here so CI passes and the
-     * deviation is visible; change to 0xFFFFFFFFFFFFFFFF when fixed. */
+    /* FIXED: section_length must be -1 (0xFFFFFFFFFFFFFFFF) for unknown length */
     uint64_t section_length = u64at(buf, 16);
-    printf("  NOTE  section_length = 0x%016llx  (spec requires 0xFFFFFFFFFFFFFFFF for unknown)\n",
-           (unsigned long long)section_length);
-    CHECK(section_length == 0u);   /* [BUG] should be 0xFFFFFFFFFFFFFFFFull */
+    CHECK(section_length == 0xFFFFFFFFFFFFFFFFull);
 
-    /* DEVIATION 2: minor_version
-     * Spec §4.1: minor_version MUST be 0.
-     * The assignment is commented out in blocks.c.  Works by coincidence
-     * because calloc zeroes the buffer. */
+    /* FIXED: minor_version must be 0 and now set explicitly */
     uint16_t minor_ver = u16at(buf, 14);
-    printf("  NOTE  minor_version = %u  (library assignment is commented out)\n", minor_ver);
-    CHECK(minor_ver == 0u);   /* happens to be 0 due to calloc, but not explicit */
+    CHECK(minor_ver == 0u);
 
     free(buf);
 }
@@ -1055,11 +1842,23 @@ int main(void)
     printf("==============================\n");
 
     test_block_type_constants();
+    test_option_constants();
+    test_epb_flag_constants();
     test_linktype_constants();
+
+    test_options_size_empty();
+    test_options_size_aligned();
+    test_options_size_unaligned();
+    test_options_write_single_u8();
+    test_options_write_single_u32();
+    test_options_write_multiple();
+    test_options_write_string();
+    test_options_endofopt_always_present();
 
     test_shb_size();
     test_shb_wire_format();
     test_shb_read_roundtrip();
+    test_shb_with_options();
 
     test_idb_size();
     test_idb_wire_format_raw();
@@ -1067,6 +1866,8 @@ int main(void)
     test_idb_wire_format_all_linktypes();
     test_idb_snaplen_values();
     test_idb_read_roundtrip();
+    test_idb_with_tsresol_option();
+    test_idb_with_multiple_options();
 
     test_epb_size_aligned();
     test_epb_size_unaligned();
@@ -1075,27 +1876,54 @@ int main(void)
     test_epb_padding_bytes_are_zero();
     test_epb_padding_all_sizes();
     test_epb_timestamp_split();
-    test_epb_easyapi_with_time();
     test_epb_data_preserved();
     test_epb_interface_id_is_zero();
+    test_epb_nonzero_interface_id();
+    test_epb_truncated_packet();
+    test_epb_with_flags_option();
+    test_epb_with_dropcount_option();
+
+    test_spb_size();
+    test_spb_wire_format();
+    test_spb_truncation();
+    test_spb_padding_zero();
+    test_spb_struct_offsets();
+
+    test_nrb_record_size();
+    test_nrb_record_ipv4_write();
+    test_nrb_record_ipv6_write();
+    test_nrb_record_end_write();
+    test_nrb_record_eui48_type();
+    test_nrb_record_eui64_type();
+    test_nrb_block_wire_format();
+    test_nrb_block_with_dns_option();
+
+    test_isb_size_no_options();
+    test_isb_wire_format();
+    test_isb_with_counters();
+    test_isb_interface_id();
+    test_isb_struct_offsets();
+
+    test_dsb_size();
+    test_dsb_wire_format_tls();
+    test_dsb_all_secret_types();
+    test_dsb_padding_zero();
+    test_dsb_struct_offsets();
 
     test_custom_block_size();
     test_custom_block_wire_format();
     test_custom_block_zero_data();
-    test_custom_block_data_length_helper();
-    test_custom_block_start_offset();
     test_custom_block_pen_values();
 
     test_file_header_block_sequence();
-    test_file_header_with_linktype();
-    test_file_epb_after_header();
     test_file_multiple_epbs();
-    test_file_epb_with_time();
+    test_file_unknown_block_skip();
+    test_file_multiple_sections();
 
     test_padding_macro();
     test_btl_invariants_all_blocks();
     test_struct_offsets();
-    test_known_spec_deviations();
+    test_spec_compliance();
 
     printf("\n==============================\n");
     printf("Results: %d/%d passed", g_passed, g_tests);

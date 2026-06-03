@@ -887,3 +887,89 @@ shorter or longer than the original; IP length and checksums are recomputed auto
 | Replay session state | `s = TCPSession(...)` then `syn(s)` / `syn_ack(s)` to advance to the right seq/ack |
 
 Full field reference: see [bin/pcapsh.md](bin/pcapsh.md).
+
+---
+
+## Appendix — pcapng block types and the C library API
+
+### Block types
+
+The pcapng format defines the following block types. libpcapng implements all of them:
+
+| Block | Type code | Description |
+|-------|-----------|-------------|
+| Section Header Block (SHB) | `0x0A0D0D0A` | Mandatory; starts each section. Byte-order magic at offset 8. `section_length = -1` means unknown. |
+| Interface Description Block (IDB) | `0x00000001` | Required before any packet block. Carries `linktype` and `snaplen`. |
+| Enhanced Packet Block (EPB) | `0x00000006` | Primary packet block. Has `interface_id`, 64-bit timestamp split high/low, captured and original lengths. |
+| Simple Packet Block (SPB) | `0x00000003` | Lightweight packet block with no timestamp and no options. Implicitly uses interface 0. |
+| Name Resolution Block (NRB) | `0x00000004` | Maps addresses (IPv4, IPv6, EUI-48, EUI-64) to names. Contains a list of variable-length records followed by options. |
+| Interface Statistics Block (ISB) | `0x00000005` | Per-interface counter snapshot: packets received/dropped, filter accepts, etc. |
+| Decryption Secrets Block (DSB) | `0x0000000A` | Embeds key material for post-capture decryption. `secrets_type` selects the format (TLS, WireGuard, SSH, etc.). |
+| Custom Block (copyable) | `0x00000BAD` | Vendor-specific data identified by a Private Enterprise Number (PEN). |
+| Custom Block (non-copyable) | `0x40000BAD` | Like above but file-rewriters must not copy it. |
+
+Unknown block types must be silently skipped using the `block_total_length` field — this is how forward compatibility works.
+
+### Options
+
+Every block (except SPB) supports an optional TLV section appended after the fixed body, terminated by `opt_endofopt` (type=0, length=0). The C API accepts options via `pcapng_option_t` arrays:
+
+```c
+uint8_t tsresol = 9;   /* nanosecond: 10^-9 */
+pcapng_option_t opts[] = {
+    { PCAPNG_OPT_IDB_TSRESOL, 1, &tsresol },
+};
+size_t sz = libpcapng_interface_description_block_size_with_options(opts, 1);
+unsigned char *buf = malloc(sz);
+libpcapng_interface_description_block_write_with_options(
+    1500, LINKTYPE_ETHERNET, opts, 1, buf);
+```
+
+Key option codes:
+
+**IDB options** — `if_tsresol` (9) is the most critical: it changes the units of all timestamps in that interface's packets. MSB=0 → power of 10 (e.g. `6` = microseconds, `9` = nanoseconds). MSB=1 → power of 2. Default when absent: microseconds.
+
+**EPB options** — `epb_flags` (2) carries a 32-bit word encoding:
+- bits 0–1: packet direction (unknown/inbound/outbound)
+- bits 2–4: reception type (unicast/multicast/broadcast/promiscuous)
+- bits 5–8: FCS length in octets (0 = unknown)
+- bits 9–11: checksum-not-ready, checksum-valid, TCP-segmentation-offload flags
+- bits 24–31: link-layer error flags (CRC, too-long, too-short, IFG, unaligned, SFD, preamble, symbol)
+
+`epb_dropcount` (4) records packets dropped between the previous EPB and this one. `epb_processid_threadid` (8) carries OS-level process/thread IDs.
+
+**ISB options** — counter fields: `isb_ifrecv` (4), `isb_ifdrop` (5), `isb_filteraccept` (6), `isb_osdrop` (7), `isb_usrdeliv` (8) — all 8-byte unsigned integers.
+
+### DSB secret types
+
+| Constant | Code | Format |
+|----------|------|--------|
+| `PCAPNG_TLS_KEY_LOG` | `0x544c534b` | NSS key log file (text lines) |
+| `PCAPNG_WIREGUARD_KEY_LOG` | `0x57474b4c` | `key-type = base64-key` pairs |
+| `PCAPNG_ZIGBEE_NWK_KEY` | `0x5a4e574b` | 16-byte AES-128 + 2-byte PANID |
+| `PCAPNG_ZIGBEE_APS_KEY` | `0x5a415053` | 16-byte AES-128 + PANID + node addresses |
+| `PCAPNG_SSH_KEY_LOG` | `0x5353484b` | SSH cookie + key-type + hex key |
+| `PCAPNG_OPC_UA_KEY_LOG` | `0x55414b4c` | Key/value pairs (IV, keys, siglen) |
+| `PCAPNG_ESP_SA` | `0x45535053` | CSV (Protocol, IPs, SPI, encryption, auth) |
+
+### NRB record types
+
+Records are written with `libpcapng_nrb_record_write()`. Each record contains an address followed by a NUL-terminated name string, padded to 4 bytes:
+
+```c
+const unsigned char addr[4] = { 192, 168, 1, 1 };
+unsigned char rec_buf[256];
+size_t rpos = 0;
+rpos += libpcapng_nrb_record_write(PCAPNG_NRB_RECORD_IPV4, addr, 4, "gateway", rec_buf + rpos);
+rpos += libpcapng_nrb_record_write(PCAPNG_NRB_RECORD_END,  NULL, 0, NULL,      rec_buf + rpos);
+
+size_t sz = libpcapng_name_resolution_block_size(rec_buf, rpos, NULL, 0);
+unsigned char *nrb = malloc(sz);
+libpcapng_name_resolution_block_write(rec_buf, rpos, NULL, 0, nrb);
+```
+
+Record types: `PCAPNG_NRB_RECORD_IPV4` (4-byte address), `PCAPNG_NRB_RECORD_IPV6` (16-byte), `PCAPNG_NRB_RECORD_EUI48` (6-byte MAC), `PCAPNG_NRB_RECORD_EUI64` (8-byte EUI-64), `PCAPNG_NRB_RECORD_END` (terminates the record list).
+
+### Spec reference
+
+The authoritative spec is maintained at [https://github.com/IETF-OPSAWG-WG/draft-ietf-opsawg-pcap](https://github.com/IETF-OPSAWG-WG/draft-ietf-opsawg-pcap). The file `draft-ietf-opsawg-pcapng.md` in that repository is the current working document. The archived copy at `doc/draft-tuexen-opsawg-pcapng-04.txt` is an older revision and does not include EUI-48/EUI-64 NRB record types, SSH/OPC UA/ESP DSB secret types, or the newer EPB option codes.

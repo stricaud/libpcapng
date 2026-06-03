@@ -27,7 +27,22 @@
 ;;; Code:
 
 (require 'rx)
+(require 'font-lock)
 (require 'smie nil t)
+
+;;; ── Face compatibility (font-lock-number-face / font-lock-escape-face added in Emacs 28) ───
+
+(unless (facep 'font-lock-number-face)
+  (defface font-lock-number-face '((t :inherit font-lock-constant-face))
+    "Fallback face for numbers (Emacs < 28)." :group 'font-lock-faces))
+(unless (boundp 'font-lock-number-face)
+  (defvar font-lock-number-face 'font-lock-number-face))
+
+(unless (facep 'font-lock-escape-face)
+  (defface font-lock-escape-face '((t :inherit font-lock-string-face))
+    "Fallback face for escape sequences (Emacs < 28)." :group 'font-lock-faces))
+(unless (boundp 'font-lock-escape-face)
+  (defvar font-lock-escape-face 'font-lock-escape-face))
 
 ;;; ── Customisation ────────────────────────────────────────────────────────────
 
@@ -280,15 +295,14 @@ Key bindings:
   M-;       toggle comment
 
 See `pcapsh-indent-offset' to change the indentation step (default 4)."
-  :syntax-table pcapsh-mode-syntax-table
-  :group 'pcapsh
-  (setq-local comment-start         "# ")
-  (setq-local comment-end           "")
-  (setq-local comment-start-skip    "#+\\s-*")
-  (setq-local indent-line-function  #'pcapsh-indent-line)
-  (setq-local font-lock-defaults    '(pcapsh-font-lock-keywords nil nil nil nil))
-  (setq-local tab-width             pcapsh-indent-offset)
-  (setq-local indent-tabs-mode      nil)
+  (set-syntax-table pcapsh-mode-syntax-table)
+  (set (make-local-variable 'comment-start)      "# ")
+  (set (make-local-variable 'comment-end)        "")
+  (set (make-local-variable 'comment-start-skip) "#+\\s-*")
+  (set (make-local-variable 'indent-line-function) #'pcapsh-indent-line)
+  (set (make-local-variable 'tab-width)          pcapsh-indent-offset)
+  (set (make-local-variable 'indent-tabs-mode)   nil)
+  (setq font-lock-defaults '((pcapsh-font-lock-keywords)))
   (font-lock-mode 1))
 
 ;;;###autoload

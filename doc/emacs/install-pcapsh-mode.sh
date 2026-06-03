@@ -17,7 +17,7 @@ SRC="$SCRIPT_DIR/pcapsh-mode.el"
 
 # ── 1. Locate/create the Emacs lisp directory ────────────────────────────────
 
-EMACS_D="${HOME}/.emacs.d"
+EMACS_D="${HOME}/.emacs.d/lisp"
 mkdir -p "$EMACS_D"
 
 DEST="$EMACS_D/pcapsh-mode.el"
@@ -26,12 +26,14 @@ echo "Installed: $DEST"
 
 # ── 2. Locate the user init file ─────────────────────────────────────────────
 
-if   [ -f "$HOME/.emacs.d/init.el" ]; then
-    INIT="$HOME/.emacs.d/init.el"
-elif [ -f "$HOME/.emacs" ]; then
+# Emacs loads these in priority order: ~/.emacs > ~/.emacs.el > ~/.emacs.d/init.el
+if   [ -f "$HOME/.emacs" ]; then
     INIT="$HOME/.emacs"
+elif [ -f "$HOME/.emacs.el" ]; then
+    INIT="$HOME/.emacs.el"
+elif [ -f "$HOME/.emacs.d/init.el" ]; then
+    INIT="$HOME/.emacs.d/init.el"
 else
-    # Create a minimal init.el
     INIT="$HOME/.emacs.d/init.el"
     touch "$INIT"
 fi
@@ -47,7 +49,8 @@ else
     cat >> "$INIT" <<'ELISP'
 
 ;; pcapsh-mode — syntax highlighting and indentation for .pcapsh files
-(add-to-list 'load-path (expand-file-name "~/.emacs.d"))
+(global-font-lock-mode 1)
+(add-to-list 'load-path (expand-file-name "~/.emacs.d/lisp"))
 (autoload 'pcapsh-mode "pcapsh-mode" "Major mode for pcapsh scripts." t)
 (add-to-list 'auto-mode-alist '("\\.pcapsh\\'" . pcapsh-mode))
 ELISP
