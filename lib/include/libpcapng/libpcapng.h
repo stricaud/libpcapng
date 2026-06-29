@@ -46,6 +46,9 @@ extern "C" {
 #include "protocols/asn1.h"
 #include "protocols/rdp.h"
 
+#include "reassembly.h"
+#include "reassembly_tcp.h"
+
 #ifdef __cplusplus
 }
 #endif
