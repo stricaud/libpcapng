@@ -4,12 +4,14 @@
 
 protocol TPKT
     col "RDP"
+    abbrev "rdp"
     required uint8  version
     required uint8  reserved
     required uint16 length
     layer   cotp    COTP
 
 protocol COTP
+    abbrev "cotp"
     required uint8  li
     required uint8  pdu_type
         CR = 0xe0
@@ -31,6 +33,7 @@ protocol COTP
     info "COTP %s" pdu_type
 
 protocol RDP_NEGOTIATION
+    abbrev "rdp"
     optional string cookie until "\r\n"
     when remaining >= 8:
         required uint8 type

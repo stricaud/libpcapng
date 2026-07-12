@@ -233,6 +233,13 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
       continue;
     }
 
+    /* abbrev "<prefix>"  — field/layer abbrev prefix (for display filters) */
+    if (cur && !strncmp(tl, "abbrev", 6) && (tl[6] == ' ' || tl[6] == '"' || tl[6] == '\t')) {
+      char *q1 = strchr(tl, '"'), *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+      if (q1 && q2) snprintf(cur->abbrev, sizeof cur->abbrev, "%.*s", (int)(q2 - q1 - 1), q1 + 1);
+      continue;
+    }
+
     /* info "<fmt>" arg, arg  (parsed from raw text — the fmt has spaces) */
     if (cur && !strncmp(tl, "info", 4) && (tl[4] == ' ' || tl[4] == '"' || tl[4] == '\t')) {
       char *q1 = strchr(tl, '"'), *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
@@ -459,6 +466,7 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
   int off = 0, i, nseen = 0, lim = len, skip = 0;
   seen_t seen[PCAPNG_POSA_MAX_FLDS];
   char ab[PCAPNG_FIELD_ABBREV_MAX], child_info[192] = "";
+  const char *prefix = p->abbrev[0] ? p->abbrev : p->name;
   struct { int type; int prev_lim; } bstack[32]; int nb = 0;
 
   for (i = 0; i < p->nflds; i++) {
@@ -501,7 +509,7 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       continue;
     }
 
-    snprintf(ab, sizeof ab, "%s.%s", p->name, f->name);
+    snprintf(ab, sizeof ab, "%s.%s", prefix, f->name);
     sz = fld_fixed_size(f);
 
     if (sz >= 0) {
@@ -613,7 +621,7 @@ int pcapng_posa_dissect(const char *proto_name, const uint8_t *data, int len,
   pcapng_field_t *node; int used;
   if (!proto_name || !data || len <= 0) return 0;
   if (!p) { p = resolve_group(proto_name, data, len); if (!p) return 0; }
-  node = pf_add(parent, p->name, PCAPNG_FT_NONE);
+  node = pf_add(parent, p->abbrev[0] ? p->abbrev : p->name, PCAPNG_FT_NONE);
   pf_label(node, "%s", p->name);
   used = dissect_one(p, data, len, node, abs_off, info, infolen);
   pf_range(node, abs_off, used > 0 ? used : len);

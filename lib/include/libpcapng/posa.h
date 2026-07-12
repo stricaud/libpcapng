@@ -80,6 +80,7 @@ typedef struct {
   char               name[PCAPNG_POSA_NAME_MAX];
   char               parent[PCAPNG_POSA_NAME_MAX];   /* Object<parent>; "" if top */
   char               display[32];                    /* col "..." — Protocol column */
+  char               abbrev[32];                     /* abbrev "..." — field/layer abbrev prefix */
   pcapng_posa_fld_t  flds[PCAPNG_POSA_MAX_FLDS];
   int                nflds;
   char               info_fmt[192];                  /* info "..." fmt ("" = none) */
