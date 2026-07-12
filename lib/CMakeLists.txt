@@ -32,6 +32,7 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/capture.h
   include/libpcapng/dissect.h
   include/libpcapng/objects.h
+  include/libpcapng/posa.h
 )
 
 set(LIBPCAPNG_SOURCES
@@ -61,6 +62,7 @@ set(LIBPCAPNG_SOURCES
   capture.c
   dissect.c
   objects.c
+  posa.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})

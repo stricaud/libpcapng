@@ -52,6 +52,7 @@ extern "C" {
 #include "capture.h"
 #include "dissect.h"
 #include "objects.h"
+#include "posa.h"
 
 #ifdef __cplusplus
 }
