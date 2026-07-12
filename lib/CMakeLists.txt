@@ -29,6 +29,7 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/protocols/tcp_mss.h
   include/libpcapng/reassembly.h
   include/libpcapng/reassembly_tcp.h
+  include/libpcapng/capture.h
 )
 
 set(LIBPCAPNG_SOURCES
@@ -55,6 +56,7 @@ set(LIBPCAPNG_SOURCES
   protocols/tcp_mss.c
   reassembly.c
   reassembly_tcp.c
+  capture.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})
