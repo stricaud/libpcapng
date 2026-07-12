@@ -886,6 +886,23 @@ static void dissect_tls(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
       } else set_info(c, "Client Hello");
     } else set_info(c, "%s", tls_hs_name(hs));
   } else {
+    /* non-handshake record (Application Data / Alert / ChangeCipherSpec): show
+       the record body as a field so it maps to the trailing bytes, like
+       Wireshark's "Encrypted Application Data". */
+    int avail = len - 5;
+    int bodylen = (rl < avail) ? rl : avail;
+    if (bodylen > 0) {
+      char hex[51]; int i, hn, o = 0;
+      const char *ab = (ct == TLS_CONTENT_APPDATA) ? "tls.app_data" : "tls.record.fragment";
+      f = pf_add(t, ab, PCAPNG_FT_BYTES);
+      pf_set_bytes(f, d + 5, bodylen);
+      set_range(c, f, d + 5, bodylen);
+      hn = bodylen < 16 ? bodylen : 16;
+      for (i = 0; i < hn; i++) o += snprintf(hex + o, sizeof hex - o, "%02x", d[5 + i]);
+      pf_set_label(f, "%s: %s%s",
+                   (ct == TLS_CONTENT_APPDATA) ? "Encrypted Application Data" : "Fragment",
+                   hex, bodylen > 16 ? "\xe2\x80\xa6" : "");
+    }
     set_info(c, "%s", tls_ct_name(ct));
   }
 }
