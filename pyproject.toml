@@ -1,0 +1,91 @@
+# Root packaging config — publishes `pycapng` to PyPI.
+#
+# All C sources live at the repo root (lib/, bin/) and are compiled into the
+# extension module (pycapng.so) as a static bundle, so no shared-library
+# install step is needed.  `pip install pycapng` gives a self-contained wheel.
+#
+# Build locally:
+#   pip install scikit-build-core pybind11 setuptools-scm
+#   pip install --no-build-isolation -e .
+#
+# Build a wheel:
+#   pip install build
+#   python -m build --wheel
+#
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12", "setuptools-scm>=8"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pycapng"
+dynamic = ["version"]
+description = "Python bindings for libpcapng — read/write pcapng files and live packet capture"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Seb Tricaud", email = "sebastien.tricaud@proton.me" }]
+keywords = ["pcapng", "pcap", "packet-capture", "network", "packet", "wireshark"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Topic :: System :: Networking :: Monitoring",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage   = "https://github.com/stricaud/libpcapng"
+Repository = "https://github.com/stricaud/libpcapng"
+
+# ── scikit-build-core ────────────────────────────────────────────────────────
+[tool.scikit-build]
+# Use the repo-root CMakeLists.txt so bin/ and lib/ paths resolve correctly.
+cmake.source-dir = "."
+# Build only the Python module (pcapng_static is a transitive dep and is built
+# automatically; pcapsh, tests, and docs are skipped).
+build.targets = ["pycapng"]
+# Only package the "Python" CMake install component (the .so file).
+install.components = ["Python"]
+# Install the .so directly into site-packages (no sub-directory).
+wheel.install-dir = ""
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+
+[tool.scikit-build.sdist]
+# Exclude generated artefacts, AI memory, and anything that bloats the sdist.
+exclude = [
+  ".claude/**",
+  "**/build/**",
+  "doc/**",
+  "**/__pycache__/**",
+  "**/*.so",
+  "**/*.dylib",
+  "**/*.a",
+  "**/*.o",
+  "**/.DS_Store",
+]
+
+# ── setuptools-scm ───────────────────────────────────────────────────────────
+# Version comes from the most recent `v*` git tag.  Requires fetch-depth: 0 in
+# CI (the release workflow already sets this).
+[tool.setuptools_scm]
+
+# ── cibuildwheel ─────────────────────────────────────────────────────────────
+[tool.cibuildwheel]
+build-frontend  = "build"
+build-verbosity = 1
+# Skip PyPy (ABI mismatch), musl/32-bit (out of scope), Windows (no BPF/TPACKET).
+skip = ["pp*", "*-musllinux*", "*_i686", "*-win*"]
+# Smoke test: import must succeed on every wheel.
+test-command = "python -c \"import pycapng; print('pycapng', pycapng.__doc__[:20] if pycapng.__doc__ else 'ok')\""
+
+[tool.cibuildwheel.linux]
+# manylinux_2_28 (AlmaLinux 8) ships kernel headers for AF_PACKET / BPF compilation.
+manylinux-x86_64-image  = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+# arm64 minimum is macOS 11.0 (first Apple Silicon release).
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
