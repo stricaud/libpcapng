@@ -277,29 +277,29 @@ static void dissect_ipv4(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   set_range(c, ip, d, ihl >= 20 ? ihl : 20);
 
   f = pf_add(ip, "ip.version", PCAPNG_FT_UINT); pf_set_uint(f, d[0] >> 4);
-  pf_set_label(f, "Version: %u", d[0] >> 4);
+  pf_set_label(f, "Version: %u", d[0] >> 4); set_range(c, f, d, 1);
   f = pf_add(ip, "ip.hdr_len", PCAPNG_FT_UINT); pf_set_uint(f, ihl);
-  pf_set_label(f, "Header Length: %d bytes", ihl);
+  pf_set_label(f, "Header Length: %d bytes", ihl); set_range(c, f, d, 1);
   f = pf_add(ip, "ip.dsfield", PCAPNG_FT_UINT); pf_set_uint(f, d[1]);
-  pf_set_label(f, "Differentiated Services Field: 0x%02x", d[1]);
+  pf_set_label(f, "Differentiated Services Field: 0x%02x", d[1]); set_range(c, f, d + 1, 1);
   f = pf_add(ip, "ip.len", PCAPNG_FT_UINT); pf_set_uint(f, total);
-  pf_set_label(f, "Total Length: %u", total);
+  pf_set_label(f, "Total Length: %u", total); set_range(c, f, d + 2, 2);
   f = pf_add(ip, "ip.id", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 4));
-  pf_set_label(f, "Identification: 0x%04x (%u)", be16(d + 4), be16(d + 4));
+  pf_set_label(f, "Identification: 0x%04x (%u)", be16(d + 4), be16(d + 4)); set_range(c, f, d + 4, 2);
   f = pf_add(ip, "ip.flags", PCAPNG_FT_UINT); pf_set_uint(f, d[6] >> 5);
-  pf_set_label(f, "Flags: 0x%02x", d[6] >> 5);
+  pf_set_label(f, "Flags: 0x%02x", d[6] >> 5); set_range(c, f, d + 6, 1);
   f = pf_add(ip, "ip.frag_offset", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 6) & 0x1fff);
-  pf_set_label(f, "Fragment Offset: %u", be16(d + 6) & 0x1fff);
+  pf_set_label(f, "Fragment Offset: %u", be16(d + 6) & 0x1fff); set_range(c, f, d + 6, 2);
   f = pf_add(ip, "ip.ttl", PCAPNG_FT_UINT); pf_set_uint(f, d[8]);
-  pf_set_label(f, "Time to Live: %u", d[8]);
+  pf_set_label(f, "Time to Live: %u", d[8]); set_range(c, f, d + 8, 1);
   f = pf_add(ip, "ip.proto", PCAPNG_FT_UINT); pf_set_uint(f, proto);
-  pf_set_label(f, "Protocol: %s (%u)", ipproto_name(proto), proto);
+  pf_set_label(f, "Protocol: %s (%u)", ipproto_name(proto), proto); set_range(c, f, d + 9, 1);
   f = pf_add(ip, "ip.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 10));
-  pf_set_label(f, "Header Checksum: 0x%04x", be16(d + 10));
+  pf_set_label(f, "Header Checksum: 0x%04x", be16(d + 10)); set_range(c, f, d + 10, 2);
   f = pf_add(ip, "ip.src", PCAPNG_FT_IPV4); pf_set_ipv4(f, d + 12);
-  pf_set_label(f, "Source Address: %s", ss);
+  pf_set_label(f, "Source Address: %s", ss); set_range(c, f, d + 12, 4);
   f = pf_add(ip, "ip.dst", PCAPNG_FT_IPV4); pf_set_ipv4(f, d + 16);
-  pf_set_label(f, "Destination Address: %s", ds);
+  pf_set_label(f, "Destination Address: %s", ds); set_range(c, f, d + 16, 4);
 
   set_proto(c, "IPv4");
   set_src(c, ss);
@@ -337,18 +337,18 @@ static void dissect_ipv6(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   set_range(c, ip, d, 40);
   { pcapng_field_t *s = pf_add(ip, "ipv6.src", PCAPNG_FT_IPV6); pf_set_ipv6(s, d + 8);
     snprintf(ss, sizeof ss, "%s", s->str);
-    pf_set_label(s, "Source Address: %s", ss); }
+    pf_set_label(s, "Source Address: %s", ss); set_range(c, s, d + 8, 16); }
   { pcapng_field_t *dd = pf_add(ip, "ipv6.dst", PCAPNG_FT_IPV6); pf_set_ipv6(dd, d + 24);
     snprintf(ds, sizeof ds, "%s", dd->str);
-    pf_set_label(dd, "Destination Address: %s", ds); }
+    pf_set_label(dd, "Destination Address: %s", ds); set_range(c, dd, d + 24, 16); }
   pf_set_label(ip, "Internet Protocol Version 6, Src: %s, Dst: %s", ss, ds);
 
   f = pf_add(ip, "ipv6.plen", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 4));
-  pf_set_label(f, "Payload Length: %u", be16(d + 4));
+  pf_set_label(f, "Payload Length: %u", be16(d + 4)); set_range(c, f, d + 4, 2);
   f = pf_add(ip, "ipv6.nxt", PCAPNG_FT_UINT); pf_set_uint(f, nxt);
-  pf_set_label(f, "Next Header: %s (%u)", ipproto_name(nxt), nxt);
+  pf_set_label(f, "Next Header: %s (%u)", ipproto_name(nxt), nxt); set_range(c, f, d + 6, 1);
   f = pf_add(ip, "ipv6.hlim", PCAPNG_FT_UINT); pf_set_uint(f, d[7]);
-  pf_set_label(f, "Hop Limit: %u", d[7]);
+  pf_set_label(f, "Hop Limit: %u", d[7]); set_range(c, f, d + 7, 1);
 
   set_proto(c, "IPv6");
   set_src(c, ss);
@@ -394,15 +394,15 @@ static void dissect_arp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(a, "Address Resolution Protocol (%s)", op == 1 ? "request" : op == 2 ? "reply" : "?");
   set_range(c, a, d, 28);
   f = pf_add(a, "arp.opcode", PCAPNG_FT_UINT); pf_set_uint(f, op);
-  pf_set_label(f, "Opcode: %u", op);
+  pf_set_label(f, "Opcode: %u", op); set_range(c, f, d + 6, 2);
   f = pf_add(a, "arp.src.hw_mac", PCAPNG_FT_MAC); pf_set_mac(f, d + 8);
-  pf_set_label(f, "Sender MAC address: %s", smac);
+  pf_set_label(f, "Sender MAC address: %s", smac); set_range(c, f, d + 8, 6);
   f = pf_add(a, "arp.src.proto_ipv4", PCAPNG_FT_IPV4); pf_set_ipv4(f, d + 14);
-  pf_set_label(f, "Sender IP address: %s", sip);
+  pf_set_label(f, "Sender IP address: %s", sip); set_range(c, f, d + 14, 4);
   f = pf_add(a, "arp.dst.hw_mac", PCAPNG_FT_MAC); pf_set_mac(f, d + 18);
-  pf_set_label(f, "Target MAC address: %s", dmac);
+  pf_set_label(f, "Target MAC address: %s", dmac); set_range(c, f, d + 18, 6);
   f = pf_add(a, "arp.dst.proto_ipv4", PCAPNG_FT_IPV4); pf_set_ipv4(f, d + 24);
-  pf_set_label(f, "Target IP address: %s", dip);
+  pf_set_label(f, "Target IP address: %s", dip); set_range(c, f, d + 24, 4);
 
   set_proto(c, "ARP");
   set_src(c, smac);
@@ -440,21 +440,21 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(t, "Transmission Control Protocol, Src Port: %u, Dst Port: %u", sp, dp);
   set_range(c, t, d, (doff >= 20 && doff <= len) ? doff : 20);
   f = pf_add(t, "tcp.srcport", PCAPNG_FT_UINT); pf_set_uint(f, sp);
-  pf_set_label(f, "Source Port: %u", sp);
+  pf_set_label(f, "Source Port: %u", sp); set_range(c, f, d + 0, 2);
   f = pf_add(t, "tcp.dstport", PCAPNG_FT_UINT); pf_set_uint(f, dp);
-  pf_set_label(f, "Destination Port: %u", dp);
+  pf_set_label(f, "Destination Port: %u", dp); set_range(c, f, d + 2, 2);
   f = pf_add(t, "tcp.seq", PCAPNG_FT_UINT); pf_set_uint(f, be32(d + 4));
-  pf_set_label(f, "Sequence Number: %u", be32(d + 4));
+  pf_set_label(f, "Sequence Number: %u", be32(d + 4)); set_range(c, f, d + 4, 4);
   f = pf_add(t, "tcp.ack", PCAPNG_FT_UINT); pf_set_uint(f, be32(d + 8));
-  pf_set_label(f, "Acknowledgment Number: %u", be32(d + 8));
+  pf_set_label(f, "Acknowledgment Number: %u", be32(d + 8)); set_range(c, f, d + 8, 4);
   f = pf_add(t, "tcp.hdr_len", PCAPNG_FT_UINT); pf_set_uint(f, doff);
-  pf_set_label(f, "Header Length: %d bytes", doff);
+  pf_set_label(f, "Header Length: %d bytes", doff); set_range(c, f, d + 12, 1);
   f = pf_add(t, "tcp.flags", PCAPNG_FT_UINT); pf_set_uint(f, flags);
-  pf_set_label(f, "Flags: 0x%03x (%s)", flags, fs);
+  pf_set_label(f, "Flags: 0x%03x (%s)", flags, fs); set_range(c, f, d + 12, 2);
   f = pf_add(t, "tcp.window_size", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 14));
-  pf_set_label(f, "Window: %u", be16(d + 14));
+  pf_set_label(f, "Window: %u", be16(d + 14)); set_range(c, f, d + 14, 2);
   f = pf_add(t, "tcp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 16));
-  pf_set_label(f, "Checksum: 0x%04x", be16(d + 16));
+  pf_set_label(f, "Checksum: 0x%04x", be16(d + 16)); set_range(c, f, d + 16, 2);
 
   set_proto(c, "TCP");
   set_info(c, "%u \xe2\x86\x92 %u [%s] Seq=%u Win=%u Len=%d",
@@ -500,13 +500,13 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(u, "User Datagram Protocol, Src Port: %u, Dst Port: %u", sp, dp);
   set_range(c, u, d, 8);
   f = pf_add(u, "udp.srcport", PCAPNG_FT_UINT); pf_set_uint(f, sp);
-  pf_set_label(f, "Source Port: %u", sp);
+  pf_set_label(f, "Source Port: %u", sp); set_range(c, f, d + 0, 2);
   f = pf_add(u, "udp.dstport", PCAPNG_FT_UINT); pf_set_uint(f, dp);
-  pf_set_label(f, "Destination Port: %u", dp);
+  pf_set_label(f, "Destination Port: %u", dp); set_range(c, f, d + 2, 2);
   f = pf_add(u, "udp.length", PCAPNG_FT_UINT); pf_set_uint(f, ln);
-  pf_set_label(f, "Length: %u", ln);
+  pf_set_label(f, "Length: %u", ln); set_range(c, f, d + 4, 2);
   f = pf_add(u, "udp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 6));
-  pf_set_label(f, "Checksum: 0x%04x", be16(d + 6));
+  pf_set_label(f, "Checksum: 0x%04x", be16(d + 6)); set_range(c, f, d + 6, 2);
 
   set_proto(c, "UDP");
   set_info(c, "%u \xe2\x86\x92 %u  Len=%d", sp, dp, len - 8);
@@ -563,21 +563,22 @@ static void dissect_ntp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
 
   f = pf_add(ntp, "ntp.flags", PCAPNG_FT_UINT); pf_set_uint(f, n->li_vn_mode);
   pf_set_label(f, "Flags: 0x%02x (Leap=%d, Version=%d, Mode=%d %s)",
-                   n->li_vn_mode, li, vn, mode, ntp_mode_name(mode));
+                   n->li_vn_mode, li, vn, mode, ntp_mode_name(mode)); set_range(c, f, d + 0, 1);
   f = pf_add(ntp, "ntp.stratum", PCAPNG_FT_UINT); pf_set_uint(f, n->stratum);
-  pf_set_label(f, "Peer Clock Stratum: %u", n->stratum);
+  pf_set_label(f, "Peer Clock Stratum: %u", n->stratum); set_range(c, f, d + 1, 1);
   f = pf_add(ntp, "ntp.ppoll", PCAPNG_FT_UINT); pf_set_uint(f, n->poll);
-  pf_set_label(f, "Peer Polling Interval: %u", n->poll);
+  pf_set_label(f, "Peer Polling Interval: %u", n->poll); set_range(c, f, d + 2, 1);
   f = pf_add(ntp, "ntp.precision", PCAPNG_FT_UINT); pf_set_uint(f, (uint8_t)n->precision);
-  pf_set_label(f, "Peer Clock Precision: %d", (int)n->precision);
+  pf_set_label(f, "Peer Clock Precision: %d", (int)n->precision); set_range(c, f, d + 3, 1);
   f = pf_add(ntp, "ntp.rootdelay", PCAPNG_FT_UINT); pf_set_uint(f, ntohl(n->root_delay));
-  pf_set_label(f, "Root Delay: %u", ntohl(n->root_delay));
+  pf_set_label(f, "Root Delay: %u", ntohl(n->root_delay)); set_range(c, f, d + 4, 4);
   f = pf_add(ntp, "ntp.rootdispersion", PCAPNG_FT_UINT); pf_set_uint(f, ntohl(n->root_dispersion));
-  pf_set_label(f, "Root Dispersion: %u", ntohl(n->root_dispersion));
+  pf_set_label(f, "Root Dispersion: %u", ntohl(n->root_dispersion)); set_range(c, f, d + 8, 4);
   f = pf_add(ntp, "ntp.refid", PCAPNG_FT_UINT); pf_set_uint(f, ntohl(n->ref_id));
-  pf_set_label(f, "Reference ID: 0x%08x", ntohl(n->ref_id));
+  pf_set_label(f, "Reference ID: 0x%08x", ntohl(n->ref_id)); set_range(c, f, d + 12, 4);
   f = pf_add(ntp, "ntp.xmt", PCAPNG_FT_UINT); pf_set_uint(f, ntohl(n->tx_timestamp_secs));
   pf_set_label(f, "Transmit Timestamp (seconds): %u", ntohl(n->tx_timestamp_secs));
+  if (len >= 44) set_range(c, f, d + 40, 4);
 
   set_proto(c, "NTP");
   set_info(c, "NTPv%d %s", vn, ntp_mode_name(mode));
@@ -592,11 +593,11 @@ static void dissect_icmp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   pf_set_label(ic, "Internet Control Message Protocol");
   set_range(c, ic, d, len < 8 ? len : 8);
   f = pf_add(ic, "icmp.type", PCAPNG_FT_UINT); pf_set_uint(f, d[0]);
-  pf_set_label(f, "Type: %u", d[0]);
+  pf_set_label(f, "Type: %u", d[0]); set_range(c, f, d + 0, 1);
   f = pf_add(ic, "icmp.code", PCAPNG_FT_UINT); pf_set_uint(f, d[1]);
-  pf_set_label(f, "Code: %u", d[1]);
+  pf_set_label(f, "Code: %u", d[1]); set_range(c, f, d + 1, 1);
   f = pf_add(ic, "icmp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 2));
-  pf_set_label(f, "Checksum: 0x%04x", be16(d + 2));
+  pf_set_label(f, "Checksum: 0x%04x", be16(d + 2)); set_range(c, f, d + 2, 2);
   set_proto(c, "ICMP");
   if      (d[0] == 8) set_info(c, "Echo (ping) request");
   else if (d[0] == 0) set_info(c, "Echo (ping) reply");
@@ -637,18 +638,20 @@ static void dissect_dns(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(dns, "Domain Name System (%s)", (flags & 0x8000) ? "response" : "query");
   set_range(c, dns, d, len);
   f = pf_add(dns, "dns.id", PCAPNG_FT_UINT); pf_set_uint(f, id);
-  pf_set_label(f, "Transaction ID: 0x%04x", id);
+  pf_set_label(f, "Transaction ID: 0x%04x", id); set_range(c, f, d + 0, 2);
   f = pf_add(dns, "dns.flags", PCAPNG_FT_UINT); pf_set_uint(f, flags);
-  pf_set_label(f, "Flags: 0x%04x", flags);
+  pf_set_label(f, "Flags: 0x%04x", flags); set_range(c, f, d + 2, 2);
   f = pf_add(dns, "dns.count.queries", PCAPNG_FT_UINT); pf_set_uint(f, qd);
-  pf_set_label(f, "Questions: %u", qd);
+  pf_set_label(f, "Questions: %u", qd); set_range(c, f, d + 4, 2);
   f = pf_add(dns, "dns.count.answers", PCAPNG_FT_UINT); pf_set_uint(f, an);
-  pf_set_label(f, "Answer RRs: %u", an);
+  pf_set_label(f, "Answer RRs: %u", an); set_range(c, f, d + 6, 2);
 
   if (qd > 0) {
-    dns_name(d, len, 12, qname, sizeof qname);
+    int nlen = dns_name(d, len, 12, qname, sizeof qname);
     f = pf_add(dns, "dns.qry.name", PCAPNG_FT_STR); pf_set_str(f, qname);
     pf_set_label(f, "Query Name: %s", qname);
+    /* label bytes span the encoded name (length octets + labels + root) */
+    set_range(c, f, d + 12, nlen > 0 ? nlen + 2 : 1);
   }
 
   set_proto(c, "DNS");
