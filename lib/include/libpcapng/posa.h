@@ -38,6 +38,8 @@ typedef enum {
   PCAPNG_POSA_BYTES_REF,     /* bytes[lenfield]   */
   PCAPNG_POSA_STR_DELIM,     /* string ... until "delim"   (extended) */
   PCAPNG_POSA_LAYER,         /* layer <name> <Proto>       (extended) */
+  PCAPNG_POSA_SCOPE,         /* scope <field> { ... }      (extended) */
+  PCAPNG_POSA_WHEN,          /* when <cond>: { ... }       (extended) */
   PCAPNG_POSA_END            /* marks end of a scope/when block (internal) */
 } pcapng_posa_ftype_t;
 
@@ -77,6 +79,7 @@ typedef struct {
 typedef struct {
   char               name[PCAPNG_POSA_NAME_MAX];
   char               parent[PCAPNG_POSA_NAME_MAX];   /* Object<parent>; "" if top */
+  char               display[32];                    /* col "..." — Protocol column */
   pcapng_posa_fld_t  flds[PCAPNG_POSA_MAX_FLDS];
   int                nflds;
   char               info_fmt[192];                  /* info "..." fmt ("" = none) */
@@ -88,6 +91,7 @@ typedef struct {
    name replaces it. Returns number of protocols added, or -1 on error. */
 int  pcapng_posa_load_file(const char *path, char *errbuf, size_t errlen);
 int  pcapng_posa_load_dir(const char *dir);
+int  pcapng_posa_load_text(const char *src, char *errbuf, size_t errlen);  /* parse from memory */
 void pcapng_posa_clear(void);
 
 int  pcapng_posa_count(void);
