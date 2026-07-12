@@ -1,12 +1,5 @@
 include_directories(AFTER ${LIBPCAPNG_INCLUDE_DIRS} ${Python_INCLUDE_DIRS})
 
-execute_process(
-  COMMAND python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
-  OUTPUT_VARIABLE PYTHON_SITE_PACKAGES
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-message(STATUS "PYTHON_SITE_PACKAGES='${PYTHON_SITE_PACKAGES}'")
-
 # ── Embed all .posa protocol definitions as C strings (self-contained module) ─
 file(GLOB POSA_FILES "${CMAKE_SOURCE_DIR}/bin/protos/*.posa")
 set(BUILTIN_PROTOS_H "${CMAKE_CURRENT_BINARY_DIR}/builtin_protos.h")
@@ -48,7 +41,21 @@ set_target_properties(pycapng PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}"
     SUFFIX "${PYTHON_MODULE_EXTENSION}"
     COMPILE_FLAGS "-DPYBIND11_PYTHON_VERSION=${PYBIND11_PYTHON_VERSION}")
 
-install(TARGETS pycapng LIBRARY
-    DESTINATION "${PYTHON_SITE_PACKAGES}"
-    COMPONENT Python)
+# Require C++14: std::make_unique, initialized lambda captures.
+target_compile_features(pycapng PRIVATE cxx_std_14)
+
+if(SKBUILD)
+    # scikit-build-core sets SKBUILD=1; install relative to the wheel root.
+    install(TARGETS pycapng LIBRARY DESTINATION . COMPONENT Python)
+else()
+    execute_process(
+      COMMAND python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
+      OUTPUT_VARIABLE PYTHON_SITE_PACKAGES
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    message(STATUS "PYTHON_SITE_PACKAGES='${PYTHON_SITE_PACKAGES}'")
+    install(TARGETS pycapng LIBRARY
+        DESTINATION "${PYTHON_SITE_PACKAGES}"
+        COMPONENT Python)
+endif()
 
