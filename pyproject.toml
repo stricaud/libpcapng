@@ -51,7 +51,6 @@ build.targets = ["pycapng"]
 install.components = ["Python"]
 # Install the .so directly into site-packages (no sub-directory).
 wheel.install-dir = ""
-metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 
 [tool.scikit-build.sdist]
 # Exclude generated artefacts, AI memory, and anything that bloats the sdist.
@@ -67,10 +66,19 @@ exclude = [
   "**/.DS_Store",
 ]
 
+# ── dynamic metadata (scikit-build-core 1.0+) ───────────────────────────────
+# Replaces the deprecated tool.scikit-build.metadata.version.provider key.
+[[tool.dynamic-metadata]]
+provider = "scikit_build_core.metadata.setuptools_scm"
+
 # ── setuptools-scm ───────────────────────────────────────────────────────────
-# Version comes from the most recent `v*` git tag.  Requires fetch-depth: 0 in
-# CI (the release workflow already sets this).
+# Version comes from a clean `vMAJOR.MINOR[.PATCH]` git tag.
+# Tags like `v0.1-08b4185` (created by build.yml for per-commit releases) are
+# intentionally excluded by the regex so they don't pollute the PyPI version.
+# fallback_version is used when no matching tag exists yet (e.g. on dev builds).
 [tool.setuptools_scm]
+tag_regex = "^v(?P<version>[0-9]+(?:\\.[0-9]+)*)$"
+fallback_version = "0.0.0.dev0"
 
 # ── cibuildwheel ─────────────────────────────────────────────────────────────
 [tool.cibuildwheel]
