@@ -1,0 +1,91 @@
+name: Build & publish wheels
+
+# Wheels are built on every push/PR to catch breakage early.
+# They are *published* to PyPI only when a version tag like `v0.2.0` is pushed.
+#
+# To release:
+#   git tag v0.2.0
+#   git push origin v0.2.0
+#
+# PyPI publishing uses Trusted Publishing (OIDC) — no API token needed.
+# Set it up once at https://pypi.org/manage/project/pycapng/settings/publishing/
+# with environment name "pypi".
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Wheels ────────────────────────────────────────────────────────────────
+  build_wheels:
+    name: wheels · ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,  runner: ubuntu-latest,    archs: x86_64  }
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, archs: aarch64 }
+          - { name: macos-arm64,   runner: macos-14,         archs: arm64   }
+          - { name: macos-x86_64,  runner: macos-13,         archs: x86_64  }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # setuptools-scm needs full history + tags
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.23.3
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+        # All other config lives in [tool.cibuildwheel] in pyproject.toml.
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: ./wheelhouse/*.whl
+
+  # ── Source distribution ───────────────────────────────────────────────────
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz
+
+  # ── Publish ───────────────────────────────────────────────────────────────
+  publish:
+    name: publish to PyPI
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    # Only publish on a clean version tag (v0.2.0, not v0.1-abc1234).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pycapng
+    permissions:
+      id-token: write           # required for OIDC Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "*"
+          merge-multiple: true  # collect all wheels + sdist into dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

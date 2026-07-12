@@ -31,6 +31,7 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/reassembly_tcp.h
   include/libpcapng/capture.h
   include/libpcapng/dissect.h
+  include/libpcapng/objects.h
 )
 
 set(LIBPCAPNG_SOURCES
@@ -59,6 +60,7 @@ set(LIBPCAPNG_SOURCES
   reassembly_tcp.c
   capture.c
   dissect.c
+  objects.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})
