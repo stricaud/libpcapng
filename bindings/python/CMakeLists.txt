@@ -23,6 +23,7 @@ add_custom_command(
 set(PYCAPNG_SRC
     pycapng.cpp
     pypcapsh.cpp
+    pycapture.cpp
     ${CMAKE_SOURCE_DIR}/bin/pcapsh.c
     ${CMAKE_SOURCE_DIR}/bin/pcapsh_layer.c
     ${CMAKE_SOURCE_DIR}/bin/pcapsh_posa.c
