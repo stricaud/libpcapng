@@ -1,5 +1,8 @@
 /* pcapsh_io.c — packet I/O, serialization, dissection, display, ls()
  * Included as part of the pcapsh unity build (see pcapsh.c). */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE   /* strcasestr */
+#endif
 #include "pcapsh.h"
 #include <libpcapng/protocols/ssl.h>
 
