@@ -455,6 +455,48 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(f, "Window: %u", be16(d + 14)); set_range(c, f, d + 14, 2);
   f = pf_add(t, "tcp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 16));
   pf_set_label(f, "Checksum: 0x%04x", be16(d + 16)); set_range(c, f, d + 16, 2);
+  f = pf_add(t, "tcp.urgent_pointer", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 18));
+  pf_set_label(f, "Urgent Pointer: %u", be16(d + 18)); set_range(c, f, d + 18, 2);
+
+  /* TCP options: present when the data offset exceeds the 20-byte base header. */
+  if (doff > 20 && doff <= len) {
+    pcapng_field_t *opts = pf_add(t, "tcp.options", PCAPNG_FT_NONE);
+    int o = 20;
+    pf_set_label(opts, "Options (%d bytes)", doff - 20);
+    set_range(c, opts, d + 20, doff - 20);
+    while (o < doff) {
+      uint8_t kind = d[o];
+      if (kind == 0) {                                   /* End of Option List */
+        pcapng_field_t *op = pf_add(opts, "tcp.options.eol", PCAPNG_FT_NONE);
+        pf_set_label(op, "End of Option List (EOL)"); set_range(c, op, d + o, 1);
+        break;
+      } else if (kind == 1) {                            /* No-Operation       */
+        pcapng_field_t *op = pf_add(opts, "tcp.options.nop", PCAPNG_FT_NONE);
+        pf_set_label(op, "No-Operation (NOP)"); set_range(c, op, d + o, 1);
+        o++;
+      } else {                                           /* kind, length, data */
+        int olen = (o + 1 < doff) ? d[o + 1] : 2;
+        pcapng_field_t *op = pf_add(opts, "tcp.options.option", PCAPNG_FT_NONE);
+        if (olen < 2) olen = 2;
+        if (o + olen > doff) olen = doff - o;
+        switch (kind) {
+        case 2: pf_set_label(op, "Maximum Segment Size: %u",
+                             (olen >= 4) ? be16(d + o + 2) : 0); break;
+        case 3: pf_set_label(op, "Window Scale: %u (multiply by %u)",
+                             (olen >= 3) ? d[o + 2] : 0,
+                             (olen >= 3) ? (1u << d[o + 2]) : 1); break;
+        case 4: pf_set_label(op, "SACK Permitted"); break;
+        case 5: pf_set_label(op, "SACK (%d bytes)", olen); break;
+        case 8: pf_set_label(op, "Timestamps: TSval %u, TSecr %u",
+                             (olen >= 10) ? be32(d + o + 2) : 0,
+                             (olen >= 10) ? be32(d + o + 6) : 0); break;
+        default: pf_set_label(op, "Option: Kind %u, Length %d", kind, olen); break;
+        }
+        set_range(c, op, d + o, olen);
+        o += olen;
+      }
+    }
+  }
 
   set_proto(c, "TCP");
   set_info(c, "%u \xe2\x86\x92 %u [%s] Seq=%u Win=%u Len=%d",
