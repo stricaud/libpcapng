@@ -13,6 +13,7 @@
 namespace py = pybind11;
 
 void register_pcapsh_submodule(py::module_ &parent);
+void register_capture(py::module_ &m);
 
 PcapNG::PcapNG(void) {
   filename = NULL;
@@ -1155,6 +1156,7 @@ PYBIND11_MODULE(pycapng, m) {
     m.attr("PTRFLAGS_BUTTON2")  = py::int_(PTRFLAGS_BUTTON2);
 
     register_pcapsh_submodule(m);
+    register_capture(m);
 
     py::class_<Reassembler>(m, "Reassembler",
         "IP fragment reassembler.\n\n"
