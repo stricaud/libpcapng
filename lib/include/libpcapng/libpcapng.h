@@ -49,6 +49,8 @@ extern "C" {
 #include "reassembly.h"
 #include "reassembly_tcp.h"
 
+#include "capture.h"
+
 #ifdef __cplusplus
 }
 #endif
