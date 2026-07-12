@@ -50,6 +50,7 @@ extern "C" {
 #include "reassembly_tcp.h"
 
 #include "capture.h"
+#include "dissect.h"
 
 #ifdef __cplusplus
 }
