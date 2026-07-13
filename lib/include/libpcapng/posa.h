@@ -111,6 +111,21 @@ int  pcapng_posa_dissect(const char *proto, const uint8_t *data, int len,
    the bound protocol name for (ip_proto 6/17, port), or NULL. */
 const char *pcapng_posa_bound_port(int ip_proto, uint16_t port);
 
+/* ── Coloring declared by a `color <display filter> => <fg> <bg>` line ───────
+ *
+ *     color tcp.flags.reset == 1 => yellow red
+ *     color rdp                  => black lightcyan
+ *
+ * libpcapng only carries the declaration — it has no display of its own, so the
+ * colors stay opaque names and the front end decides what they mean (carcal maps
+ * them onto libcaca's ANSI palette). This is how a .posa ships its own coloring
+ * alongside its decoder, with no code change in the analyzer. */
+#define PCAPNG_POSA_COLOR_EXPR_MAX 192
+#define PCAPNG_POSA_COLOR_NAME_MAX  24
+int pcapng_posa_color_count(void);
+/* Borrowed pointers into the loaded posa set; invalidated by pcapng_posa_clear. */
+int pcapng_posa_color_get(int i, const char **expr, const char **fg, const char **bg);
+
 /* Regenerate editable .posa source for a protocol. Returns bytes written. */
 int  pcapng_posa_to_text(const pcapng_posa_proto_t *p, char *out, size_t sz);
 

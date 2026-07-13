@@ -530,6 +530,25 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(f, "Header Length: %d bytes", doff); set_range(c, f, d + 12, 1);
   f = pf_add(t, "tcp.flags", PCAPNG_FT_UINT); pf_set_uint(f, flags);
   pf_set_label(f, "Flags: 0x%03x (%s)", flags, fs); set_range(c, f, d + 12, 2);
+  /* Individual flag bits, as Wireshark names them. The display filter has no
+     bitwise operator, so without these there is no way to ask "was this a
+     reset?" — which is exactly what a coloring rule wants to say. */
+  {
+    static const struct { const char *ab; const char *name; unsigned bit; } TF[] = {
+      { "tcp.flags.fin", "FIN",  0x001 }, { "tcp.flags.syn", "SYN", 0x002 },
+      { "tcp.flags.reset", "RST", 0x004 }, { "tcp.flags.push", "PSH", 0x008 },
+      { "tcp.flags.ack", "ACK",  0x010 }, { "tcp.flags.urg", "URG", 0x020 },
+      { "tcp.flags.ece", "ECE",  0x040 }, { "tcp.flags.cwr", "CWR", 0x080 },
+    };
+    size_t k;
+    for (k = 0; k < sizeof TF / sizeof TF[0]; k++) {
+      pcapng_field_t *b = pf_add(f, TF[k].ab, PCAPNG_FT_UINT);
+      unsigned on = (flags & TF[k].bit) ? 1u : 0u;
+      pf_set_uint(b, on);
+      pf_set_label(b, "%s: %u", TF[k].name, on);
+      set_range(c, b, d + 12, 2);
+    }
+  }
   f = pf_add(t, "tcp.window_size", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 14));
   pf_set_label(f, "Window: %u", be16(d + 14)); set_range(c, f, d + 14, 2);
   f = pf_add(t, "tcp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 16));

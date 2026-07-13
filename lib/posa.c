@@ -29,6 +29,18 @@ typedef struct { int ipproto; uint16_t port; char proto[PCAPNG_POSA_NAME_MAX]; i
 static bind_t g_binds[MAX_BINDS];
 static int    g_nbinds;
 
+/* Coloring declared by a `color <display filter> => <fg> <bg>` line. The colors
+   are kept as opaque names: libpcapng has no notion of a display, it just
+   carries what the .posa declared so the front end can apply it. */
+#define MAX_COLORS 128
+typedef struct {
+  char expr[PCAPNG_POSA_COLOR_EXPR_MAX];
+  char fg[PCAPNG_POSA_COLOR_NAME_MAX];
+  char bg[PCAPNG_POSA_COLOR_NAME_MAX];
+} posa_color_t;
+static posa_color_t g_colors[MAX_COLORS];
+static int          g_ncolors;
+
 int pcapng_posa_count(void) { return g_nprotos; }
 const pcapng_posa_proto_t *pcapng_posa_at(int i)
 { return (i >= 0 && i < g_nprotos) ? &g_protos[i] : NULL; }
@@ -39,7 +51,42 @@ const pcapng_posa_proto_t *pcapng_posa_find(const char *name)
   for (i = 0; i < g_nprotos; i++) if (!strcmp(g_protos[i].name, name)) return &g_protos[i];
   return NULL;
 }
-void pcapng_posa_clear(void) { g_nprotos = 0; g_nbinds = 0; }
+void pcapng_posa_clear(void) { g_nprotos = 0; g_nbinds = 0; g_ncolors = 0; }
+
+int pcapng_posa_color_count(void) { return g_ncolors; }
+
+int pcapng_posa_color_get(int i, const char **expr, const char **fg, const char **bg)
+{
+  if (i < 0 || i >= g_ncolors) return -1;
+  if (expr) *expr = g_colors[i].expr;
+  if (fg)   *fg   = g_colors[i].fg;
+  if (bg)   *bg   = g_colors[i].bg;
+  return 0;
+}
+
+/* `color <display filter> => <fg> <bg>`
+   The filter may contain spaces and '=' (e.g. "tcp.flags.reset == 1"), so split
+   on the LAST "=>" and take exactly two names after it. */
+static void parse_color(const char *rest)
+{
+  const char *arrow = NULL, *p;
+  char fg[PCAPNG_POSA_COLOR_NAME_MAX] = "", bg[PCAPNG_POSA_COLOR_NAME_MAX] = "";
+  size_t elen;
+
+  for (p = rest; (p = strstr(p, "=>")) != NULL; p += 2) arrow = p;
+  if (!arrow || g_ncolors >= MAX_COLORS) return;
+  if (sscanf(arrow + 2, " %23s %23s", fg, bg) != 2) return;
+
+  elen = (size_t)(arrow - rest);
+  while (elen > 0 && (rest[elen - 1] == ' ' || rest[elen - 1] == '\t')) elen--;
+  if (elen == 0 || elen >= PCAPNG_POSA_COLOR_EXPR_MAX) return;
+
+  memcpy(g_colors[g_ncolors].expr, rest, elen);
+  g_colors[g_ncolors].expr[elen] = '\0';
+  snprintf(g_colors[g_ncolors].fg, sizeof g_colors[g_ncolors].fg, "%s", fg);
+  snprintf(g_colors[g_ncolors].bg, sizeof g_colors[g_ncolors].bg, "%s", bg);
+  g_ncolors++;
+}
 
 const char *pcapng_posa_bound_port(int ipproto, uint16_t port)
 {
@@ -228,6 +275,14 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     if (!strncmp(tl, "rule", 4) && (tl[4] == ' ' || tl[4] == '\t')) {
       char *r = tl + 4; while (*r == ' ' || *r == '\t') r++;
       parse_rule(r);
+      continue;
+    }
+
+    /* color <display filter> => <fg> <bg>  — how the front end should paint a
+       matching packet. File-scoped like `rule`, not tied to the current proto. */
+    if (!strncmp(tl, "color", 5) && (tl[5] == ' ' || tl[5] == '\t')) {
+      char *r = tl + 5; while (*r == ' ' || *r == '\t') r++;
+      parse_color(r);
       continue;
     }
 
