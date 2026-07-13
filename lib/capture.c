@@ -1372,7 +1372,7 @@ int pcapng_capture_dispatch(pcapng_capture_t *cap, int count,
       defined(__OpenBSD__) || defined(__NetBSD__)
     return bsd_dispatch(cap, count, cb, userdata);
 #else
-    return -1;
+    return stub_dispatch(cap, count, cb, userdata);
 #endif
 }
 
@@ -1400,7 +1400,7 @@ int pcapng_capture_loop(pcapng_capture_t *cap, int count,
       defined(__OpenBSD__) || defined(__NetBSD__)
         int n = bsd_dispatch(cap, count > 0 ? count - total : -1, cb, userdata);
 #else
-        int n = -1;
+        int n = stub_dispatch(cap, count > 0 ? count - total : -1, cb, userdata);
 #endif
         if (n < 0) return -1;
         total += n;
@@ -1424,7 +1424,7 @@ int pcapng_capture_get_stats(pcapng_capture_t *cap,
       defined(__OpenBSD__) || defined(__NetBSD__)
     return bsd_get_stats(cap, st);
 #else
-    return -1;
+    return stub_get_stats(cap, st);
 #endif
 }
 
@@ -1436,6 +1436,8 @@ void pcapng_capture_close(pcapng_capture_t *cap)
 #elif defined(__APPLE__) || defined(__FreeBSD__) || \
       defined(__OpenBSD__) || defined(__NetBSD__)
     bsd_close(cap);
+#else
+    stub_close(cap);
 #endif
     filter_free(cap->filter);
     free(cap);
