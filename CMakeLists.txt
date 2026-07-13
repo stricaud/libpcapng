@@ -37,7 +37,14 @@ install(FILES "${libpcapng_BINARY_DIR}/libpcapng.pc" DESTINATION "${CMAKE_INSTAL
 
 include_directories(AFTER ${libpcapng_SOURCE_DIR}/lib/include)
 
-option(LIBPCAPNG_BINDINGS "Build the Python (pybind11) bindings" ON)
+# The Python bindings need pybind11 at configure time; the Windows packaging
+# build only wants the C library, so default them off there.
+if(WIN32)
+  set(_bindings_default OFF)
+else()
+  set(_bindings_default ON)
+endif()
+option(LIBPCAPNG_BINDINGS "Build the Python (pybind11) bindings" ${_bindings_default})
 if(LIBPCAPNG_BINDINGS)
   find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
   set(PYBIND11_FINDPYTHON ON)

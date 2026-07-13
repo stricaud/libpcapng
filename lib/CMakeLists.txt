@@ -77,6 +77,14 @@ set(CMAKE_INSTALL_RPATH "@rpath")
 add_library(pcapng_static STATIC ${LIBPCAPNG_SOURCES})
 set_target_properties(pcapng_static PROPERTIES SOVERSION 1 POSITION_INDEPENDENT_CODE ON)
 
+if(WIN32)
+  # ntohs/inet_ntop & friends live in ws2_32 (see win_compat.h). Exporting all
+  # symbols spares us __declspec(dllexport) annotations on the whole public API.
+  target_link_libraries(pcapng PRIVATE ws2_32)
+  target_link_libraries(pcapng_static PRIVATE ws2_32)
+  set_target_properties(pcapng PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 install(TARGETS pcapng LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT Libraries)
 install(TARGETS pcapng_static LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT Libraries)
 # Install the header tree preserving the protocols/ subdirectory, so consumers
