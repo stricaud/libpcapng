@@ -37,9 +37,12 @@ install(FILES "${libpcapng_BINARY_DIR}/libpcapng.pc" DESTINATION "${CMAKE_INSTAL
 
 include_directories(AFTER ${libpcapng_SOURCE_DIR}/lib/include)
 
-find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
-set(PYBIND11_FINDPYTHON ON)
-find_package(pybind11 CONFIG REQUIRED)
+option(LIBPCAPNG_BINDINGS "Build the Python (pybind11) bindings" ON)
+if(LIBPCAPNG_BINDINGS)
+  find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+  set(PYBIND11_FINDPYTHON ON)
+  find_package(pybind11 CONFIG REQUIRED)
+endif()
 
 # <pybind11>
 # execute_process (
@@ -73,5 +76,7 @@ add_definitions(-g)
 
 add_subdirectory(lib)
 add_subdirectory(bin)
-add_subdirectory(bindings)
+if(LIBPCAPNG_BINDINGS)
+  add_subdirectory(bindings)
+endif()
 
