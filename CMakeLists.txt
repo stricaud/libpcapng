@@ -64,12 +64,11 @@ endif()
 # endif()
 
 set(LIBPCAPNG_INCLUDE_DIRS "${libpcapng_SOURCE_DIR}/lib/include/")
-if (LINUX)
-  set(LIBPCAPNG_LIBRARY "${libpcapng_BINARY_DIR}/lib/libpcapng.so")
-endif()
+# Link by target name: a raw path would give make no pcapng -> consumer edge,
+# so parallel builds can start lib/tests before the library exists.
+set(LIBPCAPNG_LIBRARY pcapng)
 if (APPLE)
   set(CMAKE_MACOSX_RPATH ON)
-  set(LIBPCAPNG_LIBRARY "${libpcapng_BINARY_DIR}/lib/libpcapng.dylib")
 endif()
 
 add_definitions(-g)
