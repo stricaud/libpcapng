@@ -681,16 +681,39 @@ int PcapNG::foreach_packet_cb(uint32_t block_counter, uint32_t block_type, uint3
 {
   py::object cb_func = *(py::object *)userdata;
 
+  if (block_type == PCAPNG_ENHANCED_PACKET_BLOCK) {
+    /*
+     * EPB body (after block_type + block_total_length):
+     *   interface_id(4) ts_high(4) ts_low(4) cap_len(4) orig_len(4) pkt_data cap_len bytes
+     *
+     * Pass the full EPB light struct + exact cap_len payload bytes to Python.
+     * interface_id is included so callers can dispatch on the correct interface linktype.
+     * Using captured_packet_length directly avoids libpcapng_padded_count, which
+     * incorrectly strips payload bytes whose values happen to be 0x00.
+     */
+    pcapng_enhanced_packet_block_light_t *epb = (pcapng_enhanced_packet_block_light_t *)data;
+    uint32_t payload_size = (uint32_t)sizeof(*epb) + epb->captured_packet_length;
+    cb_func(block_counter, block_type, block_total_length,
+            py::bytes((const char *)data, payload_size));
+    return 0;
+  }
+
+  if (block_type == PCAPNG_INTERFACE_DESCRIPTION_BLOCK) {
+    /*
+     * IDB body: linktype(2) reserved(2) snaplen(4) [options] trailing_btl(4)
+     * Pass just the fixed 8-byte struct so callers can read linktype at offset 0.
+     */
+    cb_func(block_counter, block_type, block_total_length,
+            py::bytes((const char *)data, sizeof(pcapng_interface_description_block_light_t)));
+    return 0;
+  }
+
+  // For other block types (SHB, CDB, …) use the generic CDB-based extraction.
   uint32_t start_offset = libpcapng_custom_data_block_start_offset();
   uint32_t data_length = libpcapng_custom_data_block_data_length(block_total_length);
-  
   int padded = libpcapng_padded_count(&data[start_offset], data_length);
-
-  // The function sometimes cut the last }
-  
-  // FIXME: We just send the data but we will need to make this an object where we can retrieve the pen etc.
-  cb_func(block_counter, block_type, block_total_length, py::bytes((const char *)&data[start_offset],
-								   data_length - padded));
+  cb_func(block_counter, block_type, block_total_length,
+          py::bytes((const char *)&data[start_offset], data_length - padded));
 
   return 0;
 }
@@ -698,6 +721,13 @@ int PcapNG::foreach_packet_cb(uint32_t block_counter, uint32_t block_type, uint3
 int PcapNG::ForeachPacket(const py::object &func)
 {
   return libpcapng_fp_read(_fp, foreach_packet_cb, (void *)&func);
+}
+
+int PcapNG::ForeachMem(py::bytes data, const py::object &func)
+{
+  std::string s = data;
+  return libpcapng_mem_read((unsigned char *)s.data(), s.size(),
+                            foreach_packet_cb, (void *)&func);
 }
 
 /* ── RDP helpers ────────────────────────────────────────────────────────── */
@@ -1093,6 +1123,8 @@ PYBIND11_MODULE(pycapng, m) {
       .def("BuildTlsApplicationData", &PcapNG::BuildTlsApplicationData)
       .def("WritePacketTime", &PcapNG::WritePacketTime)
       .def("ForeachPacket", &PcapNG::ForeachPacket)
+      .def("ForeachMem", &PcapNG::ForeachMem,
+           "Parse pcap or pcapng bytes from memory and call func(idx, block_type, block_len, data) for each block.")
       /* RDP packet builders */
       .def("BuildRdpConnectionRequest", &PcapNG::BuildRdpConnectionRequest,
            py::arg("src_mac"), py::arg("dst_mac"),
