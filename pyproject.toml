@@ -20,7 +20,7 @@ build-backend = "scikit_build_core.build"
 name = "pycapng"
 dynamic = ["version"]
 description = "Python bindings for libpcapng — read/write pcapng files and live packet capture"
-readme = "README.md"
+readme = "README-pypi.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Seb Tricaud", email = "sebastien.tricaud@proton.me" }]

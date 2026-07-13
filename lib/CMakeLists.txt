@@ -32,6 +32,7 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/capture.h
   include/libpcapng/dissect.h
   include/libpcapng/objects.h
+  include/libpcapng/posa.h
 )
 
 set(LIBPCAPNG_SOURCES
@@ -61,6 +62,7 @@ set(LIBPCAPNG_SOURCES
   capture.c
   dissect.c
   objects.c
+  posa.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})
@@ -77,7 +79,11 @@ set_target_properties(pcapng_static PROPERTIES SOVERSION 1 POSITION_INDEPENDENT_
 
 install(TARGETS pcapng LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT Libraries)
 install(TARGETS pcapng_static LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT Libraries)
-install(FILES ${LIBPCAPNG_HEADERS} DESTINATION include/libpcapng COMPONENT Headers)
+# Install the header tree preserving the protocols/ subdirectory, so consumers
+# that include the umbrella <libpcapng/libpcapng.h> (which pulls protocols/*.h)
+# build against an installed copy.
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/libpcapng
+        DESTINATION include COMPONENT Headers FILES_MATCHING PATTERN "*.h")
 
 add_subdirectory(tests)
 

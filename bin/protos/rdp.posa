@@ -1,0 +1,50 @@
+# rdp.posa — Remote Desktop Protocol over TPKT / ISO-8073 (COTP), fully in posa.
+# Demonstrates the extended grammar: layered sub-protocols, length scopes,
+# conditional layout, a delimiter field, a derived Info string, and a port rule.
+
+protocol TPKT
+    col "RDP"
+    abbrev "rdp"
+    required uint8  version
+    required uint8  reserved
+    required uint16 length
+    layer   cotp    COTP
+
+protocol COTP
+    abbrev "cotp"
+    required uint8  li
+    required uint8  pdu_type
+        CR = 0xe0
+        CC = 0xd0
+        DT = 0xf0
+    scope   li
+        when pdu_type & 0xf0 == 0xe0:
+            required uint16 dst_ref
+            required uint16 src_ref
+            required uint8  class
+            layer neg RDP_NEGOTIATION
+        when pdu_type & 0xf0 == 0xd0:
+            required uint16 dst_ref
+            required uint16 src_ref
+            required uint8  class
+            layer neg RDP_NEGOTIATION
+        when pdu_type & 0xf0 == 0xf0:
+            required uint8  eot
+    info "COTP %s" pdu_type
+
+protocol RDP_NEGOTIATION
+    abbrev "rdp"
+    optional string cookie until "\r\n"
+    when remaining >= 8:
+        required uint8 type
+            Request  = 1
+            Response = 2
+            Failure  = 3
+        required uint8     flags
+        required le_uint16 length
+        required le_uint32 protocols
+            TLS     = 0x1
+            CredSSP = 0x3
+    info "%s Negotiate %s" cookie, type
+
+rule tcp.port == 3389 => TPKT

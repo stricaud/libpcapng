@@ -15,6 +15,7 @@
 #include <libpcapng/protocols/ntp.h>   /* struct libpcapng_ntp_hdr (wire layout)   */
 #include <libpcapng/protocols/bootp.h> /* struct libpcapng_bootp_hdr (DHCP/BOOTP)  */
 #include <libpcapng/protocols/ssl.h>   /* TLS_CONTENT_*, TLS_VERSION_* constants    */
+#include <libpcapng/posa.h>            /* declarative decoders (e.g. bundled RDP)   */
 
 /* LINKTYPE_* aliases so the ported dissector body is unchanged. */
 #define LINKTYPE_NULL      PCAPNG_LINKTYPE_NULL
@@ -147,6 +148,81 @@ static void set_src(dctx_t *c, const char *s)
 static void set_dst(dctx_t *c, const char *s)
 { if (c->sum) snprintf(c->sum->dst, sizeof c->sum->dst, "%s", s); }
 
+/* ── bundled declarative decoders (posa) ─────────────────────────────────────
+ * RDP is described entirely in posa (rdp.posa) rather than hand-written C. The
+ * source is embedded so the decoder ships with the library and binds itself to
+ * TCP/3389 via its `rule` line. Additional protocols can be added the same way. */
+static const char POSA_BUILTIN_RDP[] =
+  "protocol TPKT\n"
+  "    col \"RDP\"\n"
+  "    abbrev \"rdp\"\n"
+  "    required uint8  version\n"
+  "    required uint8  reserved\n"
+  "    required uint16 length\n"
+  "    layer   cotp    COTP\n"
+  "protocol COTP\n"
+  "    abbrev \"cotp\"\n"
+  "    required uint8  li\n"
+  "    required uint8  pdu_type\n"
+  "        CR = 0xe0\n"
+  "        CC = 0xd0\n"
+  "        DT = 0xf0\n"
+  "    scope   li\n"
+  "        when pdu_type & 0xf0 == 0xe0:\n"
+  "            required uint16 dst_ref\n"
+  "            required uint16 src_ref\n"
+  "            required uint8  class\n"
+  "            layer neg RDP_NEGOTIATION\n"
+  "        when pdu_type & 0xf0 == 0xd0:\n"
+  "            required uint16 dst_ref\n"
+  "            required uint16 src_ref\n"
+  "            required uint8  class\n"
+  "            layer neg RDP_NEGOTIATION\n"
+  "        when pdu_type & 0xf0 == 0xf0:\n"
+  "            required uint8  eot\n"
+  "    info \"COTP %s\" pdu_type\n"
+  "protocol RDP_NEGOTIATION\n"
+  "    abbrev \"rdp\"\n"
+  "    optional string cookie until \"\\r\\n\"\n"
+  "    when remaining >= 8:\n"
+  "        required uint8 type\n"
+  "            Request  = 1\n"
+  "            Response = 2\n"
+  "            Failure  = 3\n"
+  "        required uint8     flags\n"
+  "        required le_uint16 length\n"
+  "        required le_uint32 protocols\n"
+  "            TLS     = 0x1\n"
+  "            CredSSP = 0x3\n"
+  "    info \"%s Negotiate %s\" cookie, type\n"
+  "rule tcp.port == 3389 => TPKT\n";
+
+static int g_posa_builtin_loaded;
+static void posa_ensure_builtin(void)
+{
+  if (g_posa_builtin_loaded) return;
+  g_posa_builtin_loaded = 1;
+  pcapng_posa_load_text(POSA_BUILTIN_RDP, NULL, 0);
+}
+
+/* Apply a posa decoder bound (by a rule) to this transport port, if any.
+   Returns 1 when a decoder handled the payload. */
+static int try_posa_app(dctx_t *c, uint16_t sp, uint16_t dp, int ipproto,
+                        const uint8_t *pl, int pll, pcapng_field_t *root)
+{
+  const char *proto = pcapng_posa_bound_port(ipproto, dp);
+  const pcapng_posa_proto_t *pp;
+  char info[192] = "";
+  if (!proto) proto = pcapng_posa_bound_port(ipproto, sp);
+  if (!proto || pll <= 0) return 0;
+  pcapng_posa_dissect(proto, pl, pll, root, c->base ? (int)(pl - c->base) : 0, info, sizeof info);
+  pp = pcapng_posa_find(proto);
+  set_proto(c, (pp && pp->display[0]) ? pp->display : proto);
+  { char *ip = info; while (*ip == ' ') ip++;      /* trim leading pad from empty args */
+    if (*ip) set_info(c, "%s", ip); }
+  return 1;
+}
+
 /* forward decls */
 static void dissect_l3(dctx_t *c, uint16_t ethertype, const uint8_t *d, int len, pcapng_field_t *root);
 static void dissect_ipv4(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root);
@@ -166,7 +242,6 @@ static void dissect_nbns(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
 static void dissect_tls (dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root);
 static void dissect_ssh (dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root);
 static void dissect_http(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root);
-static void dissect_rdp (dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root);
 static void dissect_quic(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root);
 static void dissect_data(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root);
 static void dissect_text(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root,
@@ -508,6 +583,7 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     const uint8_t *pl = d + doff;
     int pll = len - doff;
     if (pll <= 0) return;
+    if (try_posa_app(c, sp, dp, 6, pl, pll, root)) return;   /* posa-bound (e.g. RDP) */
 #define TP(x) (sp == (x) || dp == (x))
     if      (TP(80) || TP(8080) || TP(8000) || TP(8888) || TP(3128))
                                      dissect_http(c, pl, pll, root);
@@ -520,7 +596,6 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     else if (TP(23))                 dissect_text(c, pl, pll, root, "telnet", "Telnet");
     else if (TP(6667))               dissect_text(c, pl, pll, root, "irc", "IRC");
     else if (TP(6379))               dissect_text(c, pl, pll, root, "redis", "Redis");
-    else if (TP(3389))               dissect_rdp(c, pl, pll, root);
     else if (TP(53) && pll > 2)      dissect_dns(c, pl + 2, pll - 2, root, "dns"); /* TCP DNS: 2-byte len prefix */
     else if (pll > 0)                dissect_data(c, pl, pll, root);  /* undissected payload */
 #undef TP
@@ -557,6 +632,7 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     const uint8_t *pl = d + 8;
     int pll = len - 8;
     if (pll <= 0) return;
+    if (try_posa_app(c, sp, dp, 17, pl, pll, root)) return;   /* posa-bound (by rule) */
 #define UP(x) (sp == (x) || dp == (x))
     if      (UP(53))                 dissect_dns(c, pl, pll, root, "dns");
     else if (UP(5353))               dissect_dns(c, pl, pll, root, "mdns");
@@ -1124,23 +1200,6 @@ static void dissect_radius(dctx_t *c, const uint8_t *d, int len, pcapng_field_t 
   set_info(c, "%s id=%u", radius_code(d[0]), d[1]);
 }
 
-/* ── RDP (TPKT/X.224 envelope detection) ────────────────────────────────── */
-static void dissect_rdp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root)
-{
-  pcapng_field_t *r, *f;
-  r = pf_add(root, "rdp", PCAPNG_FT_NONE);
-  pf_set_label(r, "Remote Desktop Protocol");
-  set_proto(c, "RDP");
-  if (len >= 4 && d[0] == 3 && d[1] == 0) {       /* TPKT header */
-    uint16_t tl = be16(d + 2);
-    f = pf_add(r, "tpkt.length", PCAPNG_FT_UINT); pf_set_uint(f, tl);
-    pf_set_label(f, "TPKT Length: %u", tl);
-    set_info(c, "TPKT len=%u", tl);
-  } else {
-    set_info(c, "RDP");
-  }
-}
-
 /* ── QUIC (IETF; headers only — payload is encrypted) ───────────────────── */
 static const char *quic_lpt(uint8_t t)
 {
@@ -1208,6 +1267,7 @@ static pcapng_field_t *do_dissect(const uint8_t *data, uint32_t caplen, uint32_t
   pcapng_field_t *root = pf_new("", PCAPNG_FT_NONE);
   const uint8_t *d = data;
   int len = (int)caplen;
+  posa_ensure_builtin();           /* load bundled posa decoders (RDP, …) once */
   c.sum = sum;
   c.base = data;
   if (!root) return NULL;
@@ -1274,7 +1334,7 @@ const char *const *pcapng_dissect_protocols(int *count)
     "frame","eth","vlan","ip","ipv6","arp","tcp","udp","icmp","icmpv6",
     "igmp","gre","dns","mdns","llmnr","nbns","ntp","dhcp","snmp","radius",
     "syslog","tls","ssh","http","ftp","smtp","pop","imap","telnet","irc",
-    "redis","rdp","quic","data"
+    "redis","quic","data"
   };
   if (count) *count = (int)(sizeof P / sizeof P[0]);
   return P;
