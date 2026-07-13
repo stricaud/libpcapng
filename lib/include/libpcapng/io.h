@@ -17,6 +17,7 @@ extern "C" {
 
   typedef int (*foreach_pcapng_block_cb)(uint32_t block_counter, uint32_t block_type, uint32_t block_total_length, unsigned char *data, void *userdata);
 
+int libpcapng_mem_read(unsigned char *buf, size_t buf_len, foreach_pcapng_block_cb pcapng_block_cb, void *userdata);
 int libpcapng_fp_read(FILE *fp, foreach_pcapng_block_cb pcapng_block_cb, void *userdata);
 int libpcapng_file_read(char *filename, foreach_pcapng_block_cb pcapng_block_cb, void *userdata);
 int libpcapng_file_read_debug(char *filename);

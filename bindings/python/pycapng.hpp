@@ -102,6 +102,7 @@ public:
   int WritePacketTime(py::bytes data, uint32_t timestamp);
   int WriteCustom(uint32_t pen, py::bytes data, const std::string &comment);
   int ForeachPacket(const py::object &func);
+  int ForeachMem(py::bytes data, const py::object &func);
 
   /* ── RDP ── */
   py::bytes BuildRdpConnectionRequest(const std::string &src_mac,
