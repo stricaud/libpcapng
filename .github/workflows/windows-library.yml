@@ -1,0 +1,118 @@
+name: windows library
+
+# Publishes libpcapng as a consumable Windows C library — the DLL, the MinGW
+# import library, a static lib and the headers — attached to the GitHub release.
+# (The wheels in release.yml are the Python story; this is the C one.)
+#
+# Live capture has no Windows backend: capture.c compiles its "unsupported
+# platform" stubs there, so the library is file-analysis only. See win_compat.h.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  windows-library:
+    name: windows-x86_64
+    runs-on: windows-latest
+    permissions:
+      contents: write          # to attach assets to the release
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          # libpcapng has no external dependencies — just a toolchain.
+          pacboy: toolchain:p cmake:p ninja:p
+          install: zip
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          # The Python bindings need pybind11 at configure time and are off by
+          # default on Windows; be explicit so this doesn't depend on that.
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIBPCAPNG_BINDINGS=OFF
+          cmake --build build --target pcapng pcapng_static -j "$(nproc)"
+
+      - name: Package
+        id: pkg
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$GITHUB_REF" in refs/tags/*) ;; *) VERSION="dev" ;; esac
+          NAME="libpcapng-$VERSION-windows-x86_64"
+          OUT="dist/$NAME"
+          mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/include"
+
+          cp build/lib/libpcapng.dll        "$OUT/bin/"
+          cp build/lib/libpcapng.dll.a      "$OUT/lib/"
+          cp build/lib/libpcapng_static.a   "$OUT/lib/" 2>/dev/null || true
+          cp -R lib/include/libpcapng       "$OUT/include/"
+
+          # Ship the MinGW runtime DLLs the library was linked against, so the
+          # zip works without an MSYS2 install. /c/Windows DLLs are the OS's.
+          ldd "$OUT/bin/libpcapng.dll" | awk '/=>/ {print $3}' | while read -r dll; do
+            [ -f "$dll" ] || continue
+            case "$(printf '%s' "$dll" | tr 'A-Z' 'a-z')" in /c/windows/*) continue ;; esac
+            cp -f "$dll" "$OUT/bin/"
+          done
+
+          cat > "$OUT/README.txt" <<'TXT'
+          libpcapng — Windows (MinGW-w64 / UCRT64) C library
+
+            include/   headers  — add to your include path
+            lib/       libpcapng.dll.a (import lib), libpcapng_static.a
+            bin/       libpcapng.dll + the MinGW runtime DLLs it needs
+
+          Link with -lpcapng -lws2_32 (the dissectors use ntohs/inet_ntop).
+
+          Built with MinGW-w64/UCRT64. The import library is ELF-style .dll.a for
+          GCC/Clang; MSVC users must generate a .lib from the DLL themselves.
+
+          Live capture is NOT supported on Windows — the capture API compiles to
+          stubs that fail cleanly. Reading and dissecting capture files works.
+          TXT
+
+          ( cd dist && zip -qr "$NAME.zip" "$NAME" )
+          echo "zip=dist/$NAME.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test the import library
+        run: |
+          # Link a real consumer against the packaged import lib + headers: this
+          # is what proves the zip is actually usable, not just that it built.
+          NAME="$(basename "${{ steps.pkg.outputs.zip }}" .zip)"
+          cat > /tmp/consumer.c <<'C'
+          #include <libpcapng/capture.h>
+          #include <stdio.h>
+          int main(void) {
+              char err[PCAPNG_CAPTURE_ERRBUF_SIZE] = {0};
+              int n = -1;
+              /* Windows has no capture backend: expect an empty device list and
+                 a clean error, not a crash. */
+              pcapng_capture_list_devices(&n, err);
+              printf("devices=%d err=%s\n", n, err);
+              return n == 0 ? 0 : 1;
+          }
+          C
+          gcc /tmp/consumer.c -o /tmp/consumer.exe \
+            -I"dist/$NAME/include" -L"dist/$NAME/lib" -lpcapng -lws2_32
+          cp dist/$NAME/bin/*.dll /tmp/
+          /tmp/consumer.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libpcapng-windows-x86_64
+          path: ${{ steps.pkg.outputs.zip }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pkg.outputs.zip }}
