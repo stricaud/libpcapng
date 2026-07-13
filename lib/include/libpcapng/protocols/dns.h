@@ -1,12 +1,15 @@
 #ifndef _LIBPCAPNG_DNS_H_
 #define _LIBPCAPNG_DNS_H_
 
+
+#include <libpcapng/packed.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+PCAPNG_PACK_PUSH
 struct libpcapng_dns_hdr {
     uint16_t id;
     uint16_t flags;
@@ -14,7 +17,8 @@ struct libpcapng_dns_hdr {
     uint16_t ancount;
     uint16_t nscount;
     uint16_t arcount;
-} __attribute__((packed));
+} PCAPNG_PACKED;
+PCAPNG_PACK_POP
 
 void libpcapng_fill_dns_header(struct libpcapng_dns_hdr *dns, uint16_t id, int qr, int opcode, int aa, int tc, int rd, int ra, int rcode, uint16_t qdcount, uint16_t ancount, uint16_t nscount, uint16_t arcount);
 size_t libpcapng_dns_encode_qname(const char *name, uint8_t *out, size_t max_len);

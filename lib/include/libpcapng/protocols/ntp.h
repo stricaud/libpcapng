@@ -1,6 +1,8 @@
 #ifndef _LIBPCAPNG_NTP_H_
 #define _LIBPCAPNG_NTP_H_
 
+
+#include <libpcapng/packed.h>
 #include <stdint.h>
 
 #include "ipv4.h"
@@ -9,6 +11,7 @@
 extern "C" {
 #endif
 
+PCAPNG_PACK_PUSH
 struct libpcapng_ntp_hdr {
     uint8_t li_vn_mode;   // Leap Indicator + Version + Mode
     uint8_t stratum;
@@ -25,7 +28,8 @@ struct libpcapng_ntp_hdr {
     uint32_t recv_timestamp_frac;
     uint32_t tx_timestamp_secs;
     uint32_t tx_timestamp_frac;
-} __attribute__((packed));
+} PCAPNG_PACKED;
+PCAPNG_PACK_POP
 
 void libpcapng_build_ntp_request(const uint8_t src_mac[6],
 				 const uint8_t dst_mac[6],

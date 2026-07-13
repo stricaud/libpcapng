@@ -63,6 +63,7 @@ set(LIBPCAPNG_SOURCES
   dissect.c
   objects.c
   posa.c
+  wire_layout.c
  )
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})

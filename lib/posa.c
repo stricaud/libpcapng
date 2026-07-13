@@ -12,7 +12,12 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
-#include <dirent.h>
+#ifdef _WIN32
+/* MinGW gets the real <dirent.h> through this; MSVC gets a minimal shim. */
+#  include <libpcapng/win_compat.h>
+#else
+#  include <dirent.h>
+#endif
 
 /* ── registry ────────────────────────────────────────────────────────────── */
 #define MAX_PROTOS 512

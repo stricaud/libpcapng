@@ -1,6 +1,8 @@
 #ifndef _LIBPCAPNG_RDP_H_
 #define _LIBPCAPNG_RDP_H_
 
+
+#include <libpcapng/packed.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -75,11 +77,12 @@ extern "C" {
 
 /* ── Wire structs ──────────────────────────────────────────────────────── */
 
+PCAPNG_PACK_PUSH
 struct libpcapng_tpkt_hdr {
     uint8_t  version;   /* 0x03 */
     uint8_t  reserved;  /* 0x00 */
     uint16_t length;    /* total length including this header, big-endian */
-} __attribute__((packed));
+} PCAPNG_PACKED;
 
 struct libpcapng_x224_cr_hdr {
     uint8_t  li;        /* length indicator */
@@ -87,7 +90,7 @@ struct libpcapng_x224_cr_hdr {
     uint16_t dst_ref;
     uint16_t src_ref;
     uint8_t  class_opt;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 
 struct libpcapng_x224_cc_hdr {
     uint8_t  li;
@@ -95,27 +98,28 @@ struct libpcapng_x224_cc_hdr {
     uint16_t dst_ref;
     uint16_t src_ref;
     uint8_t  class_opt;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 
 struct libpcapng_x224_dt_hdr {
     uint8_t li;         /* 0x02 */
     uint8_t type;       /* 0xF0 = DT */
     uint8_t eot;        /* 0x80 */
-} __attribute__((packed));
+} PCAPNG_PACKED;
 
 struct libpcapng_rdp_neg_req {
     uint8_t  type;      /* 0x01 */
     uint8_t  flags;
     uint16_t length;    /* 0x0008 LE */
     uint32_t protocols; /* RDP_PROTO_* */
-} __attribute__((packed));
+} PCAPNG_PACKED;
 
 struct libpcapng_rdp_neg_rsp {
     uint8_t  type;      /* 0x02 */
     uint8_t  flags;
     uint16_t length;    /* 0x0008 LE */
     uint32_t protocol;
-} __attribute__((packed));
+} PCAPNG_PACKED;
+PCAPNG_PACK_POP
 
 /* ── Configuration with defaults ───────────────────────────────────────── */
 

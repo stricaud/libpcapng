@@ -6,6 +6,8 @@
 #ifndef _LIBPCAPNG_BLOCKS_H_
 #define _LIBPCAPNG_BLOCKS_H_
 
+
+#include <libpcapng/packed.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -149,16 +151,17 @@ typedef struct {
     const void *value;
 } pcapng_option_t;
 
+PCAPNG_PACK_PUSH
 struct _pcapng_custom_data_block_t {
 	uint32_t block_type;
 	uint32_t block_total_length;
 	uint32_t pen;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_custom_data_block_t pcapng_custom_data_block_t;
 
 struct _pcapng_custom_data_block_light_t {
 	uint32_t pen;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_custom_data_block_light_t pcapng_custom_data_block_light_t;
 
 struct _pcapng_section_header_block_t {
@@ -168,7 +171,7 @@ struct _pcapng_section_header_block_t {
 	uint16_t major_version;
 	uint16_t minor_version;
 	uint64_t section_length;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_section_header_block_t pcapng_section_header_block_t;
 
 struct _pcapng_section_header_block_light_t {
@@ -176,7 +179,7 @@ struct _pcapng_section_header_block_light_t {
 	uint16_t major_version;
 	uint16_t minor_version;
 	uint64_t section_length;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_section_header_block_light_t pcapng_section_header_block_light_t;
 
 struct _pcapng_interface_description_block_t {
@@ -185,14 +188,14 @@ struct _pcapng_interface_description_block_t {
 	uint16_t linktype;
 	uint16_t reserved;
 	uint32_t snaplen;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_interface_description_block_t pcapng_interface_description_block_t;
 
 struct _pcapng_interface_description_block_light_t {
 	uint16_t linktype;
 	uint16_t reserved;
 	uint32_t snaplen;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_interface_description_block_light_t pcapng_interface_description_block_light_t;
 
 struct _pcapng_enhanced_packet_block_t {
@@ -203,7 +206,7 @@ struct _pcapng_enhanced_packet_block_t {
 	uint32_t timestamp_low;
 	uint32_t captured_packet_length;
 	uint32_t original_packet_length;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_enhanced_packet_block_t pcapng_enhanced_packet_block_t;
 
 struct _pcapng_enhanced_packet_block_light_t {
@@ -212,7 +215,7 @@ struct _pcapng_enhanced_packet_block_light_t {
 	uint32_t timestamp_low;
 	uint32_t captured_packet_length;
 	uint32_t original_packet_length;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_enhanced_packet_block_light_t pcapng_enhanced_packet_block_light_t;
 
 /* Simple Packet Block (spec §4.4) */
@@ -220,21 +223,21 @@ struct _pcapng_simple_packet_block_t {
     uint32_t block_type;
     uint32_t block_total_length;
     uint32_t original_packet_length;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_simple_packet_block_t pcapng_simple_packet_block_t;
 
 /* Name Resolution Block (spec §4.5) */
 struct _pcapng_name_resolution_block_t {
     uint32_t block_type;
     uint32_t block_total_length;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_name_resolution_block_t pcapng_name_resolution_block_t;
 
 /* NRB record header (type + length precede each record) */
 struct _pcapng_nrb_record_t {
     uint16_t record_type;
     uint16_t record_length;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_nrb_record_t pcapng_nrb_record_t;
 
 /* Interface Statistics Block (spec §4.6) */
@@ -244,7 +247,7 @@ struct _pcapng_interface_statistics_block_t {
     uint32_t interface_id;
     uint32_t timestamp_high;
     uint32_t timestamp_low;
-} __attribute__((packed));
+} PCAPNG_PACKED;
 typedef struct _pcapng_interface_statistics_block_t pcapng_interface_statistics_block_t;
 
 /* Decryption Secrets Block (spec §4.7) */
@@ -253,7 +256,8 @@ struct _pcapng_decryption_secrets_block_t {
     uint32_t block_total_length;
     uint32_t secrets_type;
     uint32_t secrets_length;
-} __attribute__((packed));
+} PCAPNG_PACKED;
+PCAPNG_PACK_POP
 typedef struct _pcapng_decryption_secrets_block_t pcapng_decryption_secrets_block_t;
 
 /* ── Options helpers ─────────────────────────────────────────────────────── */

@@ -34,6 +34,11 @@ jobs:
           - { name: linux-x86_64,  runner: ubuntu-latest,    archs: x86_64  }
           - { name: linux-aarch64, runner: ubuntu-24.04-arm, archs: aarch64 }
           - { name: macos-arm64,   runner: macos-14,         archs: arm64   }
+          # Windows builds with MSVC (not MinGW): the wire structs are packed via
+          # #pragma pack and lib/wire_layout.c asserts every sizeof, so a packing
+          # mismatch fails the build rather than silently misparsing. Live capture
+          # compiles to stubs — the wheel is file-analysis only there.
+          - { name: win-amd64,     runner: windows-latest,   archs: AMD64   }
 
     steps:
       - uses: actions/checkout@v4

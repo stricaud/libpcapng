@@ -30,6 +30,7 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3",
   "Programming Language :: C++",
   "Topic :: System :: Networking :: Monitoring",
@@ -88,8 +89,13 @@ fallback_version = "0.0.0.dev0"
 [tool.cibuildwheel]
 build-frontend  = "build"
 build-verbosity = 1
-# Skip PyPy (ABI mismatch), musl/32-bit (out of scope), Windows (no BPF/TPACKET).
-skip = ["pp*", "*-musllinux*", "*_i686", "*-win*"]
+# Skip PyPy (ABI mismatch) and musl/32-bit (out of scope).
+#
+# Windows IS built now. It used to be skipped for "no BPF/TPACKET", but live
+# capture no longer blocks the port: capture.c compiles its unsupported-platform
+# stubs there, so the wheel reads and dissects capture files and the capture API
+# fails cleanly instead of not compiling. See lib/include/libpcapng/win_compat.h.
+skip = ["pp*", "*-musllinux*", "*_i686", "*-win32"]
 # Smoke test: import must succeed on every wheel.
 test-command = "python -c \"import pycapng; print('pycapng', pycapng.__doc__[:20] if pycapng.__doc__ else 'ok')\""
 

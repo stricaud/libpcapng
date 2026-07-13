@@ -1,6 +1,8 @@
 #ifndef _LIBPCAPNG_TCP_H_
 #define _LIBPCAPNG_TCP_H_
 
+
+#include <libpcapng/packed.h>
 #include <stdint.h>
 
 #include "ipv4.h"
@@ -9,6 +11,7 @@
 extern "C" {
 #endif
 
+PCAPNG_PACK_PUSH
 struct tcp_hdr {
     uint16_t sport;
     uint16_t dport;
@@ -42,7 +45,8 @@ struct tcp_hdr {
     uint16_t window;
     uint16_t checksum;
     uint16_t urg_ptr;
-} __attribute__((packed));
+} PCAPNG_PACKED;
+PCAPNG_PACK_POP
 
 void libpcapng_fill_tcp_header(struct tcp_hdr *tcp, uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ack, uint8_t flags, uint16_t window);
 uint16_t libpcapng_tcp_checksum(const struct libpcapng_ipv4_hdr *ip, const struct tcp_hdr *tcp, const uint8_t *payload, size_t payload_len);

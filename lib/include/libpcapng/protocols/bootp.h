@@ -1,6 +1,8 @@
 #ifndef _LIBPCAPNG_BOOTP_H_
 #define _LIBPCAPNG_BOOTP_H_
 
+
+#include <libpcapng/packed.h>
 #include <stdint.h>
 
 #include "ipv4.h"
@@ -11,6 +13,7 @@ extern "C" {
 
 #define BOOTP_HDR_LEN 236a
   
+PCAPNG_PACK_PUSH
 struct libpcapng_bootp_hdr {
     uint8_t  op;        // 1=request, 2=reply
     uint8_t  htype;     // hardware type (1 = Ethernet)
@@ -27,7 +30,8 @@ struct libpcapng_bootp_hdr {
     uint8_t  sname[64];
     uint8_t  file[128];
     uint8_t  options[]; // DHCP options follow
-} __attribute__((packed));
+} PCAPNG_PACKED;
+PCAPNG_PACK_POP
   
 #ifdef __cplusplus
 }

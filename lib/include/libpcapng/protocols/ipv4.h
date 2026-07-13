@@ -1,12 +1,15 @@
 #ifndef _LIBPCAPNG_IPV4_H_
 #define _LIBPCAPNG_IPV4_H_
 
+
+#include <libpcapng/packed.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+PCAPNG_PACK_PUSH
 struct libpcapng_ipv4_hdr {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
     uint8_t ihl:4;
@@ -26,7 +29,8 @@ struct libpcapng_ipv4_hdr {
     uint16_t checksum;
     uint32_t saddr;
     uint32_t daddr;
-} __attribute__((packed));
+} PCAPNG_PACKED;
+PCAPNG_PACK_POP
 
 uint16_t libpcapng_ip_checksum(void *vdata, size_t length);
 uint32_t libpcapng_ipv4_to_host_order(const char *ipstr);

@@ -3,7 +3,12 @@
  * Copyright (c) 2021 Devo Inc.
  * Copyright (c) 2022 Sebastien Tricaud
  */
-#include <sys/time.h>
+#ifdef _WIN32
+/* MinGW gets the real <sys/time.h> through this; MSVC gets a gettimeofday shim. */
+#  include <libpcapng/win_compat.h>
+#else
+#  include <sys/time.h>
+#endif
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
