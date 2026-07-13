@@ -708,6 +708,24 @@ int PcapNG::foreach_packet_cb(uint32_t block_counter, uint32_t block_type, uint3
     return 0;
   }
 
+  if (block_type == PCAPNG_SIMPLE_PACKET_BLOCK) {
+    /*
+     * SPB body: orig_len(4) + pkt_data(min(orig_len, block_total_length-16) bytes, padded)
+     *
+     * Pass orig_len(4) + exact captured bytes (no padding) to Python.
+     * Using the block size avoids libpcapng_padded_count, which incorrectly
+     * strips payload bytes whose values happen to be 0x00.
+     */
+    if (block_total_length < 16) return 0;
+    uint32_t orig_len;
+    memcpy(&orig_len, data, 4);
+    uint32_t captured = block_total_length - 16;
+    uint32_t pkt_len = (orig_len < captured) ? orig_len : captured;
+    cb_func(block_counter, block_type, block_total_length,
+            py::bytes((const char *)data, 4 + pkt_len));
+    return 0;
+  }
+
   // For other block types (SHB, CDB, …) use the generic CDB-based extraction.
   uint32_t start_offset = libpcapng_custom_data_block_start_offset();
   uint32_t data_length = libpcapng_custom_data_block_data_length(block_total_length);

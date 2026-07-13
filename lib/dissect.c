@@ -10,7 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <arpa/inet.h>
+#ifdef _WIN32
+#  include <libpcapng/win_compat.h>
+#else
+#  include <arpa/inet.h>
+#endif
 
 #include <libpcapng/protocols/ntp.h>   /* struct libpcapng_ntp_hdr (wire layout)   */
 #include <libpcapng/protocols/bootp.h> /* struct libpcapng_bootp_hdr (DHCP/BOOTP)  */

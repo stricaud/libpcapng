@@ -24,16 +24,24 @@
 #include <time.h>
 
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <net/if.h>
-#include <ifaddrs.h>
-#include <poll.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
+
+/* Windows has no capture backend (see the platform stubs at the bottom of this
+   file), so it needs none of the POSIX socket/mmap machinery — only the byte
+   order + inet_ntop helpers the display-filter engine uses. */
+#ifdef _WIN32
+#  include <libpcapng/win_compat.h>
+#else
+#  include <sys/socket.h>
+#  include <sys/mman.h>
+#  include <sys/ioctl.h>
+#  include <net/if.h>
+#  include <ifaddrs.h>
+#  include <poll.h>
+#  include <unistd.h>
+#  include <fcntl.h>
+#  include <arpa/inet.h>
+#  include <netinet/in.h>
+#endif
 
 #if defined(__linux__)
 #  include <linux/if_packet.h>
@@ -725,6 +733,11 @@ struct pcapng_capture {
     int          fd;
     uint8_t     *bpf_buf;
     size_t       bpf_buf_size;
+#else
+    /* Unsupported platform (e.g. Windows): the stub backend never opens
+       anything, but the platform-independent layer still tests cap->fd to
+       decide whether to activate, so the member has to exist. */
+    int          fd;
 #endif
 };
 
@@ -734,17 +747,49 @@ static void sigint_handler(int sig) { (void)sig; g_sigint = 1; }
 
 static void install_sigint_handler(void)
 {
+#ifdef _WIN32
+    /* No sigaction on Windows; the CRT's signal() is enough to set the flag. */
+    signal(SIGINT, sigint_handler);
+#else
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = sigint_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     sigaction(SIGINT, &sa, NULL);
+#endif
 }
 
 /* ========================================================================
  * Device enumeration
  * ======================================================================== */
+
+#ifdef _WIN32
+
+/* Windows has no capture backend, so there is nothing to enumerate. Report the
+   empty list rather than a hard error: callers (carcal's interface chooser)
+   show the message and carry on with file-based analysis. */
+pcapng_device_t *pcapng_capture_list_devices(int *count, char *errbuf)
+{
+    if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                         "live capture not supported on this platform");
+    if (count) *count = 0;
+    return NULL;
+}
+
+void pcapng_capture_free_devices(pcapng_device_t *devs)
+{
+    free(devs);
+}
+
+const char *pcapng_capture_default_device(char *errbuf)
+{
+    if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                         "live capture not supported on this platform");
+    return NULL;
+}
+
+#else /* !_WIN32 */
 
 pcapng_device_t *pcapng_capture_list_devices(int *count, char *errbuf)
 {
@@ -817,6 +862,8 @@ const char *pcapng_capture_default_device(char *errbuf)
     return found;
 }
 
+#endif /* !_WIN32 */
+
 /* ========================================================================
  * Open / configure
  * ======================================================================== */
@@ -852,6 +899,8 @@ pcapng_capture_t *pcapng_capture_open(const char *device, char *errbuf)
     cap->fd      = -1;
     cap->bpf_buf = NULL;
     cap->bpf_buf_size = CAP_BPF_BUF_SIZE;
+#else
+    cap->fd      = -1;   /* stub backend: never opened, but tested before use */
 #endif
 
     return cap;

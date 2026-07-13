@@ -1,5 +1,9 @@
 #include <string.h>
-#include <arpa/inet.h>
+#ifdef _WIN32
+#  include <libpcapng/win_compat.h>
+#else
+#  include <arpa/inet.h>
+#endif
 #include <time.h>
 
 #include <libpcapng/protocols/udp.h>
