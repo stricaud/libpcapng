@@ -4,12 +4,12 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "libpcapng"
-version = "0.14"
+version = "0.15"
 description = "Convenience alias — installs pycapng, the Python bindings for libpcapng"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.8"
-dependencies = ["pycapng>=0.14"]
+dependencies = ["pycapng>=0.15"]
 
 [project.urls]
 Homepage = "https://github.com/stricaud/libpcapng"
