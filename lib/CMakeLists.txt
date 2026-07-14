@@ -94,5 +94,7 @@ install(TARGETS pcapng_static LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} C
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/libpcapng
         DESTINATION include COMPONENT Headers FILES_MATCHING PATTERN "*.h")
 
-add_subdirectory(tests)
+if(NOT WIN32)
+  add_subdirectory(tests)
+endif()
 
