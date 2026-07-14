@@ -315,11 +315,22 @@ int run_script(const char *path) {
 }
 
 int run_script_from_buffer(const char *src, size_t len) {
+#ifdef _WIN32
+    /* fmemopen is not available on Windows; write to a tmpfile instead. */
+    FILE *f = tmpfile();
+    if (!f) {
+        fprintf(stderr, CBRED "pcapsh: tmpfile failed: %s\n" CR, strerror(errno));
+        return 1;
+    }
+    fwrite(src, 1, len, f);
+    rewind(f);
+#else
     FILE *f = fmemopen((void *)src, len, "r");
     if (!f) {
         fprintf(stderr, CBRED "pcapsh: fmemopen failed: %s\n" CR, strerror(errno));
         return 1;
     }
+#endif
     run_script_f(f);
     fclose(f);
     return 0;
