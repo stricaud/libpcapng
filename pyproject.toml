@@ -45,6 +45,9 @@ Repository = "https://github.com/stricaud/libpcapng"
 [tool.scikit-build]
 # Use the repo-root CMakeLists.txt so bin/ and lib/ paths resolve correctly.
 cmake.source-dir = "."
+# On Windows the CMakeLists default is OFF (to allow C-only builds there).
+# Override that so the scikit-build wheel always compiles the Python bindings.
+cmake.args = ["-DLIBPCAPNG_BINDINGS=ON"]
 # Only package the "Python" CMake install component (the .so / .pyd file).
 # build.targets is intentionally omitted: VS generators look for <target>.vcxproj
 # at the build root, but pycapng.vcxproj lives in a subdirectory. Letting cmake
