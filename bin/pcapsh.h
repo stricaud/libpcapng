@@ -15,10 +15,26 @@
 #include <limits.h>
 #include <ctype.h>
 #include <errno.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <dirent.h>
+#ifdef _WIN32
+/* win_compat.h provides arpa/inet.h, dirent.h, gettimeofday, strcasecmp. */
+#  include <libpcapng/win_compat.h>
+#  include <sys/stat.h>
+#  include <io.h>           /* _access */
+#  ifndef F_OK
+#    define F_OK 0
+#  endif
+#  ifndef R_OK
+#    define R_OK 4
+#  endif
+#  ifndef access
+#    define access(p, m) _access((p), (m))
+#  endif
+#else
+#  include <arpa/inet.h>
+#  include <unistd.h>
+#  include <sys/stat.h>
+#  include <dirent.h>
+#endif
 
 #include "linenoise/linenoise.h"
 #include <libpcapng/libpcapng.h>

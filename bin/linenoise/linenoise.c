@@ -12,6 +12,29 @@
  * ARE DISCLAIMED. THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY DAMAGES.
  */
 
+#ifdef _WIN32
+/* linenoise uses POSIX terminal APIs (<termios.h>, <sys/ioctl.h>) that are
+ * not available on Windows/MSVC.  The Python bindings only use pcapsh in
+ * non-interactive (script/eval) mode, so no-op stubs are sufficient. */
+#include <stdlib.h>
+#include "linenoise.h"
+void linenoiseSetCompletionCallback(linenoiseCompletionCallback *f) { (void)f; }
+void linenoiseSetHintsCallback(linenoiseHintsCallback *f)           { (void)f; }
+void linenoiseSetFreeHintsCallback(linenoiseFreeHintsCallback *f)   { (void)f; }
+void linenoiseAddCompletion(linenoiseCompletions *lc, const char *s) { (void)lc; (void)s; }
+char *linenoise(const char *p)           { (void)p; return NULL; }
+void  linenoiseFree(void *ptr)           { free(ptr); }
+int   linenoiseHistoryAdd(const char *l) { (void)l; return 0; }
+int   linenoiseHistorySetMaxLen(int n)   { (void)n; return 0; }
+int   linenoiseHistorySave(const char *f){ (void)f; return 0; }
+int   linenoiseHistoryLoad(const char *f){ (void)f; return 0; }
+void  linenoiseClearScreen(void)         { }
+void  linenoiseSetMultiLine(int ml)      { (void)ml; }
+void  linenoisePrintKeyCodes(void)       { }
+void  linenoiseMaskModeEnable(void)      { }
+void  linenoiseMaskModeDisable(void)     { }
+#else /* !_WIN32 — POSIX implementation follows */
+
 #include <termios.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -653,3 +676,5 @@ int linenoiseHistoryLoad(const char *filename) {
     fclose(fp);
     return 0;
 }
+
+#endif /* !_WIN32 */

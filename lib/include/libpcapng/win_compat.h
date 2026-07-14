@@ -61,6 +61,18 @@
 #define strncasecmp(a, b, n) _strnicmp((a), (b), (n))
 #endif
 
+/* strcasestr is a GNU extension absent on MSVC. */
+#include <string.h>
+static __inline char *strcasestr(const char *hay, const char *needle) {
+    size_t nl = strlen(needle);
+    size_t hl = strlen(hay);
+    if (nl == 0) return (char *)hay;
+    if (nl > hl) return NULL;
+    for (const char *p = hay; p <= hay + hl - nl; p++)
+        if (_strnicmp(p, needle, nl) == 0) return (char *)p;
+    return NULL;
+}
+
 /* --- minimal <dirent.h> — posa.c only reads de->d_name --- */
 struct dirent { char d_name[MAX_PATH]; };
 
