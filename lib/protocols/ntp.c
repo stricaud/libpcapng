@@ -60,9 +60,15 @@ void libpcapng_build_ntp_reply(const uint8_t src_mac[6],
     ntp.orig_timestamp_frac = request->tx_timestamp_frac;
 
     // Server receive timestamp
+#ifdef _WIN32
+    /* clock_gettime(CLOCK_REALTIME) is not available on Windows; time(NULL)
+     * gives second-level precision which is sufficient for packet building. */
+    ntp.recv_timestamp_secs = htonl((uint32_t)time(NULL) + 2208988800UL);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    ntp.recv_timestamp_secs = htonl((uint32_t)ts.tv_sec + 2208988800UL); // UNIX -> NTP epoch
+    ntp.recv_timestamp_secs = htonl((uint32_t)ts.tv_sec + 2208988800UL);
+#endif
     ntp.recv_timestamp_frac = 0;
 
     // Server transmit timestamp (reply)

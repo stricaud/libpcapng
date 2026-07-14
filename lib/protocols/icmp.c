@@ -78,12 +78,15 @@ void libpcapng_icmp_packet_build(const uint8_t src_mac[6], const uint8_t dst_mac
     struct libpcapng_icmp_hdr icmp;
     libpcapng_fill_icmp_header(&icmp, icmp_type, icmp_code, identifier, sequence);
 
-    uint8_t icmp_buf[icmp_len];
-    memcpy(icmp_buf, &icmp, sizeof(icmp));
-    if (payload_len > 0)
-        memcpy(icmp_buf + sizeof(icmp), payload, payload_len);
-
-    icmp.checksum = libpcapng_icmp_checksum(icmp_buf, icmp_len);
+    /* MSVC does not support C99 VLAs; use heap allocation instead. */
+    uint8_t *icmp_buf = (uint8_t *)malloc(icmp_len);
+    if (icmp_buf) {
+        memcpy(icmp_buf, &icmp, sizeof(icmp));
+        if (payload_len > 0)
+            memcpy(icmp_buf + sizeof(icmp), payload, payload_len);
+        icmp.checksum = libpcapng_icmp_checksum(icmp_buf, icmp_len);
+        free(icmp_buf);
+    }
 
     memcpy(frame + offset, &icmp, sizeof(icmp));
     offset += sizeof(icmp);
