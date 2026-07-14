@@ -45,6 +45,7 @@ typedef enum {
   PCAPNG_POSA_LE16, PCAPNG_POSA_LE32, PCAPNG_POSA_LE64,
   PCAPNG_POSA_MAC, PCAPNG_POSA_IP4, PCAPNG_POSA_CSTRING, PCAPNG_POSA_PAYLOAD,
   PCAPNG_POSA_BYTES_FIXED,   /* bytes<N>          */
+  PCAPNG_POSA_STR_FIXED,     /* str<N> — fixed-length text (e.g. a PNG chunk type) */
   PCAPNG_POSA_BYTES_REF,     /* bytes[lenfield]   */
   PCAPNG_POSA_STR_DELIM,     /* string ... until "delim"   (extended) */
   PCAPNG_POSA_LAYER,         /* layer <name> <Proto>       (extended) */

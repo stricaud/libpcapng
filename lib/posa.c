@@ -246,6 +246,7 @@ static int parse_type(const char *tok, pcapng_posa_fld_t *f)
   else if (!strcmp(tok, "payload"))    f->type = PCAPNG_POSA_PAYLOAD;
   else if (!strcmp(tok, "dnsname"))    f->type = PCAPNG_POSA_DNSNAME;
   else if (!strncmp(tok, "bytes<", 6)) { f->type = PCAPNG_POSA_BYTES_FIXED; f->nbytes = (size_t)parse_num(tok + 6); }
+  else if (!strncmp(tok, "str<", 4))   { f->type = PCAPNG_POSA_STR_FIXED;   f->nbytes = (size_t)parse_num(tok + 4); }
   else if (!strncmp(tok, "bytes[", 6)) {
     const char *e = strchr(tok + 6, ']');
     f->type = PCAPNG_POSA_BYTES_REF;
@@ -714,6 +715,7 @@ static int fld_fixed_size(const pcapng_posa_fld_t *f)
   case PCAPNG_POSA_IP4: return 4;
   case PCAPNG_POSA_IP6: return 16;
   case PCAPNG_POSA_BYTES_FIXED: return (int)f->nbytes;
+  case PCAPNG_POSA_STR_FIXED: return (int)f->nbytes;
   default: return -1;   /* variable-length, or consumes nothing (bits/label) */
   }
 }
@@ -1070,6 +1072,22 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
         cf = pf_add(cur, ab, PCAPNG_FT_BYTES); pf_bytes(cf, data + off, sz);
         pf_label(cf, "%s: %d bytes", fld_disp(f), sz);
         seen_add(seen, &nseen, f->name, 0, 0, off, off + sz, ""); break;
+      case PCAPNG_POSA_STR_FIXED: {
+        /* fixed-length text: render printable ASCII for display, but ALSO expose
+           the bytes as a big-endian number in `seen` (for sz<=8), so a magic
+           held as text can drive a `when type == 0x49484452:` dispatch — this is
+           how a PNG chunk chooses its body by its 4-char type. */
+        char tmp[128]; int k, n = sz < (int)sizeof tmp - 1 ? sz : (int)sizeof tmp - 1;
+        uint64_t num = 0;
+        for (k = 0; k < n; k++) {
+          unsigned char ch = data[off + k];
+          tmp[k] = (ch >= 32 && ch < 127) ? (char)ch : '.';
+        }
+        tmp[n] = '\0';
+        for (k = 0; k < sz && k < 8; k++) num = (num << 8) | data[off + k];
+        cf = pf_add(cur, ab, PCAPNG_FT_STR); pf_str(cf, tmp);
+        pf_label(cf, "%s: %s", fld_disp(f), tmp);
+        seen_add(seen, &nseen, f->name, num, num, off, off + sz, tmp); break; }
       default: break;
       }
       if (cf) pf_range(cf, abs_off + off, sz);
@@ -1232,6 +1250,7 @@ int pcapng_posa_to_text(const pcapng_posa_proto_t *p, char *out, size_t sz)
   for (i = 0; i < p->nflds && o < sz; i++) {
     const pcapng_posa_fld_t *f = &p->flds[i]; char type[48];
     if (f->type == PCAPNG_POSA_BYTES_FIXED)    snprintf(type, sizeof type, "bytes<%zu>", f->nbytes);
+    else if (f->type == PCAPNG_POSA_STR_FIXED) snprintf(type, sizeof type, "str<%zu>", f->nbytes);
     else if (f->type == PCAPNG_POSA_BYTES_REF) snprintf(type, sizeof type, "bytes[%s]", f->lenfield);
     else snprintf(type, sizeof type, "%s", (f->type >= 0 && f->type <= PCAPNG_POSA_PAYLOAD) ? TN[f->type] : "uint8");
     o += (size_t)snprintf(out + o, sz - o, "    required %s %s", type, f->name);
