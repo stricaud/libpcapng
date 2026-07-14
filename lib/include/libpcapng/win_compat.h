@@ -61,6 +61,11 @@
 #define strncasecmp(a, b, n) _strnicmp((a), (b), (n))
 #endif
 
+/* inet_aton is POSIX-only; Windows has inet_pton (from ws2tcpip.h). */
+static __inline int inet_aton(const char *str, struct in_addr *addr) {
+    return inet_pton(AF_INET, str, addr) == 1 ? 1 : 0;
+}
+
 /* strcasestr is a GNU extension absent on MSVC. */
 #include <string.h>
 static __inline char *strcasestr(const char *hay, const char *needle) {
