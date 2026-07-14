@@ -209,23 +209,43 @@ static void posa_ensure_builtin(void)
   pcapng_posa_load_text(POSA_BUILTIN_RDP, NULL, 0);
 }
 
-/* Apply a posa decoder bound (by a rule) to this transport port, if any.
-   Returns 1 when a decoder handled the payload. */
-static int try_posa_app(dctx_t *c, uint16_t sp, uint16_t dp, int ipproto,
-                        const uint8_t *pl, int pll, pcapng_field_t *root)
+/* Run the posa decoder named by a `rule`, if there is one. Returns 1 when it
+   handled the payload — callers check this before falling back to built-in C,
+   which is what lets a .posa file take a protocol over without a rebuild. */
+static int run_posa(dctx_t *c, const char *proto, const uint8_t *pl, int pll,
+                    pcapng_field_t *root)
 {
-  const char *proto = pcapng_posa_bound_port(ipproto, dp);
   const pcapng_posa_proto_t *pp;
+  const char *col;
   char info[192] = "";
-  if (!proto) proto = pcapng_posa_bound_port(ipproto, sp);
   if (!proto || pll <= 0) return 0;
+  pcapng_posa_reset_col();
   pcapng_posa_dissect(proto, pl, pll, root, c->base ? (int)(pl - c->base) : 0, info, sizeof info);
   pp = pcapng_posa_find(proto);
-  set_proto(c, (pp && pp->display[0]) ? pp->display : proto);
+  col = pcapng_posa_last_col();                     /* the innermost `col`, e.g. SMB2 */
+  if (!col) col = (pp && pp->display[0]) ? pp->display : proto;
+  set_proto(c, col);
   { char *ip = info; while (*ip == ' ') ip++;      /* trim leading pad from empty args */
     if (*ip) set_info(c, "%s", ip); }
   return 1;
 }
+
+/* Apply a posa decoder bound (by a rule) to this transport port, if any. */
+static int try_posa_app(dctx_t *c, uint16_t sp, uint16_t dp, int ipproto,
+                        const uint8_t *pl, int pll, pcapng_field_t *root)
+{
+  const char *proto = pcapng_posa_bound_port(ipproto, dp);
+  if (!proto) proto = pcapng_posa_bound_port(ipproto, sp);
+  return run_posa(c, proto, pl, pll, root);
+}
+
+/* …and the ones bound below the transport layer: `rule ip.proto == 2 => IGMP`,
+   `rule eth.type == 0x88cc => LLDP`. */
+static int try_posa_ipproto(dctx_t *c, int num, const uint8_t *pl, int pll, pcapng_field_t *root)
+{ return run_posa(c, pcapng_posa_bound_ipproto(num), pl, pll, root); }
+
+static int try_posa_ethertype(dctx_t *c, uint16_t type, const uint8_t *pl, int pll, pcapng_field_t *root)
+{ return run_posa(c, pcapng_posa_bound_ethertype(type), pl, pll, root); }
 
 /* forward decls */
 static void dissect_l3(dctx_t *c, uint16_t ethertype, const uint8_t *d, int len, pcapng_field_t *root);
@@ -312,6 +332,7 @@ static void dissect_ethernet(dctx_t *c, const uint8_t *d, int len, pcapng_field_
 static void dissect_l3(dctx_t *c, uint16_t ethertype, const uint8_t *d, int len, pcapng_field_t *root)
 {
   if (len <= 0) return;
+  if (try_posa_ethertype(c, ethertype, d, len, root)) return;   /* a .posa claims it */
   switch (ethertype) {
   case 0x0800: dissect_ipv4(c, d, len, root); break;
   case 0x86DD: dissect_ipv6(c, d, len, root); break;
@@ -390,6 +411,8 @@ static void dissect_ipv4(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
     const uint8_t *pl = d + ihl;
     int pll = len - ihl;
     if (pll < 0) pll = 0;
+    /* a .posa that claims this IP protocol wins over the built-in C */
+    if (proto != 6 && proto != 17 && try_posa_ipproto(c, proto, pl, pll, root)) return;
     switch (proto) {
     case 1:  dissect_icmp(c, pl, pll, root); break;
     case 2:  dissect_igmp(c, pl, pll, root); break;
@@ -1012,17 +1035,20 @@ static void dissect_ssh(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pcapng_field_t *s, *f;
   s = pf_add(root, "ssh", PCAPNG_FT_NONE);
   pf_set_label(s, "SSH Protocol");
+  set_range(c, s, d, len);
   set_proto(c, "SSH");
   if (len >= 4 && memcmp(d, "SSH-", 4) == 0) {
     char line[128];
     printable_line(d, len, line, sizeof line);
     f = pf_add(s, "ssh.protocol", PCAPNG_FT_STR); pf_set_str(f, line);
     pf_set_label(f, "Protocol: %s", line);
+    set_range(c, f, d, (int)strlen(line));
     set_info(c, "%s", line);
   } else if (len >= 4) {
     uint32_t plen = be32(d);
     f = pf_add(s, "ssh.packet_length", PCAPNG_FT_UINT); pf_set_uint(f, plen);
     pf_set_label(f, "Packet Length: %u", plen);
+    set_range(c, f, d, 4);
     set_info(c, "Encrypted packet (len=%u)", plen);
   }
 }
@@ -1045,12 +1071,28 @@ static void dissect_igmp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   if (len < 8) { set_proto(c, "IGMP"); return; }
   g = pf_add(root, "igmp", PCAPNG_FT_NONE);
   pf_set_label(g, "Internet Group Management Protocol");
+  set_range(c, g, d, len);
   f = pf_add(g, "igmp.type", PCAPNG_FT_UINT); pf_set_uint(f, d[0]);
   pf_set_label(f, "Type: %s (0x%02x)", igmp_type(d[0]), d[0]);
+  set_range(c, f, d + 0, 1);
   f = pf_add(g, "igmp.max_resp", PCAPNG_FT_UINT); pf_set_uint(f, d[1]);
   pf_set_label(f, "Max Resp Time: %u", d[1]);
-  f = pf_add(g, "igmp.maddr", PCAPNG_FT_IPV4); pf_set_ipv4(f, d + 4);
-  pf_set_label(f, "Multicast Address: %s", f->str);
+  set_range(c, f, d + 1, 1);
+  f = pf_add(g, "igmp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 2));
+  pf_set_label(f, "Checksum: 0x%04x", be16(d + 2));
+  set_range(c, f, d + 2, 2);
+  /* A v3 membership report has no group address here — bytes 6..7 are the number
+     of group records that follow, so only claim an address for the layouts that
+     actually carry one. */
+  if (d[0] != 0x22) {
+    f = pf_add(g, "igmp.maddr", PCAPNG_FT_IPV4); pf_set_ipv4(f, d + 4);
+    pf_set_label(f, "Multicast Address: %s", f->str);
+    set_range(c, f, d + 4, 4);
+  } else {
+    f = pf_add(g, "igmp.num_grp_recs", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 6));
+    pf_set_label(f, "Num Group Records: %u", be16(d + 6));
+    set_range(c, f, d + 6, 2);
+  }
   set_proto(c, "IGMP");
   set_info(c, "%s", igmp_type(d[0]));
 }
@@ -1064,10 +1106,13 @@ static void dissect_gre(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   flags = be16(d); proto = be16(d + 2);
   g = pf_add(root, "gre", PCAPNG_FT_NONE);
   pf_set_label(g, "Generic Routing Encapsulation");
+  set_range(c, g, d, len < 4 ? len : 4);
   f = pf_add(g, "gre.flags_and_version", PCAPNG_FT_UINT); pf_set_uint(f, flags);
   pf_set_label(f, "Flags and Version: 0x%04x", flags);
+  set_range(c, f, d + 0, 2);
   f = pf_add(g, "gre.proto", PCAPNG_FT_UINT); pf_set_uint(f, proto);
   pf_set_label(f, "Protocol Type: 0x%04x", proto);
+  set_range(c, f, d + 2, 2);
   set_proto(c, "GRE");
   set_info(c, "Encapsulated 0x%04x", proto);
   if (flags == 0 && len > 4) dissect_l3(c, proto, d + 4, len - 4, root);  /* no optional fields */
@@ -1141,12 +1186,16 @@ static void dissect_nbns(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   id = be16(d); flags = be16(d + 2); qd = be16(d + 4);
   n = pf_add(root, "nbns", PCAPNG_FT_NONE);
   pf_set_label(n, "NetBIOS Name Service");
+  set_range(c, n, d, len);
   f = pf_add(n, "nbns.id", PCAPNG_FT_UINT); pf_set_uint(f, id);
   pf_set_label(f, "Transaction ID: 0x%04x", id);
+  set_range(c, f, d + 0, 2);
   f = pf_add(n, "nbns.flags", PCAPNG_FT_UINT); pf_set_uint(f, flags);
   pf_set_label(f, "Flags: 0x%04x", flags);
+  set_range(c, f, d + 2, 2);
   f = pf_add(n, "nbns.count.queries", PCAPNG_FT_UINT); pf_set_uint(f, qd);
   pf_set_label(f, "Questions: %u", qd);
+  set_range(c, f, d + 4, 2);
   set_proto(c, "NBNS");
   set_info(c, "%s 0x%04x", (flags & 0x8000) ? "response" : "query", id);
 }
@@ -1168,30 +1217,36 @@ static void dissect_snmp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   int off = 0, i;
   long version = -1;
   char comm[128] = "";
+  int voff = 0, vlen = 0, coff = 0, clen = 0;   /* where each value sat on the wire */
   if (len < 2 || d[0] != 0x30) { set_proto(c, "SNMP"); return; }
   off = 1; (void)asn1_len(d, len, &off);             /* sequence length */
   if (off < len && d[off] == 0x02) {                 /* version INTEGER */
     long vl, v = 0;
     off++; vl = asn1_len(d, len, &off);
+    voff = off; vlen = (int)vl;
     for (i = 0; i < vl && off < len; i++) v = (v << 8) | d[off++];
     version = v;
   }
   if (off < len && d[off] == 0x04) {                 /* community OCTET STRING */
     long cl; int o = 0;
     off++; cl = asn1_len(d, len, &off);
+    coff = off; clen = (int)cl;
     for (i = 0; i < cl && off < len && o < (int)sizeof comm - 1; i++, off++)
       comm[o++] = (d[off] >= 32 && d[off] < 127) ? (char)d[off] : '.';
     comm[o] = '\0';
   }
   s = pf_add(root, "snmp", PCAPNG_FT_NONE);
   pf_set_label(s, "Simple Network Management Protocol");
+  set_range(c, s, d, len);
   if (version >= 0) {
     f = pf_add(s, "snmp.version", PCAPNG_FT_UINT); pf_set_uint(f, (uint64_t)version);
     pf_set_label(f, "version: %s (%ld)", snmp_ver(version), version);
+    set_range(c, f, d + voff, vlen);
   }
   if (comm[0]) {
     f = pf_add(s, "snmp.community", PCAPNG_FT_STR); pf_set_str(f, comm);
     pf_set_label(f, "community: %s", comm);
+    set_range(c, f, d + coff, clen);
   }
   set_proto(c, "SNMP");
   set_info(c, "%s%s%s", snmp_ver(version), comm[0] ? " community=" : "", comm);
@@ -1213,12 +1268,16 @@ static void dissect_radius(dctx_t *c, const uint8_t *d, int len, pcapng_field_t 
   if (len < 4) { set_proto(c, "RADIUS"); return; }
   r = pf_add(root, "radius", PCAPNG_FT_NONE);
   pf_set_label(r, "RADIUS Protocol");
+  set_range(c, r, d, len);
   f = pf_add(r, "radius.code", PCAPNG_FT_UINT); pf_set_uint(f, d[0]);
   pf_set_label(f, "Code: %s (%u)", radius_code(d[0]), d[0]);
+  set_range(c, f, d + 0, 1);
   f = pf_add(r, "radius.id", PCAPNG_FT_UINT); pf_set_uint(f, d[1]);
   pf_set_label(f, "Identifier: %u", d[1]);
+  set_range(c, f, d + 1, 1);
   f = pf_add(r, "radius.length", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 2));
   pf_set_label(f, "Length: %u", be16(d + 2));
+  set_range(c, f, d + 2, 2);
   set_proto(c, "RADIUS");
   set_info(c, "%s id=%u", radius_code(d[0]), d[1]);
 }

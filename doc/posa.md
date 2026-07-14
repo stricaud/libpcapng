@@ -1,0 +1,414 @@
+# posa:�  declarative packet decoders
+
+A `.posa` file describes how to decode a protocol. libpcapng interprets it and
+builds the same field tree a hand-written C dissector would, so a posa decoder is
+not a second-class citizen: it appears in the details pane, its fields work in
+display filters, its bytes highlight in the hex pane, it names the Protocol and
+Info columns, and it can ship its own coloring rules.
+
+Nothing is compiled. You drop a file in the `protos/` directory (or write one in
+carcal's editor: **Analyze ▸ Decoders ▸ Enter**, `^S` to save) and the protocol
+is decoded on the next packet. DNS, IGMP, SMB2, HTTP, TLS and DHCP are all posa
+files — read them next to this document; they are the worked examples.
+
+---
+
+## 1. A first decoder
+
+```posa
+Object<main> TFTP_RRQ
+    abbrev "tftp"
+    col "TFTP"
+
+    required uint16  opcode = 1 "Opcode"
+        RRQ = 1
+    required cstring filename "Filename"
+    required cstring mode "Mode"
+
+    info "Read request: %s" filename
+
+rule udp.port == 69 => TFTP_RRQ
+```
+
+* `Object<main> NAME` starts a decoder. `main` means "top level"; any other
+  parent makes it a member of a group (§7).
+* `abbrev "tftp"` prefixes every field name, so filters read `tftp.opcode == 1`.
+  Without it fields are named after the object.
+* `col "TFTP"` is the Protocol column. `info "…"` is the Info column (§8).
+* `rule` binds it (§9).
+* Indented `NAME = value` lines under a field are its enum labels (§4).
+
+Field lines are:
+
+```
+[required|optional] <type> <name> [until "<delim>"] [mask N] [hex] [= default] ["Label"]
+```
+
+`"Label"` is the display text in the tree (`Opcode: RRQ (1)`); without it the
+field's name is used. `required`/`optional` read the same today — both parse the
+field if the bytes are there.
+
+---
+
+## 2. Types
+
+| Type | Bytes | Notes |
+|---|---|---|
+| `uint8` `uint16` `uint24` `uint32` `uint64` | 1/2/3/4/8 | big-endian |
+| `le_uint16` `le_uint32` `le_uint64` | 2/4/8 | little-endian (SMB2 is all little-endian) |
+| `mac` | 6 | `aa:bb:cc:dd:ee:ff` |
+| `ip4` | 4 | dotted quad |
+| `ip6` | 16 | |
+| `bytes<N>` | N | fixed-size opaque bytes |
+| `bytes[lenfield]` | value of `lenfield` | opaque bytes, length taken from a field |
+| `str[lenfield]` | value of `lenfield` | text, length from a field |
+| `utf16[lenfield]` | value of `lenfield` | UTF-16LE text (SMB2 file and share names) |
+| `cstring` | until `\0` | NUL-terminated text |
+| `string … until "<delim>"` | until the delimiter | delimited text (HTTP lines) |
+| `dnsname` | one encoded name | DNS labels, following `0xc0` compression pointers |
+| `payload` | all that is left | the rest of the enclosing scope |
+
+Modifiers:
+
+* `mask 0x7fff` — the value is masked before it is shown, matched against enums,
+  and used by `when`. mDNS packs a flag into the top bit of the DNS class; the
+  class is `class mask 0x7fff` and the flag is a `bits` field (§5).
+* `hex` — show the number as `0x…` rather than decimal.
+* `= N` — a default. On the **first** field of a group member it is also the
+  magic used to dispatch (§7).
+
+```posa
+required le_uint32 flags hex "Flags"
+required uint16 qclass mask 0x7fff "Class"
+required utf16[name_length] filename "Filename"
+```
+
+---
+
+## 3. Structure
+
+Blocks are opened by a keyword and closed by **indentation** — there are no
+braces. Anything indented under `when`, `scope` or `repeat` is inside it.
+
+### `when <cond>:` / `else:`
+
+```posa
+when command == 5:
+    when response == 0:
+        required le_uint16 structure_size "Structure Size"
+    when response == 1:
+        required le_uint16 create_action "Create Action"
+```
+
+The condition is `<field> [& mask] <op> <value>`, with `op` one of
+`== != < > <= >=`. The left side is a field parsed earlier, or the word
+`remaining` (bytes left in the current scope). A bare `when field:` is true when
+the field is non-zero.
+
+`else:` runs when **no** `when` above it, at the same indent, ran. DHCP uses it
+to give an option it does not decode its raw value anyway:
+
+```posa
+when opt_code == 53:
+    required uint8 msg_type "DHCP Message Type"
+when opt_code == 1:
+    required ip4 opt_ip "Subnet Mask"
+else:
+    required payload opt_value "Value"
+```
+
+### `scope <lenfield>`
+
+Bounds the fields inside it to `lenfield` bytes, counted from where that field
+ended. When the block closes, decoding continues **at the end of the scope**
+whether or not everything inside was decoded. This is what keeps a walk aligned
+across records you have never heard of:
+
+```posa
+required uint16 rdlength "Data length"
+scope rdlength
+    when type == 1:
+        required ip4 rdata "Address"
+    # an unknown RR type decodes nothing, and the next record still starts right
+```
+
+### `repeat`
+
+```posa
+repeat <countfield> as <item> ["Section title"]     # exactly N records
+repeat until end as <item> ["Section title"]        # until the enclosing scope runs out
+repeat until "<delim>" as <item> ["Section title"]  # until those bytes come next
+```
+
+Each iteration becomes its own subtree, named `<abbrev>.<item>` so you can filter
+on it. With a section title the records are grouped under one node.
+
+```posa
+repeat questions as query "Queries"
+    label "%s: type %s, class %s" qname, qtype, qclass
+    required dnsname qname "Name"
+    required uint16 qtype "Type"
+    required uint16 qclass mask 0x7fff "Class"
+```
+
+* `repeat <countfield>` — a count in the packet (DNS `Questions: 5`, SMB2's
+  dialect count, IGMPv3's group-record count).
+* `repeat until end` — no count anywhere: TLS records, DHCP options, TXT strings.
+  It stops at the end of the enclosing `scope` (or of the packet).
+* `repeat until "<delim>"` — stops when the delimiter comes next. An HTTP header
+  block ends at a blank line, so its headers are `repeat until "\r\n"`.
+
+Records can nest: an IGMPv3 report repeats group records, and each group record
+repeats its source addresses.
+
+### `label "<fmt>" arg, arg`
+
+Titles the record of the `repeat` it sits in, from the fields that record just
+parsed (`%s` display text, `%u`/`%d` number, `%x` hex):
+
+```
+Queries
+  _airplay._tcp.local: type PTR, class IN
+```
+
+An argument naming a field this record does not have expands to nothing, and the
+gap it leaves is closed — so one label can serve a record whose shape varies.
+
+---
+
+## 4. Enums
+
+Indented `NAME = value` lines under a value field label it. The name is display
+text and **may contain spaces**:
+
+```posa
+required uint8 type "Type"
+    Membership Query = 0x11
+    IGMPv3 Membership Report = 0x22
+```
+
+shows as `Type: IGMPv3 Membership Report (34)`, and `%s` in a `label`/`info`
+gives the name rather than the number.
+
+---
+
+## 5. `bits` — flags inside a field
+
+```posa
+required le_uint32 flags hex "Flags"
+    bits flags response 0 1 "Direction"
+        Request = 0
+        Response = 1
+    bits flags async 1 1 "Async command"
+```
+
+`bits <srcfield> <name> <shift> <width> ["Label"]` carves a value out of a field
+already parsed: `(src >> shift) & ((1 << width) - 1)`. It consumes no bytes, it
+highlights the source field's bytes, it takes enums, and it can be used by `when`
+— which is how SMB2 picks a request body from a response body, and how DNS shows
+the mDNS cache-flush and QU bits.
+
+`bits` reads the **raw** value, before any `mask`, so masking a field and
+carving a flag out of the bit you masked away both work at once.
+
+---
+
+## 6. `seek` — fields that are not in field order
+
+```posa
+required le_uint16 path_offset "Path Offset"
+required le_uint16 path_length "Path Length"
+seek path_offset
+required utf16[path_length] path "Tree"
+```
+
+`seek <offsetfield>` continues at the offset that field holds, counted from the
+start of the current object. SMB2 puts its variable parts (share paths, file
+names, security blobs) at an offset from the SMB2 header rather than laying them
+out in order; without `seek` they could not be reached at all.
+
+`seek <number>` seeks to a literal offset. HTTP uses `seek 0` to rewind over the
+4-byte magic it was dispatched on and re-read the status line as text.
+
+---
+
+## 7. Composition: `layer`, `Object<group>`, `include`
+
+**`layer <name> <Proto>`** decodes a sub-protocol at the current offset, as its
+own subtree. Offsets inside it are relative to where it starts — which is exactly
+what a `dnsname` or a `seek` needs:
+
+```posa
+Object<main> NBSS
+    required uint8 msg_type "Message Type"
+    required uint24 length "Length"
+    scope length
+        layer smb SMB
+```
+
+**`Object<GROUP> NAME`** makes the object a member of a group. Dissecting the
+group name picks the member whose **first field's value** equals its `= default`
+— the magic. `Object<GROUP> NAME default` marks the member to use when nothing
+matched:
+
+```posa
+Object<SMB> SMB2
+    required uint32 protocol_id = 0xFE534D42 hex "Protocol ID"
+Object<SMB> SMB1
+    required uint32 protocol_id = 0xFF534D42 hex "Protocol ID"
+```
+
+An HTTP response starts with the magic `HTTP`; a request starts with a method, so
+`HTTP_REQUEST` is the group's `default`.
+
+**`include <Object>`** inlines another object's fields *here*, in the current
+scope — unlike `layer` it does not create a sub-protocol, so a `label` can name
+the included fields and a `when` can test them. DNS defines a resource record
+once and includes it in the answer, authority and additional sections:
+
+```posa
+repeat answers as answer "Answers"
+    label "%s: type %s, class %s, %s" name, type, class, rdata
+    include RR
+```
+
+The included object must be defined before the file that includes it (same file,
+earlier).
+
+---
+
+## 8. The Info column
+
+```posa
+info "%s 0x%x %s %s %s %s" qr, id, qtype, qname, type, rdata
+```
+
+Arguments are field names; `%s` is display text, `%u`/`%d` a number, `%x` hex. A
+field the packet does not carry expands to nothing and the gap closes, so one
+format can serve both directions of a protocol — a DNS query has questions and no
+records, a response usually the reverse, and the same line reads
+`Query 0x0 PTR _rdlink._tcp.local` or `Response 0x0 PTR Skywalker._airplay._tcp.local`.
+
+Inside a `repeat`, `info` sees the **first** record's values (Wireshark's habit);
+`label` sees its own record's. The innermost `layer` that sets `info` wins, and
+so does the innermost `col`: NetBIOS frames SMB2, and the packet reads `SMB2`.
+
+---
+
+## 9. Binding: `rule`
+
+```posa
+rule tcp.port == 445    => NBSS
+rule udp.port == 53     => DNS
+rule ip.proto == 2      => IGMP        # IGMP has no port
+rule eth.type == 0x88cc => LLDP
+```
+
+A rule bound by a posa file is tried **before** the built-in C dissectors, so a
+`.posa` takes a protocol over without touching the library. In carcal you can
+also bind at runtime: **Analyze ▸ Decode As…**.
+
+---
+
+## 10. Coloring
+
+```posa
+color dns.rcode > 0 => yellow red
+color dns           => white blue
+```
+
+`color <display filter> => <fg> <bg>`, first match wins, consulted before the
+front end's generic rules. libpcapng carries the names; carcal maps them onto its
+palette. A decoder therefore ships its own look.
+
+---
+
+## 11. Worked example: DHCP options end to end
+
+```posa
+repeat until end as option "Options"
+    label "%s: %s%s%s" opt_code, msg_type, opt_ip, opt_text
+    required uint8 opt_code "Option"
+        DHCP Message Type = 53
+        Host Name = 12
+        End = 255
+    when opt_code > 0:                 # Pad (0) has no length byte
+        when opt_code < 255:           # End (255) has none either
+            required uint8 opt_len "Length"
+            scope opt_len
+                when opt_code == 53:
+                    required uint8 msg_type "DHCP Message Type"
+                        Discover = 1
+                        Offer = 2
+                when opt_code == 12:
+                    required str[opt_len] opt_text "Host Name"
+                else:
+                    required payload opt_value "Value"
+```
+
+produces
+
+```
+Options
+  DHCP Message Type: Discover
+    Option: DHCP Message Type (53)
+    Length: 1
+    DHCP Message Type: Discover (1)
+  Host Name: laptop1
+    Option: Host Name (12)
+    Length: 7
+    Host Name: laptop1
+  Client Identifier:
+    Option: Client Identifier (61)
+    Length: 3
+    Value: 3 bytes
+```
+
+---
+
+## 12. Limits and gotchas
+
+* **Indentation defines blocks.** A field indented under a `when` is inside it; a
+  line at the same indent as the `when` closes it. Mixed tabs and spaces will
+  bite you.
+* **Enum names may contain spaces; field names may not.**
+* `scope` needs a **length field**, and measures from the end of that field.
+* A `repeat` that would consume zero bytes stops, rather than spinning; there is
+  also a hard cap of 4096 iterations per loop.
+* A field's abbrev is `<abbrev>.<name>`. Two fields with the same name in
+  different branches share one abbrev — usually what you want (`smb2.filename`),
+  occasionally not.
+* A `seek` can only go where a field or a literal points; there is no arithmetic.
+* No checksum validation, no reassembly across packets, no decryption. A decoder
+  sees one packet's bytes.
+* `pcapng_posa_to_text()` reconstructs a *normalized* subset of a decoder and is
+  lossy; the original text is kept and is what carcal shows you when you edit.
+
+## 13. Where the files live
+
+* carcal loads every `*.posa` in its protos directory at startup — the one it was
+  built with, or `$CARCAL_PROTOS_DIR` if you set it. Port bindings can also be
+  added there in `decoders.rules`.
+* libpcapng embeds a couple of decoders (RDP) so the library decodes them with no
+  files at all.
+* A protocol redefined by name **replaces** the earlier one — drop your own
+  `dns.posa` in `protos/` and it wins over the shipped one.
+
+## 14. API
+
+```c
+#include <libpcapng/posa.h>
+
+pcapng_posa_load_file("protos/dns.posa", err, sizeof err);
+pcapng_posa_load_dir("protos");
+pcapng_posa_load_text(src, err, sizeof err);
+
+int n = pcapng_posa_count();
+const pcapng_posa_proto_t *p = pcapng_posa_find("DNS");
+const char *src = pcapng_posa_source("DNS");   /* the text it was parsed from */
+
+pcapng_posa_dissect("DNS", data, len, parent, abs_off, info, sizeof info);
+```
+
+Decoders bound by `rule` are applied automatically by `pcapng_dissect()` — you
+only call `pcapng_posa_dissect()` to decode something explicitly.
