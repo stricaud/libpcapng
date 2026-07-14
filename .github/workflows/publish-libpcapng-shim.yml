@@ -1,0 +1,46 @@
+name: Publish libpcapng shim to PyPI
+
+# Publishes the libpcapng→pycapng alias package.
+# Trigger: push a tag like `shim-v0.14`
+#
+# One-time PyPI setup (Trusted Publishing):
+#   https://pypi.org/manage/account/publishing/
+#   Project name : libpcapng
+#   Owner        : stricaud
+#   Repository   : libpcapng
+#   Workflow file: publish-libpcapng-shim.yml
+#   Environment  : pypi
+
+on:
+  push:
+    tags: ["shim-v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Build & publish libpcapng shim
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/libpcapng
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install flit
+        run: pip install flit
+
+      - name: Build sdist + wheel
+        working-directory: shim
+        run: flit build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: shim/dist/
