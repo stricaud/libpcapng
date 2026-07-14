@@ -37,12 +37,13 @@ install(FILES "${libpcapng_BINARY_DIR}/libpcapng.pc" DESTINATION "${CMAKE_INSTAL
 
 include_directories(AFTER ${libpcapng_SOURCE_DIR}/lib/include)
 
-# The Python bindings need pybind11 at configure time; the Windows packaging
-# build only wants the C library, so default them off there.
-if(WIN32)
-  set(_bindings_default OFF)
-else()
+# Default bindings ON everywhere except bare Windows builds.
+# When scikit-build-core drives the build (SKBUILD is set), we are always
+# building a Python wheel, so force the default ON regardless of platform.
+if(SKBUILD OR NOT WIN32)
   set(_bindings_default ON)
+else()
+  set(_bindings_default OFF)
 endif()
 option(LIBPCAPNG_BINDINGS "Build the Python (pybind11) bindings" ${_bindings_default})
 if(LIBPCAPNG_BINDINGS)
