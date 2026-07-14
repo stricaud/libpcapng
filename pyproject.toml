@@ -45,10 +45,11 @@ Repository = "https://github.com/stricaud/libpcapng"
 [tool.scikit-build]
 # Use the repo-root CMakeLists.txt so bin/ and lib/ paths resolve correctly.
 cmake.source-dir = "."
-# Build only the Python module (pcapng_static is a transitive dep and is built
-# automatically; pcapsh, tests, and docs are skipped).
-build.targets = ["pycapng"]
-# Only package the "Python" CMake install component (the .so file).
+# Only package the "Python" CMake install component (the .so / .pyd file).
+# build.targets is intentionally omitted: VS generators look for <target>.vcxproj
+# at the build root, but pycapng.vcxproj lives in a subdirectory. Letting cmake
+# build the default ALL_BUILD target is fine because install.components filters
+# the wheel contents to the Python component only.
 install.components = ["Python"]
 # Install the .so directly into site-packages (no sub-directory).
 wheel.install-dir = ""
