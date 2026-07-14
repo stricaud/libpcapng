@@ -53,6 +53,12 @@
 
 #else /* MSVC */
 
+/* ssize_t is a POSIX signed-size type; MSVC provides SSIZE_T in <basetsd.h>
+ * (pulled in by <windows.h> above). */
+#ifndef ssize_t
+typedef SSIZE_T ssize_t;
+#endif
+
 /* POSIX spellings of the CRT's underscore names. */
 #ifndef strcasecmp
 #define strcasecmp(a, b) _stricmp((a), (b))

@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#  include <libpcapng/win_compat.h>   /* ssize_t, inet_aton, dirent stubs */
+#endif
+
 #include <libpcapng/libpcapng.h>
 
 #include <pybind11/pybind11.h>
