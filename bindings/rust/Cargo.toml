@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["libpcapng-sys", "libpcapng"]
+members = ["pcapng-sys", "libpcapng"]
 
 [workspace.package]
 version = "0.15.0"

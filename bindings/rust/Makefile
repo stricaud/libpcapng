@@ -1,4 +1,4 @@
-# Convenience targets for the libpcapng Rust bindings (libpcapng-sys + libpcapng).
+# Convenience targets for the libpcapng Rust bindings (pcapng-sys + libpcapng).
 # Run from this directory: `make <target>` (e.g. `make crate-publish`).
 #
 # ── FIRST-TIME SETUP (once per machine) ────────────────────────────────────
@@ -38,7 +38,7 @@ fmt: ## Format source files
 lint: ## Clippy (warnings only)
 	cargo clippy --workspace --examples
 
-vendor: ## Copy C sources into libpcapng-sys/vendor (needed for publishing)
+vendor: ## Copy C sources into pcapng-sys/vendor (needed for publishing)
 	bash $(SYNC)
 
 # These targets vendor the C sources, run cargo, then ALWAYS remove vendor/ via
@@ -49,32 +49,32 @@ vendor: ## Copy C sources into libpcapng-sys/vendor (needed for publishing)
 # `include` list in Cargo.toml regardless of tree state.
 
 crate-package: ## Build the -sys tarball in isolation (no upload)
-	@trap 'rm -rf libpcapng-sys/vendor' EXIT; \
+	@trap 'rm -rf pcapng-sys/vendor' EXIT; \
 	 bash $(SYNC) >/dev/null && \
-	 cargo package -p libpcapng-sys --allow-dirty
+	 cargo package -p pcapng-sys --allow-dirty
 
-crate-publish-dry: ## Dry-run publish of libpcapng-sys (libpcapng can't dry-run until sys is on crates.io)
-	@trap 'rm -rf libpcapng-sys/vendor' EXIT; \
+crate-publish-dry: ## Dry-run publish of pcapng-sys (libpcapng can't dry-run until sys is on crates.io)
+	@trap 'rm -rf pcapng-sys/vendor' EXIT; \
 	 bash $(SYNC) >/dev/null && \
-	 cargo publish -p libpcapng-sys --dry-run --allow-dirty; \
-	 echo ">> note: 'libpcapng' has no dry-run here — it resolves libpcapng-sys"; \
+	 cargo publish -p pcapng-sys --dry-run --allow-dirty; \
+	 echo ">> note: 'libpcapng' has no dry-run here — it resolves pcapng-sys"; \
 	 echo ">>       from the crates.io index, which only exists after a real publish."
 
 crate-publish: ## Publish BOTH crates to crates.io (needs `cargo login` first — see top of file)
 	@command -v cargo >/dev/null || { echo "cargo not found"; exit 1; }
-	@trap 'rm -rf libpcapng-sys/vendor' EXIT; \
-	 echo ">> vendoring C sources into libpcapng-sys/vendor ..."; \
+	@trap 'rm -rf pcapng-sys/vendor' EXIT; \
+	 echo ">> vendoring C sources into pcapng-sys/vendor ..."; \
 	 bash $(SYNC) >/dev/null && \
-	 echo ">> publishing libpcapng-sys (the -sys crate must go first) ..." && \
-	 cargo publish -p libpcapng-sys --allow-dirty && \
-	 echo ">> waiting 30s for crates.io to index libpcapng-sys ..." && \
+	 echo ">> publishing pcapng-sys (the -sys crate must go first) ..." && \
+	 cargo publish -p pcapng-sys --allow-dirty && \
+	 echo ">> waiting 30s for crates.io to index pcapng-sys ..." && \
 	 sleep 30 && \
 	 echo ">> publishing libpcapng ..." && \
 	 cargo publish -p libpcapng --allow-dirty && \
-	 echo ">> done. Published libpcapng-sys and libpcapng."
+	 echo ">> done. Published pcapng-sys and libpcapng."
 
 crate-check-names: ## Check whether the crate names are already taken on crates.io
-	@for c in libpcapng-sys libpcapng; do \
+	@for c in pcapng-sys libpcapng; do \
 	  code=$$(curl -s -o /dev/null -w '%{http_code}' \
 	    -A 'libpcapng-make/1.0 (name availability check)' \
 	    "https://crates.io/api/v1/crates/$$c"); \
@@ -89,4 +89,4 @@ clean: ## Remove build artifacts and vendored sources
 
 .PHONY: _unvendor
 _unvendor:
-	@rm -rf libpcapng-sys/vendor
+	@rm -rf pcapng-sys/vendor

@@ -16,7 +16,7 @@
 //! }
 //! ```
 
-use libpcapng_sys as sys;
+use pcapng_sys as sys;
 use std::ffi::{c_void, CStr, CString};
 use std::path::Path;
 
@@ -170,4 +170,4 @@ impl Drop for Dissection {
     }
 }
 
-pub use sys as ffi;
+pub use pcapng_sys as ffi;

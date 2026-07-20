@@ -4,7 +4,7 @@ name: Publish Rust crates to crates.io
 #
 # One-time crates.io setup:
 #   cargo login                          # on your machine
-#   cargo publish -p libpcapng-sys --dry-run   # (from bindings/rust/, after sync-sources.sh)
+#   cargo publish -p pcapng-sys --dry-run   # (from bindings/rust/, after sync-sources.sh)
 #   Add CARGO_REGISTRY_TOKEN to repo secrets → Settings → Secrets → Actions
 
 on:
@@ -14,7 +14,7 @@ on:
 
 jobs:
   publish:
-    name: Publish libpcapng-sys + libpcapng
+    name: Publish pcapng-sys + libpcapng
     runs-on: ubuntu-latest
 
     steps:
@@ -30,13 +30,13 @@ jobs:
       - name: Vendor C sources
         run: bash bindings/rust/scripts/sync-sources.sh
 
-      - name: Publish libpcapng-sys
+      - name: Publish pcapng-sys
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         working-directory: bindings/rust
-        run: cargo publish -p libpcapng-sys --allow-dirty
+        run: cargo publish -p pcapng-sys --allow-dirty
 
-      - name: Wait for crates.io to index libpcapng-sys
+      - name: Wait for crates.io to index pcapng-sys
         run: sleep 30
 
       - name: Publish libpcapng

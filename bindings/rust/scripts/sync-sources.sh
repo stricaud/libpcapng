@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-SYS="$SCRIPT_DIR/../libpcapng-sys"
+SYS="$SCRIPT_DIR/../pcapng-sys"
 
 VENDOR_SRC="$SYS/vendor/src"
 VENDOR_INC="$SYS/vendor/include"

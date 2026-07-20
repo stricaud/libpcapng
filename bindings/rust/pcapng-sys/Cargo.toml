@@ -1,5 +1,5 @@
 [package]
-name = "libpcapng-sys"
+name = "pcapng-sys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
