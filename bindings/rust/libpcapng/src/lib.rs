@@ -832,4 +832,157 @@ impl Drop for IpReasm {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Live capture — device discovery + zero-copy packet capture
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A network interface reported by [`list_devices`].
+#[derive(Clone, Debug)]
+pub struct Device {
+    pub name: String,
+    pub description: String,
+    pub loopback: bool,
+}
+
+fn cstr_field(bytes: &[std::os::raw::c_char]) -> String {
+    unsafe { CStr::from_ptr(bytes.as_ptr()) }.to_string_lossy().into_owned()
+}
+
+/// Enumerate the available capture interfaces. Does not require privileges.
+pub fn list_devices() -> Result<Vec<Device>, Error> {
+    let mut count: std::os::raw::c_int = 0;
+    let mut errbuf = [0i8; 256];
+    let ptr = unsafe { sys::pcapng_capture_list_devices(&mut count, errbuf.as_mut_ptr()) };
+    if ptr.is_null() {
+        let msg = cstr_field(&errbuf);
+        return Err(Error(if msg.is_empty() { "list_devices failed".into() } else { msg }));
+    }
+    let mut out = Vec::new();
+    for i in 0..count.max(0) as isize {
+        let d = unsafe { &*ptr.offset(i) };
+        out.push(Device {
+            name: cstr_field(&d.name),
+            description: cstr_field(&d.description),
+            loopback: d.loopback != 0,
+        });
+    }
+    unsafe { sys::pcapng_capture_free_devices(ptr) };
+    Ok(out)
+}
+
+/// The first suitable non-loopback interface, if any.
+pub fn default_device() -> Option<String> {
+    let mut errbuf = [0i8; 256];
+    let p = unsafe { sys::pcapng_capture_default_device(errbuf.as_mut_ptr()) };
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    }
+}
+
+/// One captured packet delivered to a [`Capture::run`] callback. `data` is a
+/// zero-copy view valid only for the callback's duration — copy it to keep it.
+pub struct CapturedPacket<'a> {
+    pub data: &'a [u8],
+    pub captured_len: u32,
+    pub original_len: u32,
+    /// Nanoseconds since the Unix epoch.
+    pub timestamp_ns: u64,
+    /// 0 = unknown, 1 = inbound, 2 = outbound.
+    pub direction: i32,
+}
+
+/// A live capture handle (libpcapng's `pcapng_capture_*`).
+///
+/// Requires privileges to open (root, or `CAP_NET_RAW` on Linux). Available on
+/// Linux (PACKET_MMAP) and BSD/macOS (bpf); the capture backend is a stub on
+/// Windows.
+pub struct Capture(*mut sys::pcapng_capture_t);
+
+unsafe extern "C" fn cap_tramp<F: FnMut(CapturedPacket)>(
+    info: *const sys::pcapng_packet_info_t,
+    ud: *mut c_void,
+) {
+    if info.is_null() {
+        return;
+    }
+    let p = &*info;
+    let data = if p.data.is_null() || p.captured_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(p.data, p.captured_len as usize)
+    };
+    let cb = &mut *(ud as *mut F);
+    cb(CapturedPacket {
+        data,
+        captured_len: p.captured_len,
+        original_len: p.original_len,
+        timestamp_ns: p.timestamp_ns,
+        direction: p.direction,
+    });
+}
+
+impl Capture {
+    /// Open a capture on `device` (see [`list_devices`] / [`default_device`]).
+    pub fn open(device: &str) -> Result<Capture, Error> {
+        let c = CString::new(device).map_err(|_| Error("device contains NUL".into()))?;
+        let mut errbuf = [0i8; 256];
+        let h = unsafe { sys::pcapng_capture_open(c.as_ptr(), errbuf.as_mut_ptr()) };
+        if h.is_null() {
+            let msg = cstr_field(&errbuf);
+            Err(Error(if msg.is_empty() { "capture open failed".into() } else { msg }))
+        } else {
+            Ok(Capture(h))
+        }
+    }
+
+    /// Attach an in-kernel display filter (Wireshark syntax).
+    pub fn set_filter(&self, expr: &str) -> Result<(), Error> {
+        let c = CString::new(expr).map_err(|_| Error("filter contains NUL".into()))?;
+        let mut errbuf = [0i8; 256];
+        let rc = unsafe { sys::pcapng_capture_set_filter(self.0, c.as_ptr(), errbuf.as_mut_ptr()) };
+        if rc != 0 {
+            let msg = cstr_field(&errbuf);
+            Err(Error(if msg.is_empty() { "set_filter failed".into() } else { msg }))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn set_promisc(&self, on: bool) {
+        unsafe { sys::pcapng_capture_set_promisc(self.0, on as std::os::raw::c_int) };
+    }
+    pub fn set_snaplen(&self, snaplen: u32) {
+        unsafe { sys::pcapng_capture_set_snaplen(self.0, snaplen) };
+    }
+    pub fn set_timeout(&self, ms: i32) {
+        unsafe { sys::pcapng_capture_set_timeout(self.0, ms) };
+    }
+
+    /// Capture packets, invoking `cb` for each. `count` of 0 captures until
+    /// [`break_loop`](Capture::break_loop) is called (e.g. from the callback).
+    pub fn run<F: FnMut(CapturedPacket)>(&self, count: i32, mut cb: F) -> i32 {
+        unsafe {
+            sys::pcapng_capture_loop(
+                self.0,
+                count,
+                Some(cap_tramp::<F>),
+                &mut cb as *mut F as *mut c_void,
+            )
+        }
+    }
+
+    /// Ask [`run`](Capture::run) to stop.
+    pub fn break_loop(&self) {
+        unsafe { sys::pcapng_capture_break(self.0) };
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        unsafe { sys::pcapng_capture_close(self.0) }
+    }
+}
+
 pub use pcapng_sys as ffi;
