@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Safe, idiomatic Rust bindings for libpcapng — pcapng file I/O and packet dissection"
 keywords = ["pcapng", "pcap", "network", "dissect", "capture"]
 categories = ["network-programming", "parser-implementations"]
