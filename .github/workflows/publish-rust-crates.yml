@@ -34,13 +34,30 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         working-directory: bindings/rust
-        run: cargo publish -p pcapng-sys --allow-dirty
-
-      - name: Wait for crates.io to index pcapng-sys
-        run: sleep 30
+        # Idempotent: skip if this exact version is already on crates.io, so a
+        # re-run of a tag (or a bump where only one crate changed) doesn't fail.
+        run: |
+          set -e
+          VER=$(cargo metadata --no-deps --format-version 1 \
+                | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='pcapng-sys'))")
+          if curl -sf "https://crates.io/api/v1/crates/pcapng-sys/$VER" >/dev/null; then
+            echo "pcapng-sys $VER already published — skipping."
+          else
+            cargo publish -p pcapng-sys --allow-dirty
+            echo "Waiting for crates.io to index pcapng-sys $VER…"
+            sleep 30
+          fi
 
       - name: Publish libpcapng
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         working-directory: bindings/rust
-        run: cargo publish -p libpcapng --allow-dirty
+        run: |
+          set -e
+          VER=$(cargo metadata --no-deps --format-version 1 \
+                | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='libpcapng'))")
+          if curl -sf "https://crates.io/api/v1/crates/libpcapng/$VER" >/dev/null; then
+            echo "libpcapng $VER already published — skipping."
+          else
+            cargo publish -p libpcapng --allow-dirty
+          fi

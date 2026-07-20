@@ -235,6 +235,22 @@ pub struct Field<'a> {
 }
 
 impl<'a> Field<'a> {
+    /// Wrap a raw field pointer as a borrowed view. Useful when walking a
+    /// dissection tree through raw pointers (e.g. driving a TUI tree widget) and
+    /// then wanting the safe accessors back.
+    ///
+    /// # Safety
+    /// `ptr` must point to a live `pcapng_field_t` that outlives `'a` (i.e. its
+    /// owning [`Dissection`] is still alive).
+    pub unsafe fn from_raw(ptr: *const sys::pcapng_field_t) -> Field<'a> {
+        Field { ptr, _p: PhantomData }
+    }
+
+    /// The underlying raw pointer (for identity comparisons / raw walking).
+    pub fn as_ptr(&self) -> *const sys::pcapng_field_t {
+        self.ptr
+    }
+
     #[inline]
     fn node(&self) -> &sys::pcapng_field_t {
         unsafe { &*self.ptr }
@@ -643,6 +659,177 @@ where
         }
         true
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reassembly — passive TCP stream + IP fragment reassembly (library features)
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" {
+    // libpcapng_reasm_add hands back a malloc'd datagram the caller must free.
+    fn free(ptr: *mut c_void);
+}
+
+/// New in-order bytes delivered by [`TcpReasm::add`] for one half-stream.
+pub struct TcpBytes<'a> {
+    pub src_ip: u32,
+    pub src_port: u16,
+    pub dst_ip: u32,
+    pub dst_port: u16,
+    /// Stable 0/1 direction id (0 = side-A→B, 1 = B→A).
+    pub dir: i32,
+    /// The newly delivered in-order bytes.
+    pub data: &'a [u8],
+    /// The cumulative reassembled buffer for this half-stream.
+    pub all: &'a [u8],
+}
+
+/// Passive TCP stream reassembly (libpcapng's `pcapng_tcp_reasm_*`).
+///
+/// Feed captured TCP segments with [`add`](TcpReasm::add); in-order bytes are
+/// delivered to your closure per direction, with the cumulative buffer so far.
+/// Intended for offline analysis (not a full TCP stack — no SACK/checksum).
+pub struct TcpReasm(*mut sys::pcapng_tcp_reasm_t);
+
+unsafe extern "C" fn tcp_tramp<F: FnMut(TcpBytes)>(
+    ud: *mut c_void,
+    src_ip: u32,
+    src_port: u16,
+    dst_ip: u32,
+    dst_port: u16,
+    dir: std::os::raw::c_int,
+    data: *const u8,
+    len: usize,
+    all: *const u8,
+    all_len: usize,
+) {
+    let cb = &mut *(ud as *mut F);
+    let slice = |p: *const u8, n: usize| {
+        if p.is_null() || n == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(p, n)
+        }
+    };
+    cb(TcpBytes {
+        src_ip,
+        src_port,
+        dst_ip,
+        dst_port,
+        dir,
+        data: slice(data, len),
+        all: slice(all, all_len),
+    });
+}
+
+impl TcpReasm {
+    /// Create a reassembly context.
+    pub fn new() -> TcpReasm {
+        TcpReasm(unsafe { sys::pcapng_tcp_reasm_new() })
+    }
+
+    /// Feed one TCP segment (IPs/ports in host byte order). `flags` is the raw
+    /// TCP flags byte; `payload` may be empty for pure ACK/control. The closure
+    /// runs zero or more times for newly in-order bytes produced by this segment.
+    pub fn add<F: FnMut(TcpBytes)>(
+        &mut self,
+        src_ip: u32,
+        dst_ip: u32,
+        src_port: u16,
+        dst_port: u16,
+        seq: u32,
+        flags: u8,
+        payload: &[u8],
+        mut cb: F,
+    ) {
+        let (pp, pl) = if payload.is_empty() {
+            (std::ptr::null(), 0usize)
+        } else {
+            (payload.as_ptr(), payload.len())
+        };
+        unsafe {
+            sys::pcapng_tcp_reasm_add(
+                self.0,
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port,
+                seq,
+                flags,
+                pp,
+                pl,
+                Some(tcp_tramp::<F>),
+                &mut cb as *mut F as *mut c_void,
+            );
+        }
+    }
+}
+
+impl Default for TcpReasm {
+    fn default() -> Self {
+        TcpReasm::new()
+    }
+}
+
+impl Drop for TcpReasm {
+    fn drop(&mut self) {
+        unsafe { sys::pcapng_tcp_reasm_free(self.0) }
+    }
+}
+
+/// Result of feeding a packet to [`IpReasm::add`].
+pub enum IpReasm4 {
+    /// Reassembly complete: a full IPv4 datagram (corrected length/checksum).
+    Complete(Vec<u8>),
+    /// Fragment buffered; more expected.
+    Buffered,
+    /// Not an IPv4 fragment — use the packet as-is.
+    PassThrough,
+}
+
+/// IPv4 fragment reassembly (libpcapng's `libpcapng_reasm_*`).
+pub struct IpReasm(*mut sys::libpcapng_reasm_t);
+
+impl IpReasm {
+    pub fn new() -> IpReasm {
+        IpReasm(unsafe { sys::libpcapng_reasm_new() })
+    }
+
+    /// Feed one packet (raw Ethernet frame or raw IPv4 datagram, auto-detected).
+    pub fn add(&mut self, pkt: &[u8]) -> IpReasm4 {
+        let mut out: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let rc = unsafe {
+            sys::libpcapng_reasm_add(self.0, pkt.as_ptr(), pkt.len(), &mut out, &mut out_len)
+        };
+        match rc {
+            1 => {
+                let v = if out.is_null() || out_len == 0 {
+                    Vec::new()
+                } else {
+                    unsafe { std::slice::from_raw_parts(out, out_len).to_vec() }
+                };
+                if !out.is_null() {
+                    unsafe { free(out as *mut c_void) };
+                }
+                IpReasm4::Complete(v)
+            }
+            0 => IpReasm4::Buffered,
+            _ => IpReasm4::PassThrough,
+        }
+    }
+}
+
+impl Default for IpReasm {
+    fn default() -> Self {
+        IpReasm::new()
+    }
+}
+
+impl Drop for IpReasm {
+    fn drop(&mut self) {
+        unsafe { sys::libpcapng_reasm_free(self.0) }
+    }
 }
 
 pub use pcapng_sys as ffi;
