@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["libpcapng-sys", "libpcapng"]
+
+[workspace.package]
+version = "0.15.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/stricaud/libpcapng"
+authors = ["Seb Tricaud <sebastien.tricaud@proton.me>"]
+rust-version = "1.74"
