@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stddef.h>   /* size_t */
 
 #define BLOCK_TOTAL_LENGTH_SIZE 4
 
