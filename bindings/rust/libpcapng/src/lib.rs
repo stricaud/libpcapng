@@ -977,6 +977,21 @@ impl Capture {
     pub fn break_loop(&self) {
         unsafe { sys::pcapng_capture_break(self.0) };
     }
+
+    /// Process one batch of currently-available packets and return immediately —
+    /// suitable for embedding in an existing event loop (e.g. a TUI). `count <=
+    /// 0` processes all available. Returns packets processed (0 if none), or a
+    /// negative value on error.
+    pub fn dispatch<F: FnMut(CapturedPacket)>(&self, count: i32, mut cb: F) -> i32 {
+        unsafe {
+            sys::pcapng_capture_dispatch(
+                self.0,
+                count,
+                Some(cap_tramp::<F>),
+                &mut cb as *mut F as *mut c_void,
+            )
+        }
+    }
 }
 
 impl Drop for Capture {
