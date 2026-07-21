@@ -777,6 +777,128 @@ impl Drop for TcpReasm {
     }
 }
 
+// ── Object (file) extraction ─────────────────────────────────────────────────
+
+/// The application protocol to carve transferred files from.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ObjectProto {
+    /// HTTP requests/responses (de-chunked).
+    Http,
+    /// SMB2 files (recovered from READ responses).
+    Smb,
+}
+
+/// One extracted object — a file transferred over the wire — copied out of the
+/// extractor so it outlives it.
+#[derive(Clone, Debug)]
+pub struct Object {
+    /// `"HTTP"` / `"SMB"`.
+    pub proto: String,
+    /// 1-based packet number the object ends in.
+    pub frame: i32,
+    /// HTTP `Host:` / SMB server (or an IP).
+    pub hostname: String,
+    /// HTTP `Content-Type` (empty for SMB).
+    pub content_type: String,
+    /// Filename derived from the URI / SMB path.
+    pub filename: String,
+    /// The object's bytes.
+    pub data: Vec<u8>,
+    /// Whether the full declared length was captured.
+    pub complete: bool,
+}
+
+/// Carves transferred files out of captured TCP traffic — the engine behind
+/// Wireshark's (and carcal's) "Export Objects". Reassembles TCP streams and
+/// parses the application protocol to recover each object's bytes + metadata.
+///
+/// Feed packets in capture order, call [`ObjectExtractor::finish`] once, then
+/// read [`ObjectExtractor::objects`].
+///
+/// ```no_run
+/// use libpcapng::{ObjectExtractor, ObjectProto, LINKTYPE_ETHERNET};
+/// let mut ex = ObjectExtractor::new(ObjectProto::Http);
+/// # let frames: Vec<Vec<u8>> = vec![];
+/// for (i, frame) in frames.iter().enumerate() {
+///     ex.add_packet(i as i32 + 1, frame, LINKTYPE_ETHERNET);
+/// }
+/// ex.finish();
+/// for obj in ex.objects() {
+///     println!("{} ({} bytes)", obj.filename, obj.data.len());
+/// }
+/// ```
+pub struct ObjectExtractor(*mut sys::pcapng_object_extractor_t);
+
+impl ObjectExtractor {
+    /// Create an extractor for `proto`.
+    pub fn new(proto: ObjectProto) -> ObjectExtractor {
+        let p = match proto {
+            ObjectProto::Http => sys::pcapng_object_proto_t_PCAPNG_OBJ_HTTP,
+            ObjectProto::Smb => sys::pcapng_object_proto_t_PCAPNG_OBJ_SMB,
+        };
+        let ptr = unsafe { sys::pcapng_object_extractor_new(p) };
+        assert!(!ptr.is_null(), "pcapng_object_extractor_new returned NULL");
+        ObjectExtractor(ptr)
+    }
+
+    /// Feed one captured packet (raw link-layer bytes). `frame` is its 1-based
+    /// packet number. Non-TCP packets are ignored; supply packets in capture
+    /// order.
+    pub fn add_packet(&mut self, frame: i32, data: &[u8], linktype: u16) {
+        unsafe {
+            sys::pcapng_object_extractor_add_packet(
+                self.0,
+                frame,
+                data.as_ptr(),
+                data.len() as u32,
+                linktype,
+            )
+        };
+    }
+
+    /// Parse the accumulated streams into objects. Call once, after all packets.
+    pub fn finish(&mut self) {
+        unsafe { sys::pcapng_object_extractor_finish(self.0) };
+    }
+
+    /// The extracted objects (each with its bytes and metadata).
+    pub fn objects(&self) -> Vec<Object> {
+        let n = unsafe { sys::pcapng_object_count(self.0) };
+        let mut out = Vec::with_capacity(n.max(0) as usize);
+        for i in 0..n {
+            let p = unsafe { sys::pcapng_object_at(self.0, i) };
+            if p.is_null() {
+                continue;
+            }
+            let o = unsafe { &*p };
+            let s = |a: &[std::os::raw::c_char]| {
+                unsafe { CStr::from_ptr(a.as_ptr()) }.to_string_lossy().into_owned()
+            };
+            let data = if o.data.is_null() || o.len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(o.data, o.len) }.to_vec()
+            };
+            out.push(Object {
+                proto: s(&o.proto),
+                frame: o.frame,
+                hostname: s(&o.hostname),
+                content_type: s(&o.content_type),
+                filename: s(&o.filename),
+                data,
+                complete: o.complete != 0,
+            });
+        }
+        out
+    }
+}
+
+impl Drop for ObjectExtractor {
+    fn drop(&mut self) {
+        unsafe { sys::pcapng_object_extractor_free(self.0) }
+    }
+}
+
 /// Result of feeding a packet to [`IpReasm::add`].
 pub enum IpReasm4 {
     /// Reassembly complete: a full IPv4 datagram (corrected length/checksum).
