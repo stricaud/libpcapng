@@ -133,7 +133,7 @@ impl Dissection {
         unsafe { &*self.0 }
     }
 
-    fn cstr(bytes: &[i8]) -> &str {
+    fn cstr(bytes: &[std::os::raw::c_char]) -> &str {
         let ptr = bytes.as_ptr() as *const std::os::raw::c_char;
         unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or("")
     }
@@ -393,7 +393,7 @@ pub mod posa {
     pub fn load_file<P: AsRef<Path>>(path: P) -> Result<i32, Error> {
         let c = CString::new(path.as_ref().to_string_lossy().as_bytes())
             .map_err(|_| Error("path contains NUL".into()))?;
-        let mut errbuf = [0i8; 256];
+        let mut errbuf = [0 as std::os::raw::c_char; 256];
         let n = unsafe {
             sys::pcapng_posa_load_file(c.as_ptr(), errbuf.as_mut_ptr(), errbuf.len())
         };
@@ -408,7 +408,7 @@ pub mod posa {
     /// Parse `.posa` definitions from an in-memory string.
     pub fn load_text(src: &str) -> Result<i32, Error> {
         let c = CString::new(src).map_err(|_| Error("text contains NUL".into()))?;
-        let mut errbuf = [0i8; 256];
+        let mut errbuf = [0 as std::os::raw::c_char; 256];
         let n = unsafe {
             sys::pcapng_posa_load_text(c.as_ptr(), errbuf.as_mut_ptr(), errbuf.len())
         };
@@ -973,7 +973,7 @@ fn cstr_field(bytes: &[std::os::raw::c_char]) -> String {
 /// Enumerate the available capture interfaces. Does not require privileges.
 pub fn list_devices() -> Result<Vec<Device>, Error> {
     let mut count: std::os::raw::c_int = 0;
-    let mut errbuf = [0i8; 256];
+    let mut errbuf = [0 as std::os::raw::c_char; 256];
     let ptr = unsafe { sys::pcapng_capture_list_devices(&mut count, errbuf.as_mut_ptr()) };
     if ptr.is_null() {
         let msg = cstr_field(&errbuf);
@@ -994,7 +994,7 @@ pub fn list_devices() -> Result<Vec<Device>, Error> {
 
 /// The first suitable non-loopback interface, if any.
 pub fn default_device() -> Option<String> {
-    let mut errbuf = [0i8; 256];
+    let mut errbuf = [0 as std::os::raw::c_char; 256];
     let p = unsafe { sys::pcapng_capture_default_device(errbuf.as_mut_ptr()) };
     if p.is_null() {
         None
@@ -1049,7 +1049,7 @@ impl Capture {
     /// Open a capture on `device` (see [`list_devices`] / [`default_device`]).
     pub fn open(device: &str) -> Result<Capture, Error> {
         let c = CString::new(device).map_err(|_| Error("device contains NUL".into()))?;
-        let mut errbuf = [0i8; 256];
+        let mut errbuf = [0 as std::os::raw::c_char; 256];
         let h = unsafe { sys::pcapng_capture_open(c.as_ptr(), errbuf.as_mut_ptr()) };
         if h.is_null() {
             let msg = cstr_field(&errbuf);
@@ -1062,7 +1062,7 @@ impl Capture {
     /// Attach an in-kernel display filter (Wireshark syntax).
     pub fn set_filter(&self, expr: &str) -> Result<(), Error> {
         let c = CString::new(expr).map_err(|_| Error("filter contains NUL".into()))?;
-        let mut errbuf = [0i8; 256];
+        let mut errbuf = [0 as std::os::raw::c_char; 256];
         let rc = unsafe { sys::pcapng_capture_set_filter(self.0, c.as_ptr(), errbuf.as_mut_ptr()) };
         if rc != 0 {
             let msg = cstr_field(&errbuf);
