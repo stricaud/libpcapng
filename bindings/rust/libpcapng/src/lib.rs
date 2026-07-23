@@ -154,7 +154,7 @@ impl<'a> Field<'a> {
     pub fn byte_len(&self) -> i32 { self.0.len }
 
     /// String-formatted value for IP/MAC/string field types.
-    pub fn value_str(&self) -> &str { cstr_to_str(&self.0.str) }
+    pub fn value_str(&self) -> &str { cstr_to_str(&self.0.str_) }
 
     /// Next sibling field at the same level.
     pub fn next(&self) -> Option<Field<'a>> {

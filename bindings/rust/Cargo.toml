@@ -3,7 +3,7 @@ resolver = "2"
 members = ["pcapng-sys", "libpcapng"]
 
 [workspace.package]
-version = "0.15.8"
+version = "0.15.9"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/stricaud/libpcapng"
