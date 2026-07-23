@@ -1,6 +1,6 @@
 {
   "name": "@stricaud/libpcapng",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "JavaScript/WebAssembly bindings for libpcapng — read and dissect pcap/pcapng in the browser",
   "type": "module",
   "main": "dist/libpcapng.mjs",
