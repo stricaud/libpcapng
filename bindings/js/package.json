@@ -1,0 +1,33 @@
+{
+  "name": "@stricaud/libpcapng",
+  "version": "0.1.0",
+  "description": "JavaScript/WebAssembly bindings for libpcapng — read and dissect pcap/pcapng in the browser",
+  "type": "module",
+  "main": "dist/libpcapng.mjs",
+  "module": "dist/libpcapng.mjs",
+  "files": [
+    "dist/libpcapng.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "./build.sh",
+    "test": "node test/smoke.mjs"
+  },
+  "keywords": [
+    "pcap",
+    "pcapng",
+    "wireshark",
+    "wasm",
+    "webassembly",
+    "network",
+    "packet",
+    "dissect"
+  ],
+  "license": "MIT",
+  "author": "Sebastien Tricaud",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stricaud/libpcapng.git",
+    "directory": "bindings/js"
+  }
+}

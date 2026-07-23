@@ -1,0 +1,56 @@
+name: JS/WASM bindings
+
+# Builds the Emscripten JavaScript/WebAssembly bindings (bindings/js) so the
+# ready-to-use ES module is available as a downloadable artifact, and attached
+# to releases tagged `js-v*`.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lib/**"
+      - "bindings/js/**"
+      - ".github/workflows/js-bindings.yml"
+  pull_request:
+    paths:
+      - "lib/**"
+      - "bindings/js/**"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build libpcapng.mjs (WASM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Build bindings
+        working-directory: bindings/js
+        run: ./build.sh
+
+      - name: Smoke test (Node)
+        working-directory: bindings/js
+        run: node test/smoke.mjs
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libpcapng-js
+          path: bindings/js/dist/libpcapng.mjs
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" bindings/js/dist/libpcapng.mjs --clobber

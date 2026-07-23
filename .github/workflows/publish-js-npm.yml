@@ -1,0 +1,45 @@
+name: Publish JS bindings to npm
+
+# Builds the WASM bindings and publishes bindings/js to npm.
+# Trigger: push a tag like `js-v0.1.0`
+#
+# One-time setup:
+#   Create an npm automation token and add it as the NPM_TOKEN repo secret
+#   (Settings → Secrets and variables → Actions).
+#   Or configure npm Trusted Publishing (OIDC) and drop NODE_AUTH_TOKEN.
+
+on:
+  push:
+    tags: ["js-v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Build & publish @stricaud/libpcapng
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build bindings
+        working-directory: bindings/js
+        run: ./build.sh
+
+      - name: Smoke test
+        working-directory: bindings/js
+        run: node test/smoke.mjs
+
+      - name: Publish
+        working-directory: bindings/js
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
