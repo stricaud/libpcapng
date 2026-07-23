@@ -48,30 +48,43 @@ use libpcapng::{Dissection, LINKTYPE_ETHERNET};
 
 fn dissect(frame: &[u8]) {
     let d = Dissection::new(frame, LINKTYPE_ETHERNET).expect("allocation failed");
-
     println!("{} → {}  [{}]  {}", d.src(), d.dst(), d.proto(), d.info());
     // e.g. "192.168.1.1 → 8.8.8.8  [dns]  Standard query A example.com"
 }
 ```
 
-For advanced field inspection, use the raw pointer to the field tree via the `libpcapng::ffi` escape hatch:
+### Inspecting the field tree
+
+Walk the protocol field tree with safe accessors — no raw pointers needed:
 
 ```rust
-use libpcapng::{Dissection, LINKTYPE_ETHERNET, ffi};
-use std::ffi::CStr;
+use libpcapng::{Dissection, LINKTYPE_ETHERNET};
 
 fn print_fields(frame: &[u8]) {
     let d = Dissection::new(frame, LINKTYPE_ETHERNET).unwrap();
-    let mut node = d.root_ptr();
-    while !node.is_null() {
-        let f = unsafe { &*node };
-        let abbrev = unsafe { CStr::from_ptr(f.abbrev.as_ptr()) }.to_str().unwrap_or("");
-        let label  = unsafe { CStr::from_ptr(f.label.as_ptr())  }.to_str().unwrap_or("");
-        if !abbrev.is_empty() {
-            println!("  {abbrev}  {label}  (off={}, len={})", f.off, f.len);
+
+    let mut field = d.root_field();
+    while let Some(f) = field {
+        if !f.abbrev().is_empty() {
+            println!("  {}  {}  (off={}, len={})", f.abbrev(), f.label(), f.offset(), f.byte_len());
         }
-        node = f.next;
+        field = f.next();
     }
+}
+```
+
+Drill into nested protocol layers with `first_child()`:
+
+```rust
+let mut layer = d.root_field();
+while let Some(f) = layer {
+    println!("[{}]", f.label());
+    let mut sub = f.first_child();
+    while let Some(s) = sub {
+        println!("    {} = {}", s.abbrev(), s.label());
+        sub = s.next();
+    }
+    layer = f.next();
 }
 ```
 
@@ -79,26 +92,10 @@ fn print_fields(frame: &[u8]) {
 
 ## Adding a new protocol with POSA
 
-POSA is a declarative grammar for packet decoders — no C required. Write a `.posa` file and load it at runtime; the decoded fields integrate seamlessly with the built-in dissectors.
+POSA is a declarative grammar for packet decoders — no C required. Define your protocol in a string constant and call `load_posa`; the decoded fields integrate seamlessly with the built-in dissectors.
 
-**`myproto.posa`**:
-```
-protocol MYPROTO
-    rule tcp.port == 9000
-    required uint16 version
-    required uint32 msg_type
-        LOGIN  = 1
-        LOGOUT = 2
-        DATA   = 3
-    required payload body
-
-info "MYPROTO v%d type=%d" version, msg_type
-```
-
-**Rust**:
 ```rust
-use libpcapng::ffi;
-use std::ffi::{CStr, CString};
+use libpcapng::{load_posa, Dissection, LINKTYPE_ETHERNET};
 
 const MYPROTO_POSA: &str = "
 protocol MYPROTO
@@ -113,17 +110,20 @@ protocol MYPROTO
 info \"MYPROTO v%d type=%d\" version, msg_type
 ";
 
-fn load_protocol() {
-    let src = CString::new(MYPROTO_POSA).unwrap();
-    let mut errbuf = vec![0i8; 256];
-    let n = unsafe {
-        ffi::pcapng_posa_load_text(src.as_ptr(), errbuf.as_mut_ptr(), 256)
-    };
-    assert!(n >= 0, "posa load failed: {}", unsafe {
-        CStr::from_ptr(errbuf.as_ptr()).to_string_lossy()
-    });
+fn main() {
+    // Load the protocol — returns the number loaded, or an error description.
+    let n = load_posa(MYPROTO_POSA).expect("posa parse error");
     println!("Loaded {n} protocol(s)");
+
+    // From here on, Dissection::new automatically recognises MYPROTO on port 9000.
 }
+```
+
+To load from a file instead, read it into a `String` first:
+
+```rust
+let src = std::fs::read_to_string("myproto.posa").unwrap();
+load_posa(&src).unwrap();
 ```
 
 POSA field types: `uint8/16/32/64`, `le_uint16/32/64`, `mac`, `ip4`, `ip6`, `cstring`, `payload`, `bytes<N>`, `bytes[lenfield]`, `dnsname`. Extended constructs include `repeat`, `when/else`, `bits`, `layer`, `scope`, `info`, and `color`. See the [tutorial](https://github.com/stricaud/libpcapng/blob/main/Tutorial.md).
@@ -132,75 +132,56 @@ POSA field types: `uint8/16/32/64`, `le_uint16/32/64`, `mac`, `ip4`, `ip6`, `cst
 
 ## TCP reassembly
 
-Feed captured segments into a reassembly context; a callback delivers the in-order byte stream as soon as gaps are filled:
+Create a `TcpReassembler` and feed segments into it with `add`. The callback receives
+in-order bytes as gaps fill — direction, cumulative buffer, and everything as Rust slices:
 
 ```rust
-use libpcapng::ffi;
+use libpcapng::TcpReassembler;
 
 fn main() {
-    // Allocate a reassembly context (one per tracked connection set).
-    let ctx = unsafe { ffi::pcapng_tcp_reasm_new() };
-    assert!(!ctx.is_null());
+    let mut reasm = TcpReassembler::new();
 
-    // Feed a segment: IPs and ports in host byte order, raw TCP flags byte.
-    unsafe {
-        ffi::pcapng_tcp_reasm_add(
-            ctx,
-            0xc0a80101,  // 192.168.1.1
-            0xc0a80102,  // 192.168.1.2
-            54321,       // src port
-            80,          // dst port
-            1000,        // seq
-            0x02,        // SYN flag
-            std::ptr::null(),  // no payload on SYN
-            0,
-            Some(stream_callback),
-            std::ptr::null_mut(),
-        );
-    }
-
-    unsafe { ffi::pcapng_tcp_reasm_free(ctx) };
-}
-
-unsafe extern "C" fn stream_callback(
-    _userdata: *mut std::ffi::c_void,
-    src_ip: u32, src_port: u16,
-    dst_ip: u32, dst_port: u16,
-    dir: i32,
-    data: *const u8, len: usize,
-    _all: *const u8, all_len: usize,
-) {
-    let bytes = std::slice::from_raw_parts(data, len);
-    println!(
-        "dir={dir}  {}.{}→{}.{}  +{len} bytes ({all_len} total):  {:?}",
-        src_ip >> 24, src_port, dst_ip >> 24, dst_port,
-        &bytes[..bytes.len().min(32)]
+    // Feed a SYN segment: IPs/ports in host byte order, raw TCP flags byte.
+    reasm.add(
+        0xc0a80101,  // 192.168.1.1
+        0xc0a80102,  // 192.168.1.2
+        54321,       // src port
+        80,          // dst port
+        1000,        // seq
+        0x02,        // SYN flag
+        &[],         // no payload
+        |stream| {
+            println!(
+                "dir={}  +{} bytes  ({} total so far)",
+                stream.direction,
+                stream.bytes.len(),
+                stream.all_bytes.len(),
+            );
+        },
     );
+
+    // TcpReassembler is freed automatically on drop.
 }
 ```
 
-Combine with `read_file` + `Dissection` to reassemble streams from a pcapng file:
+### Reassemble streams from a pcapng file
 
 ```rust
-use libpcapng::{read_file, Dissection, BLOCK_EPB, LINKTYPE_ETHERNET, ffi};
-use std::ffi::CStr;
+use libpcapng::{read_file, Dissection, TcpReassembler, BLOCK_EPB, LINKTYPE_ETHERNET};
 
 fn reassemble(path: &str) {
-    let ctx = unsafe { ffi::pcapng_tcp_reasm_new() };
+    let mut reasm = TcpReassembler::new();
 
     read_file(path, |_, block_type, data| {
         if block_type != BLOCK_EPB || data.len() < 28 { return true; }
-        // data[0..28] is the EPB header; packet starts at byte 28.
-        let pkt = &data[28..];
+        let pkt = &data[28..];  // skip 28-byte EPB header
         if let Some(d) = Dissection::new(pkt, LINKTYPE_ETHERNET) {
             if d.proto() == "tcp" {
-                // extract fields via ffi and feed pcapng_tcp_reasm_add …
+                // Extract IP/TCP fields from the field tree and feed reasm.add(...)
             }
         }
         true
     }).unwrap();
-
-    unsafe { ffi::pcapng_tcp_reasm_free(ctx) };
 }
 ```
 
@@ -211,76 +192,52 @@ fn reassemble(path: &str) {
 Live capture uses kernel zero-copy ring buffers (Linux `PACKET_MMAP` / `TPACKET_V3`, macOS BPF). **Requires `CAP_NET_RAW` or root.**
 
 ```rust
-use libpcapng::ffi;
-use std::ffi::{CStr, CString};
+use libpcapng::{Capture, Dissection, LINKTYPE_ETHERNET};
 
 fn main() {
-    let mut errbuf = vec![0i8; ffi::PCAPNG_CAPTURE_ERRBUF_SIZE as usize];
+    let device = libpcapng::default_device().expect("no suitable interface found");
+    println!("Capturing on {device}");
 
-    // Pick a device.
-    let dev = unsafe { ffi::pcapng_capture_default_device(errbuf.as_mut_ptr()) };
-    assert!(!dev.is_null(), "no device found");
-    println!("Capturing on {}", unsafe { CStr::from_ptr(dev).to_string_lossy() });
+    let mut cap = Capture::open(&device).expect("open failed");
 
-    let cap = unsafe { ffi::pcapng_capture_open(dev, errbuf.as_mut_ptr()) };
-    assert!(!cap.is_null(), "open failed: {}", unsafe {
-        CStr::from_ptr(errbuf.as_ptr()).to_string_lossy()
-    });
+    // Optional Wireshark-compatible display filter.
+    cap.set_filter("tcp.dstport == 443").expect("filter error");
 
-    // Optional display filter (Wireshark-compatible subset).
-    let filter = CString::new("tcp.dstport == 443").unwrap();
-    unsafe { ffi::pcapng_capture_set_filter(cap, filter.as_ptr(), errbuf.as_mut_ptr()) };
+    // Capture 100 packets; count <= 0 means unlimited (until Ctrl-C or cap.stop()).
+    let n = cap.run(100, |pkt| {
+        println!(
+            "ts={:.6}  {} bytes  (wire: {})",
+            pkt.timestamp_ns as f64 / 1e9,
+            pkt.captured_len,
+            pkt.original_len,
+        );
+        if let Some(d) = Dissection::new(pkt.data, LINKTYPE_ETHERNET) {
+            println!("  {} → {}  [{}]  {}", d.src(), d.dst(), d.proto(), d.info());
+        }
+    }).expect("capture error");
 
-    // Capture 100 packets.
-    unsafe { ffi::pcapng_capture_loop(cap, 100, Some(on_packet), std::ptr::null_mut()) };
-
-    unsafe { ffi::pcapng_capture_close(cap) };
-}
-
-unsafe extern "C" fn on_packet(
-    pkt: *const ffi::pcapng_packet_info_t,
-    _userdata: *mut std::ffi::c_void,
-) {
-    let p = &*pkt;
-    let data = std::slice::from_raw_parts(p.data, p.captured_len as usize);
-    println!(
-        "ts={:.6}  {} bytes  (wire: {})",
-        p.timestamp_ns as f64 / 1e9,
-        p.captured_len,
-        p.original_len,
-    );
-    // Dissect on the fly:
-    if let Some(d) = libpcapng::Dissection::new(data, libpcapng::LINKTYPE_ETHERNET) {
-        println!("  {} → {}  [{}]  {}", d.src(), d.dst(), d.proto(), d.info());
-    }
+    println!("Delivered {n} packets.");
+    // Capture is closed automatically on drop.
 }
 ```
 
 ### Capture to file
 
 ```rust
-unsafe {
-    ffi::pcapng_capture_to_file(
-        b"eth0\0".as_ptr() as _,
-        b"out.pcapng\0".as_ptr() as _,
-        b"tcp\0".as_ptr() as _,   // filter (or null)
-        0,                        // 0 = until Ctrl-C
-        errbuf.as_mut_ptr(),
-    );
-}
+use libpcapng::Capture;
+
+Capture::to_file("eth0", "out.pcapng", "tcp", 0).expect("capture failed");
+// count = 0 → runs until Ctrl-C; filter = "" → no filter
 ```
 
 ### List available interfaces
 
 ```rust
-let mut count = 0i32;
-let devs = unsafe { ffi::pcapng_capture_list_devices(&mut count, errbuf.as_mut_ptr()) };
-for i in 0..count as usize {
-    let d = unsafe { &*devs.add(i) };
-    let name = unsafe { CStr::from_ptr(d.name.as_ptr()).to_string_lossy() };
-    println!("{name}");
+use libpcapng::list_devices;
+
+for dev in list_devices().unwrap() {
+    println!("{}: {}", dev.name, dev.description);
 }
-unsafe { ffi::pcapng_capture_free_devices(devs) };
 ```
 
 ---
