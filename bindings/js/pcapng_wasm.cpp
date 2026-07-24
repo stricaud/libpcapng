@@ -417,6 +417,55 @@ val getConversations() {
   return arr;
 }
 
+/* ── Protocol hierarchy ──────────────────────────────────────────────────── */
+struct HNode {
+  std::string abbrev, name;
+  double packets = 0, bytes = 0;
+  std::vector<HNode> kids;
+};
+HNode *h_child(HNode *p, const std::string &ab, const std::string &nm) {
+  for (auto &c : p->kids)
+    if (c.abbrev == ab) return &c;
+  p->kids.push_back(HNode{ab, nm, 0, 0, {}});
+  return &p->kids.back();
+}
+val h_to_val(const HNode &n) {
+  val o = val::object();
+  o.set("abbrev", n.abbrev);
+  o.set("name", n.name);
+  o.set("packets", n.packets);
+  o.set("bytes", n.bytes);
+  val ch = val::array();
+  for (size_t i = 0; i < n.kids.size(); i++) ch.set((int)i, h_to_val(n.kids[i]));
+  o.set("children", ch);
+  return o;
+}
+
+/* Nested protocol tree (Frame → Ethernet → IP → TCP → …) with per-node packet
+   and byte counts. Returns the top-level nodes. */
+val getProtocolHierarchy() {
+  HNode root;
+  for (Packet &p : g_session.pkts) {
+    pcapng_dissection_t *d =
+        pcapng_dissect(p.bytes.data(), p.caplen, p.origlen, p.linktype);
+    if (!d) continue;
+    HNode *cur = &root;
+    for (pcapng_field_t *layer = d->root->children; layer; layer = layer->next) {
+      std::string ab = layer->abbrev[0] ? layer->abbrev : "?";
+      std::string nm = layer->label;
+      size_t comma = nm.find(',');
+      if (comma != std::string::npos) nm = nm.substr(0, comma);
+      cur = h_child(cur, ab, nm);
+      cur->packets++;
+      cur->bytes += p.caplen;
+    }
+    pcapng_dissection_free(d);
+  }
+  val arr = val::array();
+  for (size_t i = 0; i < root.kids.size(); i++) arr.set((int)i, h_to_val(root.kids[i]));
+  return arr;
+}
+
 /* Per-host endpoint statistics (any IP packet, TCP/UDP or not). */
 val getEndpoints() {
   struct Ep { double packets = 0, bytes = 0, txp = 0, txb = 0, rxp = 0, rxb = 0; std::string addr; };
@@ -791,6 +840,7 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("getPacketBytes", &getPacketBytes);
   emscripten::function("getConversations", &getConversations);
   emscripten::function("getEndpoints", &getEndpoints);
+  emscripten::function("getProtocolHierarchy", &getProtocolHierarchy);
   emscripten::function("getStream", &getStream);
   emscripten::function("extractObjects", &extractObjects);
   emscripten::function("validateFilter", &validateFilter);
