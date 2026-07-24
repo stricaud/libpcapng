@@ -50,6 +50,8 @@ struct Packet {
   std::vector<uint8_t> bytes;              /* captured bytes (caplen)          */
   std::string proto, src, dst, info;       /* summary columns (dissected once) */
   std::string comment;                     /* pcapng opt_comment               */
+  bool custom = false;                     /* a pcapng Custom Block, not a frame */
+  uint32_t pen = 0;                        /* Custom Block private-enterprise no. */
 };
 
 struct Session {
@@ -127,6 +129,22 @@ int on_block(uint32_t counter, uint32_t block_type, uint32_t btl,
     p.bytes.assign(payload, payload + pkt_len);
     p.linktype = !g_session.linktypes.empty() ? g_session.linktypes[0]
                                               : PCAPNG_LINKTYPE_ETHERNET;
+    g_session.pkts.push_back(std::move(p));
+    return 0;
+  }
+
+  if (block_type == PCAPNG_CUSTOM_DATA_BLOCK || block_type == PCAPNG_CUSTOM_DATA_BLOCK_NOCOPY) {
+    if (btl < 16) return 0;
+    Packet p;
+    p.custom = true;
+    memcpy(&p.pen, data, 4);            /* body starts with the 4-byte PEN */
+    size_t bodyLen = (size_t)btl - 12;  /* block minus 8-byte header and 4-byte trailer */
+    const uint8_t *cd = data + 4;
+    size_t cdLen = bodyLen > 4 ? bodyLen - 4 : 0;
+    p.bytes.assign(cd, cd + cdLen);
+    p.caplen = (uint32_t)cdLen;
+    p.origlen = btl;
+    p.linktype = 0xffff;               /* sentinel: not a link-layer frame */
     g_session.pkts.push_back(std::move(p));
     return 0;
   }
@@ -213,6 +231,13 @@ int loadCapture(val u8) {
 
   /* Dissect each packet once for the summary columns. */
   for (auto &p : g_session.pkts) {
+    if (p.custom) {
+      char b[80];
+      snprintf(b, sizeof b, "Custom Block: PEN=%u, %u bytes", p.pen, (unsigned)p.bytes.size());
+      p.proto = "PCAPNG";
+      p.info = b;
+      continue;
+    }
     pcapng_dissection_t *d =
         pcapng_dissect(p.bytes.data(), p.caplen, p.origlen, p.linktype);
     if (d) {
@@ -280,6 +305,33 @@ val getDetail(int index) {
   if (index < 0 || index >= static_cast<int>(g_session.pkts.size()))
     return val::null();
   Packet &p = g_session.pkts[index];
+  if (p.custom) {
+    val layers = val::array();
+    val node = val::object();
+    char lbl[64];
+    snprintf(lbl, sizeof lbl, "pcapng Custom Block (PEN %u)", p.pen);
+    node.set("abbrev", std::string("pcapng.cb"));
+    node.set("label", std::string(lbl));
+    node.set("value", std::string(""));
+    node.set("off", 0);
+    node.set("len", (int)p.bytes.size());
+    val kids = val::array();
+    val f1 = val::object();
+    f1.set("abbrev", std::string("pcapng.cb.pen"));
+    f1.set("label", std::string("Private Enterprise Number: ") + std::to_string(p.pen));
+    f1.set("value", std::to_string(p.pen));
+    f1.set("off", 0); f1.set("len", 0); f1.set("children", val::array());
+    kids.set(0, f1);
+    val f2 = val::object();
+    f2.set("abbrev", std::string("pcapng.cb.data"));
+    f2.set("label", std::string("Custom data: ") + std::to_string(p.bytes.size()) + " bytes");
+    f2.set("value", hex_of(p.bytes.data(), p.bytes.size() < 16 ? (int)p.bytes.size() : 16));
+    f2.set("off", 0); f2.set("len", (int)p.bytes.size()); f2.set("children", val::array());
+    kids.set(1, f2);
+    node.set("children", kids);
+    layers.set(0, node);
+    return layers;
+  }
   pcapng_dissection_t *d =
       pcapng_dissect(p.bytes.data(), p.caplen, p.origlen, p.linktype);
   if (!d) return val::null();
