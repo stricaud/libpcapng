@@ -22,6 +22,9 @@ extern "C" {
  *   - boolean logic:     &&  and    ||  or    !  not    ( )
  *   - value forms:       decimal / 0xHEX, "quoted string", 1.2.3.4[/cidr],
  *                        aa:bb:cc:dd:ee:ff
+ *   - byte slices:       eth.src[0:3] == 00:00:5e   ipv6.addr[14:2] == 00:01
+ *   - set membership:    tcp.port in {80, 443, 8080}   udp.port in {1..1024}
+ *   - regex:             http.host matches "\\.example\\.com$"  (POSIX ERE)
  *   - field aliases:     ip.addr→{ip.src,ip.dst}, tcp.port→{srcport,dstport},
  *                        udp.port, eth.addr, ipv6.addr  (Wireshark "any" match)
  */

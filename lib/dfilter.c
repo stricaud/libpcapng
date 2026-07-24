@@ -15,6 +15,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <regex.h>
 
 /* ── operators ──────────────────────────────────────────────────────────── */
 typedef enum { OP_EQ, OP_NE, OP_GT, OP_LT, OP_GE, OP_LE, OP_CONTAINS, OP_MATCHES } op_t;
@@ -27,13 +28,17 @@ typedef struct node {
   char field[PCAPNG_FIELD_ABBREV_MAX];
   op_t op;
   char value[128];
+  int  has_slice;              /* field[...] byte-slice comparison            */
+  int  slice_off;
+  int  slice_len;              /* -1 = to end of field                        */
 } node_t;
 
 struct pcapng_dfilter { node_t *root; int match_all; };
 
 /* ── lexer ──────────────────────────────────────────────────────────────── */
 typedef enum { T_WORD, T_STR, T_LP, T_RP, T_AND, T_OR, T_NOT,
-               T_EQ, T_NE, T_GT, T_LT, T_GE, T_LE, T_EOF } ttype_t;
+               T_EQ, T_NE, T_GT, T_LT, T_GE, T_LE,
+               T_LB, T_RB, T_LBRACE, T_RBRACE, T_COMMA, T_EOF } ttype_t;
 typedef struct { ttype_t t; char s[128]; } tok_t;
 
 typedef struct {
@@ -54,6 +59,11 @@ static void lex_next(lex_t *L)
   switch (*p) {
   case '(': L->cur.t = T_LP; L->p = p + 1; return;
   case ')': L->cur.t = T_RP; L->p = p + 1; return;
+  case '[': L->cur.t = T_LB; L->p = p + 1; return;
+  case ']': L->cur.t = T_RB; L->p = p + 1; return;
+  case '{': L->cur.t = T_LBRACE; L->p = p + 1; return;
+  case '}': L->cur.t = T_RBRACE; L->p = p + 1; return;
+  case ',': L->cur.t = T_COMMA; L->p = p + 1; return;
   case '&': if (p[1] == '&') { L->cur.t = T_AND; L->p = p + 2; return; } break;
   case '|': if (p[1] == '|') { L->cur.t = T_OR;  L->p = p + 2; return; } break;
   case '=': if (p[1] == '=') { L->cur.t = T_EQ;  L->p = p + 2; return; } break;
@@ -108,8 +118,67 @@ static node_t *parse_or(lex_t *L);
 
 static node_t *mknode(ntype_t t) { node_t *n = calloc(1, sizeof *n); if (n) n->type = t; return n; }
 
+static node_t *mkbin(ntype_t t, node_t *a, node_t *b)
+{ node_t *n = mknode(t); if (n) { n->a = a; n->b = b; } return n; }
+
+/* Build a comparison node, carrying an optional byte-slice. */
+static node_t *mkcmp(const char *field, op_t op, const char *value,
+                     int has_slice, int soff, int slen)
+{
+  node_t *n = mknode(N_CMP);
+  if (!n) return NULL;
+  snprintf(n->field, sizeof n->field, "%s", field);
+  snprintf(n->value, sizeof n->value, "%s", value);
+  n->op = op;
+  n->has_slice = has_slice;
+  n->slice_off = soff;
+  n->slice_len = slen;
+  return n;
+}
+
+/* Parse a Wireshark slice spec (the text between [ and ]):
+     i   → off=i len=1        i:j → off=i len=j
+     i-j → off=i len=j-i+1    :j  → off=0 len=j       i: → off=i len=-1 (end) */
+static void parse_slice(const char *s, int *off, int *len)
+{
+  const char *colon = strchr(s, ':');
+  const char *dash  = strchr(s, '-');
+  if (colon) {
+    *off = (colon == s) ? 0 : atoi(s);
+    *len = (colon[1]) ? atoi(colon + 1) : -1;
+  } else if (dash && dash != s) {
+    int a = atoi(s), b = atoi(dash + 1);
+    *off = a;
+    *len = b - a + 1;
+    if (*len < 0) *len = 0;
+  } else {
+    *off = atoi(s);
+    *len = 1;
+  }
+}
+
+/* Desugar one `in {}` element into a comparison / range subtree. */
+static node_t *in_element(const char *field, const char *elem,
+                          int has_slice, int soff, int slen)
+{
+  const char *range = strstr(elem, "..");
+  if (range) {
+    char lo[128];
+    int n = (int)(range - elem);
+    if (n > (int)sizeof lo - 1) n = sizeof lo - 1;
+    memcpy(lo, elem, n); lo[n] = '\0';
+    return mkbin(N_AND,
+                 mkcmp(field, OP_GE, lo, has_slice, soff, slen),
+                 mkcmp(field, OP_LE, range + 2, has_slice, soff, slen));
+  }
+  return mkcmp(field, OP_EQ, elem, has_slice, soff, slen);
+}
+
 static node_t *parse_primary(lex_t *L)
 {
+  char field[PCAPNG_FIELD_ABBREV_MAX];
+  int has_slice = 0, soff = 0, slen = -1, op;
+
   if (L->cur.t == T_LP) {
     node_t *n;
     lex_next(L);
@@ -123,35 +192,66 @@ static node_t *parse_primary(lex_t *L)
     snprintf(L->err, sizeof L->err, "expected a field name");
     return NULL;
   }
+  snprintf(field, sizeof field, "%s", L->cur.s);
+  lex_next(L);
+
+  /* optional byte-slice: field[i:j] */
+  if (L->cur.t == T_LB) {
+    lex_next(L);
+    if (L->cur.t != T_WORD) { snprintf(L->err, sizeof L->err, "expected a slice like [0:4]"); return NULL; }
+    parse_slice(L->cur.s, &soff, &slen);
+    has_slice = 1;
+    lex_next(L);
+    if (L->cur.t != T_RB) { snprintf(L->err, sizeof L->err, "expected ']'"); return NULL; }
+    lex_next(L);
+  }
+
+  /* membership: field in { a, b, 1..5 } */
+  if (L->cur.t == T_WORD && !strcmp(L->cur.s, "in")) {
+    node_t *acc = NULL;
+    lex_next(L);
+    if (L->cur.t != T_LBRACE) { snprintf(L->err, sizeof L->err, "expected '{' after 'in'"); return NULL; }
+    lex_next(L);
+    while (L->cur.t == T_WORD || L->cur.t == T_STR) {
+      node_t *e = in_element(field, L->cur.s, has_slice, soff, slen);
+      acc = acc ? mkbin(N_OR, acc, e) : e;
+      lex_next(L);
+      if (L->cur.t == T_COMMA) { lex_next(L); continue; }
+      break;
+    }
+    if (L->cur.t != T_RBRACE) { snprintf(L->err, sizeof L->err, "expected '}'"); return NULL; }
+    lex_next(L);
+    if (!acc) { snprintf(L->err, sizeof L->err, "empty set"); return NULL; }
+    return acc;
+  }
+
+  op = -1;
+  switch (L->cur.t) {
+  case T_EQ: op = OP_EQ; break;
+  case T_NE: op = OP_NE; break;
+  case T_GT: op = OP_GT; break;
+  case T_LT: op = OP_LT; break;
+  case T_GE: op = OP_GE; break;
+  case T_LE: op = OP_LE; break;
+  case T_WORD: op = word_op(L->cur.s); break;
+  default: break;
+  }
+  if (op >= 0) {
+    node_t *n;
+    lex_next(L);
+    if (L->cur.t != T_WORD && L->cur.t != T_STR) {
+      snprintf(L->err, sizeof L->err, "expected a value after operator");
+      return NULL;
+    }
+    n = mkcmp(field, (op_t)op, L->cur.s, has_slice, soff, slen);
+    lex_next(L);
+    return n;
+  }
+
+  /* bare field → existence */
   {
     node_t *n = mknode(N_EXISTS);
-    int op;
-    snprintf(n->field, sizeof n->field, "%s", L->cur.s);
-    lex_next(L);
-
-    op = -1;
-    switch (L->cur.t) {
-    case T_EQ: op = OP_EQ; break;
-    case T_NE: op = OP_NE; break;
-    case T_GT: op = OP_GT; break;
-    case T_LT: op = OP_LT; break;
-    case T_GE: op = OP_GE; break;
-    case T_LE: op = OP_LE; break;
-    case T_WORD: op = word_op(L->cur.s); break;
-    default: break;
-    }
-    if (op >= 0) {
-      n->type = N_CMP;
-      n->op = (op_t)op;
-      lex_next(L);
-      if (L->cur.t != T_WORD && L->cur.t != T_STR) {
-        snprintf(L->err, sizeof L->err, "expected a value after operator");
-        free(n);
-        return NULL;
-      }
-      snprintf(n->value, sizeof n->value, "%s", L->cur.s);
-      lex_next(L);
-    }
+    if (n) snprintf(n->field, sizeof n->field, "%s", field);
     return n;
   }
 }
@@ -283,8 +383,86 @@ static int cmp_op(op_t op, long long c)   /* c = memcmp/sign result */
   }
 }
 
-static int field_matches(const pcapng_field_t *f, op_t op, const char *val)
+/* Parse "aa:bb:cc", "aabbcc", or "0x…" into bytes. Returns count, or -1. */
+static int parse_hexbytes(const char *s, uint8_t *out, int max)
 {
+  int n = 0;
+  if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+  if (strchr(s, ':')) {
+    char buf[256], *tok, *save = NULL;
+    snprintf(buf, sizeof buf, "%s", s);
+    for (tok = strtok_r(buf, ":", &save); tok && n < max; tok = strtok_r(NULL, ":", &save))
+      out[n++] = (uint8_t)strtoul(tok, NULL, 16);
+    return n;
+  }
+  {
+    int len = (int)strlen(s), i;
+    if (len % 2) return -1;
+    for (i = 0; i < len && n < max; i += 2) {
+      char h[3] = { s[i], s[i + 1], 0 };
+      if (!isxdigit((unsigned char)s[i]) || !isxdigit((unsigned char)s[i + 1])) return -1;
+      out[n++] = (uint8_t)strtoul(h, NULL, 16);
+    }
+  }
+  return n;
+}
+
+/* Textual value of a field, for regex `matches`. */
+static void field_text(const pcapng_field_t *f, char *out, size_t sz)
+{
+  if (f->str[0]) { snprintf(out, sz, "%s", f->str); return; }
+  if (f->vtype == PCAPNG_FT_UINT) { snprintf(out, sz, "%llu", (unsigned long long)f->u); return; }
+  if (f->blen > 0) {
+    size_t o = 0; int i;
+    for (i = 0; i < f->blen && o + 2 < sz; i++) o += snprintf(out + o, sz - o, "%02x", f->bytes[i]);
+    return;
+  }
+  out[0] = '\0';
+}
+
+/* Compare a byte-slice of the field (field[off:len]) against a hex value. */
+static int slice_matches(const pcapng_field_t *f, const struct node *n)
+{
+  const uint8_t *fb = f->bytes;
+  int fblen = f->blen, off = n->slice_off, len, wn, c, i;
+  uint8_t want[64];
+  if (fblen <= 0) return 0;                 /* only byte-valued fields sliceable */
+  len = n->slice_len < 0 ? fblen - off : n->slice_len;
+  if (off < 0 || len < 0 || off + len > fblen) return 0;
+  wn = parse_hexbytes(n->value, want, (int)sizeof want);
+  if (wn < 0) return 0;
+  if (n->op == OP_CONTAINS) {
+    for (i = 0; i + wn <= len; i++)
+      if (memcmp(fb + off + i, want, wn) == 0) return 1;
+    return 0;
+  }
+  if (n->op == OP_EQ || n->op == OP_NE) {
+    int eq = (len == wn) && memcmp(fb + off, want, wn) == 0;
+    return n->op == OP_EQ ? eq : !eq;
+  }
+  c = memcmp(fb + off, want, len < wn ? len : wn);
+  if (c == 0) c = len - wn;
+  return cmp_op(n->op, c);
+}
+
+static int regex_matches(const pcapng_field_t *f, const char *pat)
+{
+  char txt[512];
+  regex_t re;
+  int m;
+  field_text(f, txt, sizeof txt);
+  if (regcomp(&re, pat, REG_EXTENDED | REG_NOSUB) != 0) return 0;
+  m = regexec(&re, txt, 0, NULL, 0) == 0;
+  regfree(&re);
+  return m;
+}
+
+static int field_matches(const pcapng_field_t *f, const struct node *n)
+{
+  op_t op = n->op;
+  const char *val = n->value;
+  if (n->has_slice) return slice_matches(f, n);
+  if (op == OP_MATCHES) return regex_matches(f, val);
   switch (f->vtype) {
   case PCAPNG_FT_UINT: {
     uint64_t rhs = to_num(val);
@@ -341,7 +519,7 @@ static int eval(const node_t *n, pcapng_field_t *root)
     for (i = 0; i < na; i++) {
       nh = pcapng_field_collect(root, al[i], hits, 64);
       for (j = 0; j < nh; j++)
-        if (field_matches(hits[j], n->op, n->value)) return 1;   /* "any" semantics */
+        if (field_matches(hits[j], n)) return 1;   /* "any" semantics */
     }
     return 0;
   }
