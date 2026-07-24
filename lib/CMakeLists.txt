@@ -31,6 +31,7 @@ set(LIBPCAPNG_HEADERS
   include/libpcapng/reassembly_tcp.h
   include/libpcapng/capture.h
   include/libpcapng/dissect.h
+  include/libpcapng/dfilter.h
   include/libpcapng/objects.h
   include/libpcapng/posa.h
 )
@@ -61,6 +62,7 @@ set(LIBPCAPNG_SOURCES
   reassembly_tcp.c
   capture.c
   dissect.c
+  dfilter.c
   objects.c
   posa.c
   wire_layout.c

@@ -24,6 +24,7 @@
 
 extern "C" {
 #include <libpcapng/blocks.h>
+#include <libpcapng/dfilter.h>
 #include <libpcapng/dissect.h>
 #include <libpcapng/io.h>
 #include <libpcapng/objects.h>
@@ -569,6 +570,85 @@ val extractObjects(std::string protoStr) {
   return arr;
 }
 
+/* ── Display filters (Wireshark-style) ──────────────────────────────────────
+   Backed by libpcapng's pcapng_dfilter engine, evaluated against each packet's
+   dissection tree. */
+
+/* Validate an expression: {ok, error}. */
+val validateFilter(std::string expr) {
+  char err[192] = {0};
+  pcapng_dfilter_t *f = pcapng_dfilter_compile(expr.c_str(), err, sizeof err);
+  val r = val::object();
+  r.set("ok", f != nullptr);
+  r.set("error", std::string(f ? "" : err));
+  if (f) pcapng_dfilter_free(f);
+  return r;
+}
+
+/* Boolean mask (Uint8Array, one byte per packet) of packets matching `expr`. */
+val matchFilter(std::string expr) {
+  char err[192] = {0};
+  pcapng_dfilter_t *f = pcapng_dfilter_compile(expr.c_str(), err, sizeof err);
+  size_t n = g_session.pkts.size();
+  std::vector<uint8_t> mask(n, 0);
+  if (f && !pcapng_dfilter_is_match_all(f)) {
+    for (size_t i = 0; i < n; i++) {
+      Packet &p = g_session.pkts[i];
+      pcapng_dissection_t *d =
+          pcapng_dissect(p.bytes.data(), p.caplen, p.origlen, p.linktype);
+      if (d) {
+        mask[i] = pcapng_dfilter_match(f, d->root) ? 1 : 0;
+        pcapng_dissection_free(d);
+      }
+    }
+  } else {
+    std::fill(mask.begin(), mask.end(), 1);
+  }
+  if (f) pcapng_dfilter_free(f);
+  return make_u8(mask);
+}
+
+/* Evaluate several filters at once. Each packet is dissected a single time and
+   tested against every compiled filter — ideal for the multi-series IO graph.
+   Returns an array of Uint8Array masks, aligned with `exprs`. An invalid
+   expression yields an all-zero mask. */
+val matchFilters(val exprs) {
+  int nf = exprs["length"].as<int>();
+  size_t n = g_session.pkts.size();
+  std::vector<pcapng_dfilter_t *> filters(nf, nullptr);
+  std::vector<int> matchAll(nf, 0);
+  for (int j = 0; j < nf; j++) {
+    std::string e = exprs[j].as<std::string>();
+    filters[j] = pcapng_dfilter_compile(e.c_str(), nullptr, 0);
+    matchAll[j] = filters[j] ? pcapng_dfilter_is_match_all(filters[j]) : 0;
+  }
+
+  std::vector<std::vector<uint8_t>> masks(nf, std::vector<uint8_t>(n, 0));
+  for (size_t i = 0; i < n; i++) {
+    Packet &p = g_session.pkts[i];
+    /* Only dissect if at least one filter actually needs it. */
+    bool needDissect = false;
+    for (int j = 0; j < nf; j++)
+      if (filters[j] && !matchAll[j]) needDissect = true;
+    pcapng_dissection_t *d = nullptr;
+    if (needDissect)
+      d = pcapng_dissect(p.bytes.data(), p.caplen, p.origlen, p.linktype);
+    for (int j = 0; j < nf; j++) {
+      if (!filters[j]) continue;              /* invalid → all zero */
+      if (matchAll[j]) { masks[j][i] = 1; continue; }
+      if (d) masks[j][i] = pcapng_dfilter_match(filters[j], d->root) ? 1 : 0;
+    }
+    if (d) pcapng_dissection_free(d);
+  }
+
+  for (int j = 0; j < nf; j++)
+    if (filters[j]) pcapng_dfilter_free(filters[j]);
+
+  val arr = val::array();
+  for (int j = 0; j < nf; j++) arr.set(j, make_u8(masks[j]));
+  return arr;
+}
+
 /* ── Declarative (posa) dissectors ──────────────────────────────────────── */
 
 /* Load one or more .posa protocol definitions from text into the engine.
@@ -620,6 +700,9 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("getConversations", &getConversations);
   emscripten::function("getStream", &getStream);
   emscripten::function("extractObjects", &extractObjects);
+  emscripten::function("validateFilter", &validateFilter);
+  emscripten::function("matchFilter", &matchFilter);
+  emscripten::function("matchFilters", &matchFilters);
   emscripten::function("loadPosaText", &loadPosaText);
   emscripten::function("listPosa", &listPosa);
   emscripten::function("listProtocols", &listProtocols);

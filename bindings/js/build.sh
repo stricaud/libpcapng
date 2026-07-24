@@ -42,6 +42,7 @@ SOURCES=(
   "$LIB/io.c"
   "$LIB/objects.c"
   "$LIB/dissect.c"
+  "$LIB/dfilter.c"
   "$LIB/posa.c"
   "$LIB/wire_layout.c"
   "$LIB/easyapi.c"
