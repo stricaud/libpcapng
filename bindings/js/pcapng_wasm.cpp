@@ -49,6 +49,7 @@ struct Packet {
   uint16_t linktype = PCAPNG_LINKTYPE_ETHERNET;
   std::vector<uint8_t> bytes;              /* captured bytes (caplen)          */
   std::string proto, src, dst, info;       /* summary columns (dissected once) */
+  std::string comment;                     /* pcapng opt_comment               */
 };
 
 struct Session {
@@ -93,6 +94,22 @@ int on_block(uint32_t counter, uint32_t block_type, uint32_t btl,
     p.linktype = (p.interface_id < g_session.linktypes.size())
                      ? g_session.linktypes[p.interface_id]
                      : PCAPNG_LINKTYPE_ETHERNET;
+    /* parse EPB options for a comment (opt_comment == 1) */
+    {
+      uint32_t caplen = epb->captured_packet_length;
+      uint32_t pad = (4 - (caplen % 4)) % 4;
+      size_t off = sizeof(*epb) + caplen + pad;
+      size_t body = btl >= 12 ? (size_t)btl - 12 : 0;
+      while (off + 4 <= body) {
+        uint16_t code, olen;
+        memcpy(&code, data + off, 2);
+        memcpy(&olen, data + off + 2, 2);
+        if (code == 0) break;
+        if (code == PCAPNG_OPT_COMMENT && off + 4 + olen <= body)
+          p.comment.assign((const char *)(data + off + 4), olen);
+        off += 4 + olen + ((4 - (olen % 4)) % 4);
+      }
+    }
     g_session.pkts.push_back(std::move(p));
     return 0;
   }
@@ -210,6 +227,31 @@ int loadCapture(val u8) {
 }
 
 int getPacketCount() { return static_cast<int>(g_session.pkts.size()); }
+
+/* Absolute epoch seconds of the first packet (for absolute time display). */
+double getStartTime() {
+  return g_session.pkts.empty() ? 0.0 : packet_seconds(g_session.pkts[0]);
+}
+
+/* Values of a single field (by abbrev) for every packet — a custom column.
+   Returns an array of strings aligned with the packet list ("" if absent). */
+val getFieldColumn(std::string abbrev) {
+  val arr = val::array();
+  for (size_t i = 0; i < g_session.pkts.size(); i++) {
+    Packet &p = g_session.pkts[i];
+    std::string out;
+    pcapng_dissection_t *d =
+        pcapng_dissect(p.bytes.data(), p.caplen, p.origlen, p.linktype);
+    if (d) {
+      pcapng_field_t *hit[1];
+      if (pcapng_field_collect(d->root, abbrev.c_str(), hit, 1) > 0)
+        out = field_value(hit[0]);
+      pcapng_dissection_free(d);
+    }
+    arr.set((int)i, out);
+  }
+  return arr;
+}
 
 /* The packet list: [{no, time, src, dst, proto, length, info}, …].
    `time` is seconds relative to the first packet. */
@@ -668,6 +710,24 @@ val extractObjects(std::string protoStr) {
   return arr;
 }
 
+/* ── Packet comments (pcapng opt_comment) ───────────────────────────────────*/
+std::string getComment(int index) {
+  if (index < 0 || index >= (int)g_session.pkts.size()) return "";
+  return g_session.pkts[index].comment;
+}
+void setComment(int index, std::string text) {
+  if (index < 0 || index >= (int)g_session.pkts.size()) return;
+  g_session.pkts[index].comment = text;
+}
+/* Indices of packets that carry a comment (for a comment list / export). */
+val getCommentedPackets() {
+  val arr = val::array();
+  int k = 0;
+  for (size_t i = 0; i < g_session.pkts.size(); i++)
+    if (!g_session.pkts[i].comment.empty()) arr.set(k++, (int)i);
+  return arr;
+}
+
 /* ── Export a subset of packets as a new pcapng ──────────────────────────────
    `indices` is a JS array of packet indices (any order). Produces a complete
    pcapng (SHB + one IDB per original interface + an EPB per packet) with
@@ -701,11 +761,21 @@ val exportPcapng(val indices) {
     uint64_t ts = g_session.is_classic
                       ? (uint64_t)p.ts_high * 1000000ull + p.ts_low
                       : (((uint64_t)p.ts_high) << 32) | p.ts_low;
-    size_t sz = libpcapng_enhanced_packet_block_size(p.caplen);
+    pcapng_option_t opt;
+    const pcapng_option_t *opts = NULL;
+    size_t nopt = 0;
+    if (!p.comment.empty()) {
+      opt.type = PCAPNG_OPT_COMMENT;
+      opt.length = (uint16_t)p.comment.size();
+      opt.value = p.comment.data();
+      opts = &opt;
+      nopt = 1;
+    }
+    size_t sz = libpcapng_enhanced_packet_block_size_with_options(p.caplen, opts, nopt);
     base = out.size(); out.resize(base + sz);
     libpcapng_enhanced_packet_block_write_full(p.bytes.data(), p.caplen, p.origlen,
                                                iface, (uint32_t)(ts >> 32),
-                                               (uint32_t)(ts & 0xffffffffu), NULL, 0,
+                                               (uint32_t)(ts & 0xffffffffu), opts, nopt,
                                                out.data() + base);
   }
   return make_u8(out);
@@ -836,6 +906,8 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("loadCapture", &loadCapture);
   emscripten::function("getPacketCount", &getPacketCount);
   emscripten::function("getSummaries", &getSummaries);
+  emscripten::function("getStartTime", &getStartTime);
+  emscripten::function("getFieldColumn", &getFieldColumn);
   emscripten::function("getDetail", &getDetail);
   emscripten::function("getPacketBytes", &getPacketBytes);
   emscripten::function("getConversations", &getConversations);
@@ -847,6 +919,9 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("matchFilter", &matchFilter);
   emscripten::function("matchFilters", &matchFilters);
   emscripten::function("exportPcapng", &exportPcapng);
+  emscripten::function("getComment", &getComment);
+  emscripten::function("setComment", &setComment);
+  emscripten::function("getCommentedPackets", &getCommentedPackets);
   emscripten::function("loadPosaText", &loadPosaText);
   emscripten::function("listPosa", &listPosa);
   emscripten::function("listProtocols", &listProtocols);
