@@ -466,6 +466,8 @@ static void dissect_ipv6(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   {
     const uint8_t *pl = d + 40;
     int pll = len - 40;
+    /* a .posa that claims this next-header wins over the built-in C */
+    if (nxt != 6 && nxt != 17 && try_posa_ipproto(c, nxt, pl, pll, root)) return;
     switch (nxt) {
     case 6:  dissect_tcp(c, pl, pll, root); break;
     case 17: dissect_udp(c, pl, pll, root); break;
