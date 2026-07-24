@@ -26,8 +26,13 @@ extern "C" {
 #include <libpcapng/blocks.h>
 #include <libpcapng/dissect.h>
 #include <libpcapng/io.h>
+#include <libpcapng/objects.h>
 #include <libpcapng/posa.h>
+#include <libpcapng/reassembly_tcp.h>
 }
+
+#include <algorithm>
+#include <unordered_map>
 
 using emscripten::val;
 
@@ -254,6 +259,300 @@ val getPacketBytes(int index) {
   return u8;
 }
 
+/* ── Transport (L4) location, conversations & stream reassembly ──────────────
+ * A small self-contained frame parser (Ethernet/VLAN → IPv4/IPv6 → TCP/UDP),
+ * ported from carscal's l4.rs, used for conversation keys and Follow Stream. */
+
+struct L4 {
+  int proto = 0;                 /* 6 = TCP, 17 = UDP, 0 = not located          */
+  std::string src_ip, dst_ip;
+  std::vector<uint8_t> src_raw, dst_raw;
+  uint16_t sport = 0, dport = 0;
+  uint32_t seq = 0;
+  uint8_t flags = 0;
+  size_t payoff = 0, paylen = 0;
+};
+
+std::string fmt_ipv4(const uint8_t *b) {
+  char s[16];
+  snprintf(s, sizeof s, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+  return s;
+}
+std::string fmt_ipv6(const uint8_t *b) {
+  char s[48];
+  snprintf(s, sizeof s, "%x:%x:%x:%x:%x:%x:%x:%x",
+           (b[0] << 8) | b[1], (b[2] << 8) | b[3], (b[4] << 8) | b[5],
+           (b[6] << 8) | b[7], (b[8] << 8) | b[9], (b[10] << 8) | b[11],
+           (b[12] << 8) | b[13], (b[14] << 8) | b[15]);
+  return s;
+}
+
+/* Returns 1 and sets *ip_off/*v6 if an IP header is located for this linktype. */
+int ip_offset(const uint8_t *f, size_t n, uint16_t linktype, size_t *ip_off,
+              int *v6) {
+  if (linktype == PCAPNG_LINKTYPE_ETHERNET) {
+    if (n < 14) return 0;
+    size_t off = 12;
+    uint16_t et = (f[off] << 8) | f[off + 1];
+    off += 2;
+    while (et == 0x8100 || et == 0x88a8) {
+      if (off + 4 > n) return 0;
+      et = (f[off + 2] << 8) | f[off + 3];
+      off += 4;
+    }
+    if (et == 0x0800) { *ip_off = off; *v6 = 0; return 1; }
+    if (et == 0x86dd) { *ip_off = off; *v6 = 1; return 1; }
+    return 0;
+  }
+  if (linktype == PCAPNG_LINKTYPE_RAW || linktype == PCAPNG_LINKTYPE_IPV4 ||
+      linktype == PCAPNG_LINKTYPE_IPV6) {
+    if (n < 1) return 0;
+    *v6 = (f[0] >> 4) == 6 || linktype == PCAPNG_LINKTYPE_IPV6;
+    *ip_off = 0;
+    return 1;
+  }
+  if (linktype == PCAPNG_LINKTYPE_NULL) {
+    if (n < 4) return 0;
+    *v6 = f[0] != 2;
+    *ip_off = 4;
+    return 1;
+  }
+  return 0;
+}
+
+bool locate_l4(const uint8_t *f, size_t n, uint16_t linktype, L4 *out) {
+  size_t ip_off;
+  int v6;
+  if (!ip_offset(f, n, linktype, &ip_off, &v6)) return false;
+  size_t l4_off;
+  if (!v6) {
+    if (n < ip_off + 20) return false;
+    size_t ihl = (f[ip_off] & 0x0f) * 4;
+    if (ihl < 20 || n < ip_off + ihl) return false;
+    out->proto = f[ip_off + 9];
+    out->src_ip = fmt_ipv4(f + ip_off + 12);
+    out->dst_ip = fmt_ipv4(f + ip_off + 16);
+    out->src_raw.assign(f + ip_off + 12, f + ip_off + 16);
+    out->dst_raw.assign(f + ip_off + 16, f + ip_off + 20);
+    l4_off = ip_off + ihl;
+  } else {
+    if (n < ip_off + 40) return false;
+    out->proto = f[ip_off + 6];
+    out->src_ip = fmt_ipv6(f + ip_off + 8);
+    out->dst_ip = fmt_ipv6(f + ip_off + 24);
+    out->src_raw.assign(f + ip_off + 8, f + ip_off + 24);
+    out->dst_raw.assign(f + ip_off + 24, f + ip_off + 40);
+    l4_off = ip_off + 40;
+  }
+  if (out->proto == 6) {
+    if (n < l4_off + 20) return false;
+    out->sport = (f[l4_off] << 8) | f[l4_off + 1];
+    out->dport = (f[l4_off + 2] << 8) | f[l4_off + 3];
+    out->seq = ((uint32_t)f[l4_off + 4] << 24) | ((uint32_t)f[l4_off + 5] << 16) |
+               ((uint32_t)f[l4_off + 6] << 8) | f[l4_off + 7];
+    size_t data_off = (f[l4_off + 12] >> 4) * 4;
+    out->flags = f[l4_off + 13];
+    out->payoff = l4_off + (data_off < 20 ? 20 : data_off);
+    out->paylen = n > out->payoff ? n - out->payoff : 0;
+    return true;
+  }
+  if (out->proto == 17) {
+    if (n < l4_off + 8) return false;
+    out->sport = (f[l4_off] << 8) | f[l4_off + 1];
+    out->dport = (f[l4_off + 2] << 8) | f[l4_off + 3];
+    out->payoff = l4_off + 8;
+    out->paylen = n > out->payoff ? n - out->payoff : 0;
+    return true;
+  }
+  return false;
+}
+
+/* Direction-independent conversation key. */
+std::string conv_key(const L4 &l) {
+  std::string a = l.src_ip + "/" + std::to_string(l.sport);
+  std::string b = l.dst_ip + "/" + std::to_string(l.dport);
+  const std::string &lo = a <= b ? a : b;
+  const std::string &hi = a <= b ? b : a;
+  return std::to_string(l.proto) + "|" + lo + "|" + hi;
+}
+
+uint32_t ipv4_u32(const std::vector<uint8_t> &raw) {
+  if (raw.size() != 4) return 0;
+  return ((uint32_t)raw[0] << 24) | ((uint32_t)raw[1] << 16) |
+         ((uint32_t)raw[2] << 8) | raw[3];
+}
+
+/* TCP/UDP conversations: [{id, proto, addrA, portA, addrB, portB, packets,
+   bytes, firstPacket}]. `firstPacket` can be passed to getStream(). */
+val getConversations() {
+  std::vector<val> rows;
+  std::unordered_map<std::string, int> idx;
+  for (size_t i = 0; i < g_session.pkts.size(); i++) {
+    const Packet &p = g_session.pkts[i];
+    L4 l;
+    if (!locate_l4(p.bytes.data(), p.bytes.size(), p.linktype, &l)) continue;
+    std::string k = conv_key(l);
+    auto it = idx.find(k);
+    if (it == idx.end()) {
+      val o = val::object();
+      o.set("id", (int)i);            /* representative packet index */
+      o.set("proto", std::string(l.proto == 6 ? "TCP" : "UDP"));
+      o.set("addrA", l.src_ip);
+      o.set("portA", (int)l.sport);
+      o.set("addrB", l.dst_ip);
+      o.set("portB", (int)l.dport);
+      o.set("packets", 1);
+      o.set("bytes", (double)p.caplen);
+      idx[k] = (int)rows.size();
+      rows.push_back(o);
+    } else {
+      val &o = rows[it->second];
+      o.set("packets", o["packets"].as<int>() + 1);
+      o.set("bytes", o["bytes"].as<double>() + (double)p.caplen);
+    }
+  }
+  val arr = val::array();
+  for (size_t i = 0; i < rows.size(); i++) arr.set((int)i, rows[i]);
+  return arr;
+}
+
+struct ReasmState {
+  std::vector<uint8_t> bufs[2];
+  uint32_t dir_ip[2] = {0, 0};
+  uint16_t dir_port[2] = {0, 0};
+  bool dir_set[2] = {false, false};
+};
+
+void reasm_cb(void *ud, uint32_t sip, uint16_t sport, uint32_t dip,
+              uint16_t dport, int dir, const uint8_t *data, size_t len,
+              const uint8_t *all, size_t all_len) {
+  (void)dip; (void)dport; (void)data; (void)len;
+  ReasmState *s = static_cast<ReasmState *>(ud);
+  int d = dir & 1;
+  s->bufs[d].assign(all, all + all_len);
+  s->dir_ip[d] = sip;
+  s->dir_port[d] = sport;
+  s->dir_set[d] = true;
+}
+
+val make_u8(const std::vector<uint8_t> &v) {
+  val u8 = val::global("Uint8Array").new_(val((int)v.size()));
+  if (!v.empty())
+    u8.call<void>("set",
+                  val(emscripten::typed_memory_view(v.size(), v.data())));
+  return u8;
+}
+
+/* Follow the conversation that packet `index` belongs to. TCP is reassembled by
+   libpcapng's reassembler; UDP is concatenated in capture order. Returns
+   {ok, proto, clientIp, clientPort, serverIp, serverPort, packets,
+    client:Uint8Array, server:Uint8Array}. */
+val getStream(int index) {
+  if (index < 0 || index >= (int)g_session.pkts.size()) return val::null();
+  const Packet &sp = g_session.pkts[index];
+  L4 sel;
+  if (!locate_l4(sp.bytes.data(), sp.bytes.size(), sp.linktype, &sel))
+    return val::null();
+  std::string key = conv_key(sel);
+  bool is_tcp = sel.proto == 6;
+
+  bool have_client = false;
+  std::string client_ip, server_ip;
+  uint16_t client_port = 0, server_port = 0;
+  std::vector<uint8_t> client_raw;
+  int packets = 0;
+
+  ReasmState st;
+  pcapng_tcp_reasm_t *r = is_tcp ? pcapng_tcp_reasm_new() : nullptr;
+  std::vector<uint8_t> udp_client, udp_server;
+
+  for (const Packet &p : g_session.pkts) {
+    L4 l;
+    if (!locate_l4(p.bytes.data(), p.bytes.size(), p.linktype, &l)) continue;
+    if (conv_key(l) != key) continue;
+    packets++;
+    if (!have_client) {
+      have_client = true;
+      client_ip = l.src_ip; client_port = l.sport; client_raw = l.src_raw;
+      server_ip = l.dst_ip; server_port = l.dport;
+    }
+    bool is_client = l.src_ip == client_ip && l.sport == client_port;
+    const uint8_t *pl = p.bytes.data() + l.payoff;
+    if (r) {
+      pcapng_tcp_reasm_add(r, ipv4_u32(l.src_raw), ipv4_u32(l.dst_raw), l.sport,
+                           l.dport, l.seq, l.flags, l.paylen ? pl : nullptr,
+                           l.paylen, reasm_cb, &st);
+    } else if (l.paylen) {
+      auto &dst = is_client ? udp_client : udp_server;
+      dst.insert(dst.end(), pl, pl + l.paylen);
+    }
+  }
+
+  std::vector<uint8_t> client_bytes, server_bytes;
+  if (is_tcp) {
+    uint32_t ckey_ip = ipv4_u32(client_raw);
+    int cd = -1;
+    for (int d = 0; d < 2; d++)
+      if (st.dir_set[d] && st.dir_ip[d] == ckey_ip && st.dir_port[d] == client_port)
+        cd = d;
+    if (cd < 0) cd = 0;
+    client_bytes = std::move(st.bufs[cd]);
+    server_bytes = std::move(st.bufs[1 - cd]);
+    pcapng_tcp_reasm_free(r);
+  } else {
+    client_bytes = std::move(udp_client);
+    server_bytes = std::move(udp_server);
+  }
+
+  val o = val::object();
+  o.set("ok", true);
+  o.set("proto", std::string(is_tcp ? "TCP" : "UDP"));
+  o.set("clientIp", client_ip);
+  o.set("clientPort", (int)client_port);
+  o.set("serverIp", server_ip);
+  o.set("serverPort", (int)server_port);
+  o.set("packets", packets);
+  o.set("client", make_u8(client_bytes));
+  o.set("server", make_u8(server_bytes));
+  return o;
+}
+
+/* ── Object (file) extraction — HTTP / SMB ──────────────────────────────────
+   Extract transferred files from the whole capture using libpcapng's object
+   extractor. Returns [{proto, frame, hostname, contentType, filename,
+   complete, data:Uint8Array}]. */
+val extractObjects(std::string protoStr) {
+  std::string p = protoStr;
+  std::transform(p.begin(), p.end(), p.begin(), ::tolower);
+  pcapng_object_proto_t proto = p == "smb" ? PCAPNG_OBJ_SMB : PCAPNG_OBJ_HTTP;
+  pcapng_object_extractor_t *ex = pcapng_object_extractor_new(proto);
+  val arr = val::array();
+  if (!ex) return arr;
+  for (size_t i = 0; i < g_session.pkts.size(); i++) {
+    const Packet &pk = g_session.pkts[i];
+    pcapng_object_extractor_add_packet(ex, (int)(i + 1), pk.bytes.data(),
+                                       pk.caplen, pk.linktype);
+  }
+  pcapng_object_extractor_finish(ex);
+  int n = pcapng_object_count(ex);
+  for (int i = 0; i < n; i++) {
+    const pcapng_object_t *o = pcapng_object_at(ex, i);
+    if (!o) continue;
+    val obj = val::object();
+    obj.set("proto", std::string(o->proto));
+    obj.set("frame", o->frame);
+    obj.set("hostname", std::string(o->hostname));
+    obj.set("contentType", std::string(o->content_type));
+    obj.set("filename", std::string(o->filename));
+    obj.set("complete", (bool)o->complete);
+    std::vector<uint8_t> data(o->data, o->data + o->len);
+    obj.set("data", make_u8(data));
+    arr.set(i, obj);
+  }
+  pcapng_object_extractor_free(ex);
+  return arr;
+}
+
 /* ── Declarative (posa) dissectors ──────────────────────────────────────── */
 
 /* Load one or more .posa protocol definitions from text into the engine.
@@ -302,6 +601,9 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("getSummaries", &getSummaries);
   emscripten::function("getDetail", &getDetail);
   emscripten::function("getPacketBytes", &getPacketBytes);
+  emscripten::function("getConversations", &getConversations);
+  emscripten::function("getStream", &getStream);
+  emscripten::function("extractObjects", &extractObjects);
   emscripten::function("loadPosaText", &loadPosaText);
   emscripten::function("listPosa", &listPosa);
   emscripten::function("listProtocols", &listProtocols);
