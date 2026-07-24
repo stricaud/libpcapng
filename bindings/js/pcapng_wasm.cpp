@@ -960,6 +960,23 @@ val exportPcapng(val indices) {
   return make_u8(out);
 }
 
+/* All pcapng Custom Blocks: [{frame, pen, size, data:Uint8Array}]. */
+val getCustomBlocks() {
+  val arr = val::array();
+  int k = 0;
+  for (size_t i = 0; i < g_session.pkts.size(); i++) {
+    Packet &p = g_session.pkts[i];
+    if (!p.custom) continue;
+    val o = val::object();
+    o.set("frame", (int)(i + 1));
+    o.set("pen", (double)p.pen);
+    o.set("size", (int)p.bytes.size());
+    o.set("data", make_u8(p.bytes));
+    arr.set(k++, o);
+  }
+  return arr;
+}
+
 /* ── Display filters (Wireshark-style) ──────────────────────────────────────
    Backed by libpcapng's pcapng_dfilter engine, evaluated against each packet's
    dissection tree. */
@@ -1100,6 +1117,7 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("matchFilter", &matchFilter);
   emscripten::function("matchFilters", &matchFilters);
   emscripten::function("exportPcapng", &exportPcapng);
+  emscripten::function("getCustomBlocks", &getCustomBlocks);
   emscripten::function("getComment", &getComment);
   emscripten::function("setComment", &setComment);
   emscripten::function("getCommentedPackets", &getCommentedPackets);
