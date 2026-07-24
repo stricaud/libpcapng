@@ -83,8 +83,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.tag.outputs.tag }}" "${{ env.ARTIFACT }}" --repo "${{ github.repository }}" --clobber
+        # (regular manylinux build)
 
   build-debian:
+    # NOTE: the debian .so is uploaded under a distinct "-bookworm" asset name so
+    # it does not collide with the manylinux py3.14 .so from the `build` job.
+    # Two jobs racing to `--clobber` the same asset name causes an HTTP 404.
     needs: tag
     name: debian-bookworm-${{ matrix.arch }} / py3.14
     runs-on: ${{ matrix.runner }}
@@ -130,4 +134,10 @@ jobs:
       - name: Attach to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.tag.outputs.tag }}" "${{ env.ARTIFACT }}" --repo "${{ github.repository }}" --clobber
+        # Upload under a distinct "-bookworm" asset name so it never collides
+        # with the manylinux py3.14 .so from the `build` job (concurrent
+        # --clobber of the same asset name → HTTP 404).
+        run: |
+          DEB="${ARTIFACT%.so}-bookworm.so"
+          cp "$ARTIFACT" "$DEB"
+          gh release upload "${{ needs.tag.outputs.tag }}" "$DEB" --repo "${{ github.repository }}" --clobber
