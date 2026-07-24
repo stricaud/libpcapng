@@ -312,6 +312,8 @@ struct L4 {
   std::vector<uint8_t> src_raw, dst_raw;
   uint16_t sport = 0, dport = 0;
   uint32_t seq = 0;
+  uint32_t ack = 0;
+  uint16_t window = 0;
   uint8_t flags = 0;
   size_t payoff = 0, paylen = 0;
 };
@@ -393,8 +395,11 @@ bool locate_l4(const uint8_t *f, size_t n, uint16_t linktype, L4 *out) {
     out->dport = (f[l4_off + 2] << 8) | f[l4_off + 3];
     out->seq = ((uint32_t)f[l4_off + 4] << 24) | ((uint32_t)f[l4_off + 5] << 16) |
                ((uint32_t)f[l4_off + 6] << 8) | f[l4_off + 7];
+    out->ack = ((uint32_t)f[l4_off + 8] << 24) | ((uint32_t)f[l4_off + 9] << 16) |
+               ((uint32_t)f[l4_off + 10] << 8) | f[l4_off + 11];
     size_t data_off = (f[l4_off + 12] >> 4) * 4;
     out->flags = f[l4_off + 13];
+    out->window = (uint16_t)((f[l4_off + 14] << 8) | f[l4_off + 15]);
     out->payoff = l4_off + (data_off < 20 ? 20 : data_off);
     out->paylen = n > out->payoff ? n - out->payoff : 0;
     return true;
@@ -674,6 +679,54 @@ val getStream(int index) {
   return o;
 }
 
+/* Per-packet timeline for the conversation of packet `index` — for the TCP
+   stream graph. Returns {clientIp, clientPort, serverIp, serverPort,
+   packets:[{no, time, seq, ack, len, win, dir, flags}]}. */
+val getStreamPackets(int index) {
+  if (index < 0 || index >= (int)g_session.pkts.size()) return val::null();
+  const Packet &sp = g_session.pkts[index];
+  L4 sel;
+  if (!locate_l4(sp.bytes.data(), sp.bytes.size(), sp.linktype, &sel)) return val::null();
+  std::string key = conv_key(sel);
+
+  bool have_client = false;
+  std::string client_ip, server_ip;
+  uint16_t client_port = 0, server_port = 0;
+
+  val arr = val::array();
+  int k = 0;
+  for (size_t i = 0; i < g_session.pkts.size(); i++) {
+    const Packet &p = g_session.pkts[i];
+    L4 l;
+    if (!locate_l4(p.bytes.data(), p.bytes.size(), p.linktype, &l)) continue;
+    if (conv_key(l) != key) continue;
+    if (!have_client) {
+      have_client = true;
+      client_ip = l.src_ip; client_port = l.sport;
+      server_ip = l.dst_ip; server_port = l.dport;
+    }
+    int dir = (l.src_ip == client_ip && l.sport == client_port) ? 0 : 1;
+    val o = val::object();
+    o.set("no", (int)(i + 1));
+    o.set("time", packet_seconds(p));
+    o.set("seq", (double)l.seq);
+    o.set("ack", (double)l.ack);
+    o.set("len", (int)l.paylen);
+    o.set("win", (int)l.window);
+    o.set("dir", dir);
+    o.set("flags", (int)l.flags);
+    arr.set(k++, o);
+  }
+
+  val r = val::object();
+  r.set("clientIp", client_ip);
+  r.set("clientPort", (int)client_port);
+  r.set("serverIp", server_ip);
+  r.set("serverPort", (int)server_port);
+  r.set("packets", arr);
+  return r;
+}
+
 /* ── Object (file) extraction — HTTP / SMB ──────────────────────────────────
    Extract transferred files from the whole capture using libpcapng's object
    extractor. Returns [{proto, frame, hostname, contentType, filename,
@@ -914,6 +967,7 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("getEndpoints", &getEndpoints);
   emscripten::function("getProtocolHierarchy", &getProtocolHierarchy);
   emscripten::function("getStream", &getStream);
+  emscripten::function("getStreamPackets", &getStreamPackets);
   emscripten::function("extractObjects", &extractObjects);
   emscripten::function("validateFilter", &validateFilter);
   emscripten::function("matchFilter", &matchFilter);
