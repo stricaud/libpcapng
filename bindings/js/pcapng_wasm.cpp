@@ -727,6 +727,53 @@ val getStreamPackets(int index) {
   return r;
 }
 
+/* ── TCP analysis: retransmission / duplicate-ACK / out-of-order ─────────────
+   A lightweight passive heuristic (per-direction sequence tracking), like
+   Wireshark's basic tcp.analysis flags. Returns {retransmission, dupAck,
+   outOfOrder} as Uint8Array masks aligned with the packet list. */
+val getTcpAnalysis() {
+  size_t np = g_session.pkts.size();
+  std::vector<uint8_t> retr(np, 0), dup(np, 0), ooo(np, 0);
+  struct DirState { uint32_t maxSeqEnd; uint32_t lastAck; bool haveSeq; bool haveAck; };
+  std::unordered_map<std::string, DirState> dirs;
+
+  for (size_t i = 0; i < np; i++) {
+    const Packet &p = g_session.pkts[i];
+    L4 l;
+    if (!locate_l4(p.bytes.data(), p.bytes.size(), p.linktype, &l) || l.proto != 6) continue;
+    std::string key = l.src_ip + ":" + std::to_string(l.sport) + ">" +
+                      l.dst_ip + ":" + std::to_string(l.dport);
+    DirState &s = dirs[key];
+    uint32_t len = (uint32_t)l.paylen;
+    bool syn = l.flags & 0x02, fin = l.flags & 0x01, ack = l.flags & 0x10;
+    uint32_t consume = len + ((syn || fin) ? 1u : 0u);
+    uint32_t seqEnd = l.seq + consume;
+
+    if (len > 0) {
+      if (s.haveSeq) {
+        int32_t endDiff = (int32_t)(seqEnd - s.maxSeqEnd);
+        int32_t startDiff = (int32_t)(l.seq - s.maxSeqEnd);
+        if (endDiff <= 0 || startDiff < 0) retr[i] = 1;   /* already-seen data */
+        else if (startDiff > 0) ooo[i] = 1;               /* gap ahead */
+      }
+    }
+    if (!s.haveSeq || (int32_t)(seqEnd - s.maxSeqEnd) > 0) { s.maxSeqEnd = seqEnd; s.haveSeq = true; }
+
+    if (ack && len == 0 && !syn && !fin) {
+      if (s.haveAck && l.ack == s.lastAck) dup[i] = 1;
+      s.lastAck = l.ack; s.haveAck = true;
+    } else if (ack) {
+      s.lastAck = l.ack; s.haveAck = true;
+    }
+  }
+
+  val o = val::object();
+  o.set("retransmission", make_u8(retr));
+  o.set("dupAck", make_u8(dup));
+  o.set("outOfOrder", make_u8(ooo));
+  return o;
+}
+
 /* ── Object (file) extraction — HTTP / SMB ──────────────────────────────────
    Extract transferred files from the whole capture using libpcapng's object
    extractor. Returns [{proto, frame, hostname, contentType, filename,
@@ -968,6 +1015,7 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("getProtocolHierarchy", &getProtocolHierarchy);
   emscripten::function("getStream", &getStream);
   emscripten::function("getStreamPackets", &getStreamPackets);
+  emscripten::function("getTcpAnalysis", &getTcpAnalysis);
   emscripten::function("extractObjects", &extractObjects);
   emscripten::function("validateFilter", &validateFilter);
   emscripten::function("matchFilter", &matchFilter);

@@ -130,7 +130,36 @@ static uint32_t be32(const uint8_t *p)
 { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 
 /* dissection context: summary sink (may be NULL) + packet base for byte ranges */
-typedef struct { pcapng_dissection_t *sum; const uint8_t *base; } dctx_t;
+typedef struct {
+  pcapng_dissection_t *sum;
+  const uint8_t *base;
+  const uint8_t *l3src, *l3dst;  /* L3 addrs for the L4 pseudo-header checksum  */
+  int l3v6;                      /* 1 if l3src/l3dst are 16-byte IPv6 addresses */
+} dctx_t;
+
+static uint16_t be16(const uint8_t *p);
+
+/* Verify an L4 (TCP/UDP) checksum against the IP pseudo-header. Returns 1 ok,
+   0 bad, -1 can't verify (addresses unknown / truncated / not computed). */
+static int l4_checksum_ok(const dctx_t *c, int proto_num, const uint8_t *seg, int seglen)
+{
+  uint32_t sum = 0; int i;
+  if (!c->l3src || !c->l3dst || seglen < 0) return -1;
+  if (!c->l3v6) {
+    sum += be16(c->l3src) + be16(c->l3src + 2);
+    sum += be16(c->l3dst) + be16(c->l3dst + 2);
+    sum += (uint32_t)proto_num + (uint32_t)seglen;
+  } else {
+    for (i = 0; i < 16; i += 2) sum += be16(c->l3src + i);
+    for (i = 0; i < 16; i += 2) sum += be16(c->l3dst + i);
+    sum += ((uint32_t)seglen >> 16) + ((uint32_t)seglen & 0xffff);
+    sum += (uint32_t)proto_num;
+  }
+  for (i = 0; i + 1 < seglen; i += 2) sum += be16(seg + i);
+  if (seglen & 1) sum += (uint32_t)seg[seglen - 1] << 8;
+  while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+  return (uint16_t)~sum == 0 ? 1 : 0;
+}
 
 /* record a node's absolute byte range within the packet (for a hex pane) */
 static void set_range(dctx_t *c, pcapng_field_t *n, const uint8_t *p, int len)
@@ -428,7 +457,10 @@ static void dissect_ipv4(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   {
     const uint8_t *pl = d + ihl;
     int pll = len - ihl;
+    int total_len = (int)be16(d + 2);
     if (pll < 0) pll = 0;
+    /* enable L4 checksum verification when the datagram isn't truncated */
+    if (total_len >= ihl && total_len <= len) { c->l3src = d + 12; c->l3dst = d + 16; c->l3v6 = 0; }
     /* a .posa that claims this IP protocol wins over the built-in C */
     if (proto != 6 && proto != 17 && try_posa_ipproto(c, proto, pl, pll, root)) return;
     switch (proto) {
@@ -478,6 +510,8 @@ static void dissect_ipv6(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   {
     const uint8_t *pl = d + 40;
     int pll = len - 40;
+    /* enable L4 checksum verification when the payload isn't truncated */
+    if ((int)be16(d + 4) <= pll) { c->l3src = d + 8; c->l3dst = d + 24; c->l3v6 = 1; }
     /* a .posa that claims this next-header wins over the built-in C */
     if (nxt != 6 && nxt != 17 && try_posa_ipproto(c, nxt, pl, pll, root)) return;
     switch (nxt) {
@@ -596,6 +630,11 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(f, "Window: %u", be16(d + 14)); set_range(c, f, d + 14, 2);
   f = pf_add(t, "tcp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 16));
   pf_set_label(f, "Checksum: 0x%04x", be16(d + 16)); set_range(c, f, d + 16, 2);
+  if (l4_checksum_ok(c, 6, d, len) == 0) {
+    pcapng_field_t *bad = pf_add(t, "tcp.checksum.bad", PCAPNG_FT_UINT);
+    pf_set_uint(bad, 1); pf_set_label(bad, "Bad TCP checksum (or checksum offload)");
+    set_range(c, bad, d + 16, 2);
+  }
   f = pf_add(t, "tcp.urgent_pointer", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 18));
   pf_set_label(f, "Urgent Pointer: %u", be16(d + 18)); set_range(c, f, d + 18, 2);
 
@@ -690,6 +729,12 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(f, "Length: %u", ln); set_range(c, f, d + 4, 2);
   f = pf_add(u, "udp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 6));
   pf_set_label(f, "Checksum: 0x%04x", be16(d + 6)); set_range(c, f, d + 6, 2);
+  /* UDP checksum 0 means "not computed" (valid for IPv4); only flag nonzero mismatches */
+  if (be16(d + 6) != 0 && l4_checksum_ok(c, 17, d, len) == 0) {
+    pcapng_field_t *bad = pf_add(u, "udp.checksum.bad", PCAPNG_FT_UINT);
+    pf_set_uint(bad, 1); pf_set_label(bad, "Bad UDP checksum (or checksum offload)");
+    set_range(c, bad, d + 6, 2);
+  }
 
   set_proto(c, "UDP");
   set_info(c, "%u \xe2\x86\x92 %u  Len=%d", sp, dp, len - 8);
@@ -1376,6 +1421,8 @@ static pcapng_field_t *do_dissect(const uint8_t *data, uint32_t caplen, uint32_t
   posa_ensure_builtin();           /* load bundled posa decoders (RDP, …) once */
   c.sum = sum;
   c.base = data;
+  c.l3src = c.l3dst = NULL;
+  c.l3v6 = 0;
   if (!root) return NULL;
 
   dissect_frame(&c, data, caplen, origlen, root);
