@@ -570,6 +570,49 @@ val extractObjects(std::string protoStr) {
   return arr;
 }
 
+/* ── Export a subset of packets as a new pcapng ──────────────────────────────
+   `indices` is a JS array of packet indices (any order). Produces a complete
+   pcapng (SHB + one IDB per original interface + an EPB per packet) with
+   timestamps normalised to microseconds. Returns a Uint8Array. */
+val exportPcapng(val indices) {
+  std::vector<uint8_t> out;
+  size_t base;
+
+  /* SHB */
+  size_t shb = libpcapng_section_header_block_size();
+  base = out.size(); out.resize(base + shb);
+  libpcapng_section_header_block_write(out.data() + base);
+
+  /* one IDB per interface (preserve interface_id indexing) */
+  std::vector<uint16_t> lts = g_session.linktypes;
+  if (lts.empty()) lts.push_back(PCAPNG_LINKTYPE_ETHERNET);
+  size_t idbsz = libpcapng_interface_description_block_size();
+  for (uint16_t lt : lts) {
+    base = out.size(); out.resize(base + idbsz);
+    libpcapng_interface_description_block_write_with_linktype(0, out.data() + base, lt);
+  }
+  int nidb = (int)lts.size();
+
+  int n = indices["length"].as<int>();
+  for (int k = 0; k < n; k++) {
+    int idx = indices[k].as<int>();
+    if (idx < 0 || idx >= (int)g_session.pkts.size()) continue;
+    Packet &p = g_session.pkts[idx];
+    uint32_t iface = p.interface_id < (uint32_t)nidb ? p.interface_id : 0;
+    /* normalise to a 64-bit microsecond count (IDB default if_tsresol = 1e-6) */
+    uint64_t ts = g_session.is_classic
+                      ? (uint64_t)p.ts_high * 1000000ull + p.ts_low
+                      : (((uint64_t)p.ts_high) << 32) | p.ts_low;
+    size_t sz = libpcapng_enhanced_packet_block_size(p.caplen);
+    base = out.size(); out.resize(base + sz);
+    libpcapng_enhanced_packet_block_write_full(p.bytes.data(), p.caplen, p.origlen,
+                                               iface, (uint32_t)(ts >> 32),
+                                               (uint32_t)(ts & 0xffffffffu), NULL, 0,
+                                               out.data() + base);
+  }
+  return make_u8(out);
+}
+
 /* ── Display filters (Wireshark-style) ──────────────────────────────────────
    Backed by libpcapng's pcapng_dfilter engine, evaluated against each packet's
    dissection tree. */
@@ -703,6 +746,7 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("validateFilter", &validateFilter);
   emscripten::function("matchFilter", &matchFilter);
   emscripten::function("matchFilters", &matchFilters);
+  emscripten::function("exportPcapng", &exportPcapng);
   emscripten::function("loadPosaText", &loadPosaText);
   emscripten::function("listPosa", &listPosa);
   emscripten::function("listProtocols", &listProtocols);
