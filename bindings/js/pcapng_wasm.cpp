@@ -421,18 +421,21 @@ struct ReasmState {
   uint32_t dir_ip[2] = {0, 0};
   uint16_t dir_port[2] = {0, 0};
   bool dir_set[2] = {false, false};
+  /* newly-delivered chunks in arrival order, for an interleaved view */
+  std::vector<std::pair<int, std::vector<uint8_t>>> segs;
 };
 
 void reasm_cb(void *ud, uint32_t sip, uint16_t sport, uint32_t dip,
               uint16_t dport, int dir, const uint8_t *data, size_t len,
               const uint8_t *all, size_t all_len) {
-  (void)dip; (void)dport; (void)data; (void)len;
+  (void)dip; (void)dport;
   ReasmState *s = static_cast<ReasmState *>(ud);
   int d = dir & 1;
   s->bufs[d].assign(all, all + all_len);
   s->dir_ip[d] = sip;
   s->dir_port[d] = sport;
   s->dir_set[d] = true;
+  if (len) s->segs.emplace_back(d, std::vector<uint8_t>(data, data + len));
 }
 
 val make_u8(const std::vector<uint8_t> &v) {
@@ -485,13 +488,16 @@ val getStream(int index) {
     } else if (l.paylen) {
       auto &dst = is_client ? udp_client : udp_server;
       dst.insert(dst.end(), pl, pl + l.paylen);
+      st.segs.emplace_back(is_client ? 0 : 1,
+                           std::vector<uint8_t>(pl, pl + l.paylen));
     }
   }
 
   std::vector<uint8_t> client_bytes, server_bytes;
+  int cd = 0; /* which reasm dir id is the client */
   if (is_tcp) {
     uint32_t ckey_ip = ipv4_u32(client_raw);
-    int cd = -1;
+    cd = -1;
     for (int d = 0; d < 2; d++)
       if (st.dir_set[d] && st.dir_ip[d] == ckey_ip && st.dir_port[d] == client_port)
         cd = d;
@@ -504,7 +510,17 @@ val getStream(int index) {
     server_bytes = std::move(udp_server);
   }
 
+  /* interleaved segments in arrival order: {dir: 0=client→server, 1=server→client} */
+  val segArr = val::array();
+  for (size_t i = 0; i < st.segs.size(); i++) {
+    val s = val::object();
+    s.set("dir", st.segs[i].first == cd ? 0 : 1);
+    s.set("data", make_u8(st.segs[i].second));
+    segArr.set((int)i, s);
+  }
+
   val o = val::object();
+  o.set("segments", segArr);
   o.set("ok", true);
   o.set("proto", std::string(is_tcp ? "TCP" : "UDP"));
   o.set("clientIp", client_ip);
