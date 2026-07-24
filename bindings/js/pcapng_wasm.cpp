@@ -433,34 +433,61 @@ uint32_t ipv4_u32(const std::vector<uint8_t> &raw) {
 /* TCP/UDP conversations: [{id, proto, addrA, portA, addrB, portB, packets,
    bytes, firstPacket}]. `firstPacket` can be passed to getStream(). */
 val getConversations() {
-  std::vector<val> rows;
+  struct Conv {
+    std::string proto, addrA, addrB; int portA = 0, portB = 0, first = 0;
+    double packets = 0, bytes = 0; int retr = 0, dup = 0, ooo = 0;
+  };
+  struct DirState { uint32_t maxSeqEnd = 0, lastAck = 0; bool haveSeq = false, haveAck = false; };
+  std::vector<Conv> convs;
   std::unordered_map<std::string, int> idx;
+  std::unordered_map<std::string, DirState> dirs;
+
   for (size_t i = 0; i < g_session.pkts.size(); i++) {
     const Packet &p = g_session.pkts[i];
     L4 l;
     if (!locate_l4(p.bytes.data(), p.bytes.size(), p.linktype, &l)) continue;
     std::string k = conv_key(l);
     auto it = idx.find(k);
+    int ci;
     if (it == idx.end()) {
-      val o = val::object();
-      o.set("id", (int)i);            /* representative packet index */
-      o.set("proto", std::string(l.proto == 6 ? "TCP" : "UDP"));
-      o.set("addrA", l.src_ip);
-      o.set("portA", (int)l.sport);
-      o.set("addrB", l.dst_ip);
-      o.set("portB", (int)l.dport);
-      o.set("packets", 1);
-      o.set("bytes", (double)p.caplen);
-      idx[k] = (int)rows.size();
-      rows.push_back(o);
-    } else {
-      val &o = rows[it->second];
-      o.set("packets", o["packets"].as<int>() + 1);
-      o.set("bytes", o["bytes"].as<double>() + (double)p.caplen);
+      Conv c;
+      c.proto = l.proto == 6 ? "TCP" : "UDP";
+      c.addrA = l.src_ip; c.portA = l.sport; c.addrB = l.dst_ip; c.portB = l.dport;
+      c.first = (int)i;
+      ci = (int)convs.size(); idx[k] = ci; convs.push_back(c);
+    } else ci = it->second;
+    Conv &c = convs[ci];
+    c.packets++; c.bytes += p.caplen;
+
+    if (l.proto == 6) { /* per-direction TCP analysis, attributed to the conversation */
+      std::string dk = l.src_ip + ":" + std::to_string(l.sport) + ">" + l.dst_ip + ":" + std::to_string(l.dport);
+      DirState &s = dirs[dk];
+      uint32_t len = (uint32_t)l.paylen;
+      bool syn = l.flags & 0x02, fin = l.flags & 0x01, ack = l.flags & 0x10;
+      uint32_t seqEnd = l.seq + len + ((syn || fin) ? 1u : 0u);
+      if (len > 0 && s.haveSeq) {
+        int32_t endDiff = (int32_t)(seqEnd - s.maxSeqEnd), startDiff = (int32_t)(l.seq - s.maxSeqEnd);
+        if (endDiff <= 0 || startDiff < 0) c.retr++;
+        else if (startDiff > 0) c.ooo++;
+      }
+      if (!s.haveSeq || (int32_t)(seqEnd - s.maxSeqEnd) > 0) { s.maxSeqEnd = seqEnd; s.haveSeq = true; }
+      if (ack && len == 0 && !syn && !fin) { if (s.haveAck && l.ack == s.lastAck) c.dup++; s.lastAck = l.ack; s.haveAck = true; }
+      else if (ack) { s.lastAck = l.ack; s.haveAck = true; }
     }
   }
+
   val arr = val::array();
-  for (size_t i = 0; i < rows.size(); i++) arr.set((int)i, rows[i]);
+  for (size_t i = 0; i < convs.size(); i++) {
+    const Conv &c = convs[i];
+    val o = val::object();
+    o.set("id", c.first);
+    o.set("proto", c.proto);
+    o.set("addrA", c.addrA); o.set("portA", c.portA);
+    o.set("addrB", c.addrB); o.set("portB", c.portB);
+    o.set("packets", c.packets); o.set("bytes", c.bytes);
+    o.set("retransmissions", c.retr); o.set("dupAcks", c.dup); o.set("outOfOrder", c.ooo);
+    arr.set((int)i, o);
+  }
   return arr;
 }
 
