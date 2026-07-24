@@ -402,6 +402,18 @@ static void dissect_ipv4(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   pf_set_label(f, "Protocol: %s (%u)", ipproto_name(proto), proto); set_range(c, f, d + 9, 1);
   f = pf_add(ip, "ip.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 10));
   pf_set_label(f, "Header Checksum: 0x%04x", be16(d + 10)); set_range(c, f, d + 10, 2);
+  /* verify the IPv4 header checksum (ones-complement sum over the header) */
+  if (ihl >= 20 && ihl <= len) {
+    uint32_t sum = 0; int i;
+    for (i = 0; i < ihl; i += 2) sum += be16(d + i);
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    if ((uint16_t)~sum != 0) { /* correct header sums to 0xffff → ~sum == 0 */
+      pcapng_field_t *bad = pf_add(ip, "ip.checksum.bad", PCAPNG_FT_UINT);
+      pf_set_uint(bad, 1);
+      pf_set_label(bad, "Bad IP header checksum");
+      set_range(c, bad, d + 10, 2);
+    }
+  }
   f = pf_add(ip, "ip.src", PCAPNG_FT_IPV4); pf_set_ipv4(f, d + 12);
   pf_set_label(f, "Source Address: %s", ss); set_range(c, f, d + 12, 4);
   f = pf_add(ip, "ip.dst", PCAPNG_FT_IPV4); pf_set_ipv4(f, d + 16);
