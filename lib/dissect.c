@@ -20,6 +20,7 @@
 #include <libpcapng/protocols/bootp.h> /* struct libpcapng_bootp_hdr (DHCP/BOOTP)  */
 #include <libpcapng/protocols/ssl.h>   /* TLS_CONTENT_*, TLS_VERSION_* constants    */
 #include <libpcapng/posa.h>            /* declarative decoders (e.g. bundled RDP)   */
+#include "builtin_protos.h"           /* g_builtin_posa_protos[] — embedded .posa  */
 
 /* LINKTYPE_* aliases so the ported dissector body is unchanged. */
 #define LINKTYPE_NULL      PCAPNG_LINKTYPE_NULL
@@ -204,8 +205,13 @@ static const char POSA_BUILTIN_RDP[] =
 static int g_posa_builtin_loaded;
 static void posa_ensure_builtin(void)
 {
+  int i;
   if (g_posa_builtin_loaded) return;
   g_posa_builtin_loaded = 1;
+  /* Every .posa in bin/protos, embedded at build time. */
+  for (i = 0; g_builtin_posa_protos[i]; i++)
+    pcapng_posa_load_text(g_builtin_posa_protos[i], NULL, 0);
+  /* Load the known-good RDP definition last so it wins over any bundled rdp.posa. */
   pcapng_posa_load_text(POSA_BUILTIN_RDP, NULL, 0);
 }
 
@@ -1298,8 +1304,9 @@ static void dissect_quic(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   if (len < 1) { set_proto(c, "QUIC"); return; }
   b0 = d[0];
   /* Heuristic guard: a long header has the high two bits set (0xC0); a short
-     header has 0x40 set and 0x80 clear. Anything else isn't QUIC v1-ish. */
-  if (!(b0 & 0x40)) { set_proto(c, "QUIC"); return; }
+     header has 0x40 set and 0x80 clear. Anything else isn't QUIC v1-ish —
+     surface the bytes as a Data node so they stay selectable. */
+  if (!(b0 & 0x40)) { set_proto(c, "QUIC"); dissect_data(c, d, len, root); return; }
 
   q = pf_add(root, "quic", PCAPNG_FT_NONE);
   set_range(c, q, d, len);
@@ -1330,14 +1337,17 @@ static void dissect_quic(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
       if (off + sl <= len) {
         f = pf_add(q, "quic.scid", PCAPNG_FT_BYTES); pf_set_bytes(f, d + off, sl);
         pf_set_label(f, "Source Connection ID: %d bytes", sl);
+        off += sl;
       }
     }
     set_info(c, "QUIC %s", ver == 0 ? "Version Negotiation" : quic_lpt(pt));
+    if (off < len) dissect_data(c, d + off, len - off, q);  /* token/length/PN/payload */
   } else {                                      /* short header (1-RTT) */
     pf_set_label(q, "QUIC IETF (short header, protected)");
     f = pf_add(q, "quic.header_form", PCAPNG_FT_UINT); pf_set_uint(f, 0);
     pf_set_label(f, "Header Form: Short Header (0)");
     set_info(c, "QUIC protected payload");
+    if (len > 1) dissect_data(c, d + 1, len - 1, q);  /* protected 1-RTT payload */
   }
 }
 

@@ -1,0 +1,14 @@
+# MySQL / MariaDB client command packet (best-effort, per-packet).
+# The robust way to sniff queries across TCP segments is the stream script
+# scripts/mysql-queries.lua; this decoder labels single client-command packets.
+protocol MySQL
+    col "MySQL"
+    required bytes<3> length
+    required uint8    seq
+    required uint8    command "Command"
+        COM_QUIT     = 1
+        COM_INIT_DB  = 2
+        COM_QUERY    = 3
+        COM_PING     = 14
+    required payload  query "Query"
+rule tcp.port == 3306 => MySQL

@@ -1,0 +1,52 @@
+# tftp.posa — TFTP (RFC 1350), dispatched by opcode.
+#
+# Load is automatic (carcal reads its protos/ dir at startup) and the `rule`
+# line at the bottom binds it to the TFTP port, so it decodes out of the box.
+# To bind it somewhere else too:  Analyze ▸ Decode As…
+#
+# `abbrev "tftp"` gives every field a Wireshark-style tftp.* name, so you can
+# filter on `tftp`, `tftp.opcode == 1`, `tftp.filename` — without it the fields
+# would be named after each Object (TFTP_RRQ.opcode), which nobody wants to type.
+
+Object<TFTP> TFTP_RRQ
+    abbrev "tftp"
+    required uint16  opcode = 1
+        RRQ = 1
+    required cstring filename
+    required cstring mode
+
+Object<TFTP> TFTP_WRQ
+    abbrev "tftp"
+    required uint16  opcode = 2
+        WRQ = 2
+    required cstring filename
+    required cstring mode
+
+Object<TFTP> TFTP_DATA
+    abbrev "tftp"
+    required uint16  opcode = 3
+        DATA = 3
+    required uint16  block = 1
+    required payload data
+
+Object<TFTP> TFTP_ACK
+    abbrev "tftp"
+    required uint16 opcode = 4
+        ACK = 4
+    required uint16 block = 0
+
+Object<TFTP> TFTP_ERROR
+    abbrev "tftp"
+    required uint16  opcode = 5
+        ERROR = 5
+    required uint16  code = 0
+    required cstring msg
+
+rule udp.port == 69 => TFTP
+
+# Coloring — carcal paints a matching packet with these colors, first match wins.
+# Declared here so the decoder ships its own look: drop this file into protos/
+# and TFTP is both decoded and colored, with no rebuild. These are consulted
+# before carcal's generic udp rule, so they win over it.
+color tftp.opcode == 5 => yellow red
+color tftp             => black lightgreen

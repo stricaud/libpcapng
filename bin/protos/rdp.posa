@@ -48,3 +48,10 @@ protocol RDP_NEGOTIATION
     info "%s Negotiate %s" cookie, type
 
 rule tcp.port == 3389 => TPKT
+
+# Coloring — carcal paints a matching packet with these colors, first match wins.
+# Declared here so the decoder ships its own look: drop this file into protos/
+# and RDP is both decoded and colored, with no rebuild. Consulted before
+# carcal's generic tcp rule, so they win over it.
+color rdp.type == 3 => yellow red      # negotiation Failure
+color rdp           => black lightcyan

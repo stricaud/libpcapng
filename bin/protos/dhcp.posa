@@ -1,0 +1,114 @@
+# dhcp.posa — DHCP / BOOTP (RFC 2131, 2132).
+#
+# A fixed BOOTP header, then a magic cookie, then options: a stream of
+# type-length-value records with no count in front of them. That is
+#
+#   repeat until end as option    records until the packet runs out
+#       scope opt_len             each option's value is opt_len bytes, and the
+#                                 scope ends there whether we decoded it or not —
+#                                 so an option this file has never heard of still
+#                                 leaves the walk on the right byte
+#       when opt_code == 53:      the ones worth naming get named…
+#       else:                     …and the rest still show their bytes
+#
+# Pad (0) and End (255) carry no length byte, hence the `when opt_code > 0` /
+# `when opt_code < 255` nesting around the length.
+
+Object<main> DHCP
+    abbrev "dhcp"
+    col "DHCP"
+
+    required uint8 op "Message Type"
+        Boot Request = 1
+        Boot Reply = 2
+    required uint8 htype "Hardware Type"
+        Ethernet = 1
+    required uint8 hlen "Hardware Address Length"
+    required uint8 hops "Hops"
+    required uint32 xid hex "Transaction ID"
+    required uint16 secs "Seconds Elapsed"
+    required uint16 flags hex "Flags"
+        bits flags broadcast 15 1 "Broadcast"
+    required ip4 ciaddr "Client IP Address"
+    required ip4 yiaddr "Your (client) IP Address"
+    required ip4 siaddr "Next Server IP Address"
+    required ip4 giaddr "Relay Agent IP Address"
+    required mac chaddr "Client MAC Address"
+    required bytes<10> chaddr_pad "Client Hardware Address Padding"
+    required bytes<64> sname "Server Host Name"
+    required bytes<128> file "Boot File Name"
+    required uint32 cookie hex "Magic Cookie"
+
+    repeat until end as option "Options"
+        label "%s: %s%s%s" opt_code, msg_type, opt_ip, opt_text
+        required uint8 opt_code "Option"
+            Pad = 0
+            Subnet Mask = 1
+            Router = 3
+            Domain Name Server = 6
+            Host Name = 12
+            Domain Name = 15
+            Requested IP Address = 50
+            IP Address Lease Time = 51
+            DHCP Message Type = 53
+            Server Identifier = 54
+            Parameter Request List = 55
+            Maximum DHCP Message Size = 57
+            Renewal Time Value = 58
+            Rebinding Time Value = 59
+            Vendor Class Identifier = 60
+            Client Identifier = 61
+            End = 255
+        when opt_code > 0:
+            when opt_code < 255:
+                required uint8 opt_len "Length"
+                scope opt_len
+                    when opt_code == 53:
+                        required uint8 msg_type "DHCP Message Type"
+                            Discover = 1
+                            Offer = 2
+                            Request = 3
+                            Decline = 4
+                            ACK = 5
+                            NAK = 6
+                            Release = 7
+                            Inform = 8
+                    when opt_code == 1:
+                        required ip4 opt_ip "Subnet Mask"
+                    when opt_code == 3:
+                        required ip4 opt_ip "Router"
+                    when opt_code == 6:
+                        repeat until end as dns_server
+                            label "DNS Server: %s" opt_ip
+                            required ip4 opt_ip "Domain Name Server"
+                    when opt_code == 50:
+                        required ip4 opt_ip "Requested IP Address"
+                    when opt_code == 54:
+                        required ip4 opt_ip "Server Identifier"
+                    when opt_code == 51:
+                        required uint32 lease_time "IP Address Lease Time"
+                    when opt_code == 12:
+                        required str[opt_len] opt_text "Host Name"
+                    when opt_code == 15:
+                        required str[opt_len] opt_text "Domain Name"
+                    when opt_code == 60:
+                        required str[opt_len] opt_text "Vendor Class Identifier"
+                    when opt_code == 55:
+                        repeat until end as requested
+                            label "Requested: %s" param
+                            required uint8 param "Parameter"
+                                Subnet Mask = 1
+                                Router = 3
+                                Domain Name Server = 6
+                                Host Name = 12
+                                Domain Name = 15
+                                Broadcast Address = 28
+                    else:
+                        required payload opt_value "Value"
+
+    info "DHCP %s - Transaction ID 0x%x" msg_type, xid
+
+rule udp.port == 67 => DHCP
+rule udp.port == 68 => DHCP
+
+color dhcp => black lightblue

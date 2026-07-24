@@ -1,0 +1,59 @@
+# http.posa — HTTP/1.x (RFC 9112).
+#
+# HTTP has no lengths in front of anything: it is lines of text ending in CRLF,
+# then a blank line, then the body. Two posa constructs cover that shape:
+#
+#   string <name> until "<delim>"      one delimited token
+#   repeat until "<delim>" as <item>   records until those bytes come next —
+#                                      here, header lines until the blank line
+#
+# A request and a response differ only in their first line, so they are two
+# objects in an Object<HTTP> group, told apart by their first field: a response
+# starts with "HTTP", a request with a method. The group is dispatched on the
+# first field's value, so "HTTP" as a uint32 (0x48545450) selects the response.
+#
+# Not covered (add it here, no rebuild): chunked transfer-encoding is shown as
+# the raw body, and the body is not decompressed.
+
+Object<HTTP> HTTP_RESPONSE
+    abbrev "http"
+    col "HTTP"
+
+    # the group is dispatched on the first field's value, so a response is
+    # recognised by its "HTTP" magic — then `seek 0` rewinds over it, and the
+    # status line is read as the text it actually is
+    required uint32 magic = 0x48545450 hex "Magic"
+    seek 0
+    required string version until " " "Version"
+    required string status_code until " " "Status Code"
+    required string reason until "\r\n" "Reason Phrase"
+    repeat until "\r\n" as header "Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+    required string blank until "\r\n" "End of headers"
+    required payload body "Body"
+
+    info "%s %s" status_code, reason
+
+Object<HTTP> HTTP_REQUEST default
+    abbrev "http"
+    col "HTTP"
+
+    required string method until " " "Method"
+    required string uri until " " "Request URI"
+    required string version until "\r\n" "Version"
+    repeat until "\r\n" as header "Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+    required string blank until "\r\n" "End of headers"
+    required payload body "Body"
+
+    info "%s %s %s" method, uri, version
+
+rule tcp.port == 80   => HTTP
+rule tcp.port == 8080 => HTTP
+rule tcp.port == 8000 => HTTP
+rule tcp.port == 8888 => HTTP
+rule tcp.port == 3128 => HTTP
+
+color http => black lightgray

@@ -1,12 +1,56 @@
-# IGMP header (RFC 2236 v2 / RFC 3376 v3)
-# IP protocol 2. max_resp_time is in tenths of a second (IGMPv2) or coded (IGMPv3).
+# igmp.posa — IGMP v1/v2/v3 (RFC 1112, 2236, 3376).
+#
+# Bound by IP protocol number, not a port:  rule ip.proto == 2 => IGMP
+#
+# The v3 membership report (type 0x22) is a different shape from the queries and
+# the v1/v2 reports: no group address in the header, just a count of the group
+# records that follow, each with its own list of source addresses. That is two
+# nested `repeat`s — the outer one counted by a header field, the inner by a
+# field of the record it is inside.
+#
+# Every field a posa decoder produces carries its byte range, so selecting a row
+# in the details pane highlights the right bytes in the hex pane. That is free
+# here; in hand-written C it is a call you can forget to make.
+
 Object<main> IGMP
-    required uint8  type = 0x11
-        MEMBERSHIP_QUERY     = 0x11
-        V1_MEMBERSHIP_REPORT = 0x12
-        V2_MEMBERSHIP_REPORT = 0x16
-        LEAVE_GROUP          = 0x17
-        V3_MEMBERSHIP_REPORT = 0x22
-    required uint8  max_resp_time = 100
-    required uint16 checksum = 0
-    required ip4    group_addr = 0.0.0.0
+    abbrev "igmp"
+    col "IGMP"
+
+    required uint8 type "Type"
+        Membership Query = 0x11
+        IGMPv1 Membership Report = 0x12
+        IGMPv2 Membership Report = 0x16
+        Leave Group = 0x17
+        IGMPv3 Membership Report = 0x22
+    required uint8 max_resp "Max Resp Time"
+    required uint16 checksum "Checksum"
+
+    # v3 membership report: reserved, then N group records
+    when type == 0x22:
+        required uint16 reserved "Reserved"
+        required uint16 num_records "Num Group Records"
+        repeat num_records as record "Group Records"
+            label "%s: %s (%u source(s))" record_type, maddr, num_sources
+            required uint8 record_type "Record Type"
+                MODE_IS_INCLUDE = 1
+                MODE_IS_EXCLUDE = 2
+                CHANGE_TO_INCLUDE = 3
+                CHANGE_TO_EXCLUDE = 4
+                ALLOW_NEW_SOURCES = 5
+                BLOCK_OLD_SOURCES = 6
+            required uint8 aux_len "Aux Data Length"
+            required uint16 num_sources "Num Sources"
+            required ip4 maddr "Multicast Address"
+            repeat num_sources as source "Source Addresses"
+                label "Source: %s" saddr
+                required ip4 saddr "Source Address"
+
+    # everything else (queries, v1/v2 reports, leave) carries a group address
+    when type != 0x22:
+        required ip4 maddr "Multicast Address"
+
+    info "%s %s" type, maddr
+
+rule ip.proto == 2 => IGMP
+
+color igmp => black lightgreen

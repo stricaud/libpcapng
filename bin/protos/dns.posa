@@ -1,0 +1,176 @@
+# dns.posa — DNS / mDNS / LLMNR (RFC 1035, RFC 6762), the whole message.
+#
+# This is the decoder carcal uses for ports 53, 5353 and 5355 — there is no C
+# dissector behind it. Read it as the spec: a header, then four sections of
+# records, each section repeated as many times as its counter says.
+#
+# The pieces of posa that make a record protocol expressible:
+#
+#   repeat <count> as <item>   one subtree per record, count taken from a field
+#   repeat until end as <item> records until the enclosing scope runs out
+#   label "..." a, b           how to title a record's subtree, from its fields
+#   dnsname                    a name, following 0xc0 compression pointers
+#   bits <src> <n> <sh> <w>    a bitfield carved out of an already-parsed field
+#   scope <lenfield>           bound the next fields to <lenfield> bytes (rdata)
+#   include <Object>           inline another object's fields (the RR body,
+#                              shared by the answer/authority/additional sections)
+#
+# To change what you see: edit this file (Analyze ▸ Decoders ▸ DNS ▸ Enter) and
+# save — no rebuild. Add an RR type by adding a `when type == N:` block.
+
+# ── A resource record ────────────────────────────────────────────────────────
+# Name, type, class, TTL, then rdlength bytes of type-dependent data. `scope
+# rdlength` bounds the rdata so an unknown type still leaves the walk on the
+# right byte — the scope ends where rdlength says, decoded or not.
+#
+# Defined first because the three record sections below `include` it.
+Object<main> RR
+    abbrev "dns"
+
+    required dnsname name "Name"
+    required uint16 type "Type"
+        A = 1
+        NS = 2
+        CNAME = 5
+        SOA = 6
+        PTR = 12
+        HINFO = 13
+        MX = 15
+        TXT = 16
+        AAAA = 28
+        SRV = 33
+        OPT = 41
+        NSEC = 47
+        HTTPS = 65
+    required uint16 class mask 0x7fff "Class"
+        IN = 1
+        CH = 3
+        ANY = 255
+    # mDNS reuses the top class bit to mean "flush your cache for this name"
+    bits class flush 15 1 "Cache flush"
+    required uint32 ttl "Time to live"
+    required uint16 rdlength "Data length"
+
+    scope rdlength
+        when type == 1:
+            required ip4 rdata "Address"
+        when type == 28:
+            required ip6 rdata "Address"
+        when type == 12:
+            required dnsname rdata "Domain name"
+        when type == 5:
+            required dnsname rdata "CNAME"
+        when type == 2:
+            required dnsname rdata "Name server"
+        when type == 15:
+            required uint16 preference "Preference"
+            required dnsname rdata "Mail exchange"
+        when type == 33:
+            required uint16 priority "Priority"
+            required uint16 weight "Weight"
+            required uint16 port "Port"
+            required dnsname rdata "Target"
+        when type == 6:
+            required dnsname rdata "Primary name server"
+            required dnsname rname "Responsible mailbox"
+            required uint32 serial "Serial"
+            required uint32 refresh "Refresh"
+            required uint32 retry "Retry"
+            required uint32 expire "Expire"
+            required uint32 minimum "Minimum TTL"
+        # TXT is a run of length-prefixed strings — "model=J96AP", "osxvers=21", …
+        # There is no count for them, so repeat until the rdata scope runs out.
+        when type == 16:
+            repeat until end as txt
+                label "%s" rdata
+                required uint8 txtlen "Length"
+                required str[txtlen] rdata "Text"
+        when type == 41:
+            required payload rdata "Options"
+        when type == 47:
+            required dnsname rdata "Next domain name"
+
+Object<main> DNS
+    abbrev "dns"
+    col "DNS"
+
+    required uint16 id "Transaction ID"
+    required uint16 flags "Flags"
+        bits flags qr     15 1 "Response"
+            Query = 0
+            Response = 1
+        bits flags opcode 11 4 "Opcode"
+            QUERY = 0
+            IQUERY = 1
+            STATUS = 2
+            NOTIFY = 4
+            UPDATE = 5
+        bits flags aa     10 1 "Authoritative"
+        bits flags tc      9 1 "Truncated"
+        bits flags rd      8 1 "Recursion desired"
+        bits flags ra      7 1 "Recursion available"
+        bits flags rcode   0 4 "Reply code"
+            NoError = 0
+            FormErr = 1
+            ServFail = 2
+            NXDomain = 3
+            NotImp = 4
+            Refused = 5
+    required uint16 questions "Questions"
+    required uint16 answers "Answer RRs"
+    required uint16 authority "Authority RRs"
+    required uint16 additional "Additional RRs"
+
+    # ── Queries ───────────────────────────────────────────────────────────────
+    # A question is a name, a type, and a class. In mDNS the top class bit is the
+    # "QU" bit (send the reply unicast), so the class is masked and the bit shown
+    # on its own — that is what `mask` and `bits` are for.
+    repeat questions as query "Queries"
+        label "%s: type %s, class %s" qname, qtype, qclass
+        required dnsname qname "Name"
+        required uint16 qtype "Type"
+            A = 1
+            NS = 2
+            CNAME = 5
+            SOA = 6
+            PTR = 12
+            HINFO = 13
+            MX = 15
+            TXT = 16
+            AAAA = 28
+            SRV = 33
+            OPT = 41
+            NSEC = 47
+            HTTPS = 65
+            ANY = 255
+        required uint16 qclass mask 0x7fff "Class"
+            IN = 1
+            CH = 3
+            NONE = 254
+            ANY = 255
+        bits qclass qu 15 1 "QU (reply wanted unicast)"
+            Multicast = 0
+            Unicast = 1
+
+    repeat answers as answer "Answers"
+        label "%s: type %s, class %s, %s" name, type, class, rdata
+        include RR
+
+    repeat authority as authority_rr "Authoritative nameservers"
+        label "%s: type %s, class %s, %s" name, type, class, rdata
+        include RR
+
+    repeat additional as additional_rr "Additional records"
+        label "%s: type %s, class %s, %s" name, type, class, rdata
+        include RR
+
+    # A query has questions and no records; a response is usually the reverse —
+    # name both, and the fields the packet does not carry expand to nothing.
+    info "%s 0x%x %s %s %s %s" qr, id, qtype, qname, type, rdata
+
+rule udp.port == 53   => DNS
+rule udp.port == 5353 => DNS
+rule udp.port == 5355 => DNS
+
+color dns.rcode > 0 => yellow red
+color dns           => white blue
