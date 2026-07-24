@@ -417,6 +417,55 @@ val getConversations() {
   return arr;
 }
 
+/* Per-host endpoint statistics (any IP packet, TCP/UDP or not). */
+val getEndpoints() {
+  struct Ep { double packets = 0, bytes = 0, txp = 0, txb = 0, rxp = 0, rxb = 0; std::string addr; };
+  std::vector<Ep> eps;
+  std::unordered_map<std::string, int> idx;
+  auto bump = [&](const std::string &a, double bytes, bool tx) {
+    auto it = idx.find(a);
+    int i;
+    if (it == idx.end()) { Ep e; e.addr = a; i = (int)eps.size(); idx[a] = i; eps.push_back(e); }
+    else i = it->second;
+    Ep &e = eps[i];
+    e.packets++; e.bytes += bytes;
+    if (tx) { e.txp++; e.txb += bytes; } else { e.rxp++; e.rxb += bytes; }
+  };
+
+  for (const Packet &p : g_session.pkts) {
+    const uint8_t *f = p.bytes.data();
+    size_t n = p.bytes.size(), ip_off;
+    int v6;
+    if (!ip_offset(f, n, p.linktype, &ip_off, &v6)) continue;
+    std::string src, dst;
+    if (!v6) {
+      if (n < ip_off + 20) continue;
+      src = fmt_ipv4(f + ip_off + 12);
+      dst = fmt_ipv4(f + ip_off + 16);
+    } else {
+      if (n < ip_off + 40) continue;
+      src = fmt_ipv6(f + ip_off + 8);
+      dst = fmt_ipv6(f + ip_off + 24);
+    }
+    bump(src, (double)p.caplen, true);
+    bump(dst, (double)p.caplen, false);
+  }
+
+  val arr = val::array();
+  for (size_t i = 0; i < eps.size(); i++) {
+    val o = val::object();
+    o.set("address", eps[i].addr);
+    o.set("packets", eps[i].packets);
+    o.set("bytes", eps[i].bytes);
+    o.set("txPackets", eps[i].txp);
+    o.set("txBytes", eps[i].txb);
+    o.set("rxPackets", eps[i].rxp);
+    o.set("rxBytes", eps[i].rxb);
+    arr.set((int)i, o);
+  }
+  return arr;
+}
+
 struct ReasmState {
   std::vector<uint8_t> bufs[2];
   uint32_t dir_ip[2] = {0, 0};
@@ -741,6 +790,7 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("getDetail", &getDetail);
   emscripten::function("getPacketBytes", &getPacketBytes);
   emscripten::function("getConversations", &getConversations);
+  emscripten::function("getEndpoints", &getEndpoints);
   emscripten::function("getStream", &getStream);
   emscripten::function("extractObjects", &extractObjects);
   emscripten::function("validateFilter", &validateFilter);
