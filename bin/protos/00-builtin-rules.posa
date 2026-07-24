@@ -1,0 +1,63 @@
+# 00-builtin-rules.posa — dispatch bindings for the bundled decoders that ship
+# without their own `rule` lines. Kept in one file so the standard port /
+# ip.proto / ethertype bindings are easy to review in one place. Rules resolve
+# by protocol name at dispatch time, so load order does not matter.
+#
+# Intentionally NOT bound here (the built-in C dissector owns them):
+#   ethertype 0x0800 IPv4, 0x86DD IPv6, 0x0806 ARP, 0x8100 VLAN
+#   ip.proto  1 ICMP, 6 TCP, 17 UDP, 47 GRE
+# App-layer protocols (DNS, HTTP, TLS, SMB, MySQL, TFTP, DHCP, IGMP, RDP) carry
+# their own rules in their .posa files.
+
+# ── carried directly over IP (ip.proto) ─────────────────────────────────────
+rule ip.proto == 51  => AH
+rule ip.proto == 50  => ESP
+rule ip.proto == 33  => DCCP
+rule ip.proto == 46  => RSVP
+rule ip.proto == 58  => ICMPv6
+rule ip.proto == 88  => EIGRP
+rule ip.proto == 89  => OSPF
+rule ip.proto == 103 => PIM
+rule ip.proto == 112 => VRRP
+rule ip.proto == 115 => L2TP
+rule ip.proto == 132 => SCTP
+
+# ── UDP ports ────────────────────────────────────────────────────────────────
+rule udp.port == 88    => KRB5
+rule udp.port == 137   => NBNS
+rule udp.port == 319   => PTPv2
+rule udp.port == 320   => PTPv2
+rule udp.port == 500   => ISAKMP
+rule udp.port == 520   => RIPv2
+rule udp.port == 546   => DHCPv6
+rule udp.port == 547   => DHCPv6
+rule udp.port == 1701  => L2TP
+rule udp.port == 1985  => HSRP
+rule udp.port == 3478  => STUN
+rule udp.port == 3784  => BFD
+rule udp.port == 4500  => ISAKMP
+rule udp.port == 5683  => CoAP
+rule udp.port == 20000 => DNP3
+rule udp.port == 2055  => NetFlowV5
+rule udp.port == 9996  => NetFlowV5
+rule udp.port == 47808 => BACnet
+
+# ── TCP ports ────────────────────────────────────────────────────────────────
+rule tcp.port == 88    => KRB5
+rule tcp.port == 179   => BGP
+rule tcp.port == 502   => ModbusTCP
+rule tcp.port == 1080  => SOCKS5_HELLO
+rule tcp.port == 1883  => MQTT
+rule tcp.port == 5672  => AMQP
+rule tcp.port == 6633  => OpenFlow
+rule tcp.port == 6653  => OpenFlow
+rule tcp.port == 20000 => DNP3
+
+# ── below IP, at the ethernet layer (ethertype) ──────────────────────────────
+rule eth.type == 0x8847 => MPLS
+rule eth.type == 0x8848 => MPLS
+rule eth.type == 0x8863 => PPPoE
+rule eth.type == 0x8864 => PPPoE
+rule eth.type == 0x888e => EAPOL
+rule eth.type == 0x8809 => LACP
+rule eth.type == 0x0842 => WOL
