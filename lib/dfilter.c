@@ -15,7 +15,13 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdint.h>
-#include <regex.h>
+
+/* POSIX regex for the `matches` operator. MSVC has no <regex.h>, so on Windows
+   `matches` degrades to a substring test. */
+#ifndef _WIN32
+#  include <regex.h>
+#  define PCAPNG_HAVE_REGEX 1
+#endif
 
 /* ── operators ──────────────────────────────────────────────────────────── */
 typedef enum { OP_EQ, OP_NE, OP_GT, OP_LT, OP_GE, OP_LE, OP_CONTAINS, OP_MATCHES } op_t;
@@ -448,13 +454,17 @@ static int slice_matches(const pcapng_field_t *f, const struct node *n)
 static int regex_matches(const pcapng_field_t *f, const char *pat)
 {
   char txt[512];
+  field_text(f, txt, sizeof txt);
+#ifdef PCAPNG_HAVE_REGEX
   regex_t re;
   int m;
-  field_text(f, txt, sizeof txt);
   if (regcomp(&re, pat, REG_EXTENDED | REG_NOSUB) != 0) return 0;
   m = regexec(&re, txt, 0, NULL, 0) == 0;
   regfree(&re);
   return m;
+#else
+  return strstr(txt, pat) != NULL; /* no POSIX regex (MSVC) → substring fallback */
+#endif
 }
 
 static int field_matches(const pcapng_field_t *f, const struct node *n)
