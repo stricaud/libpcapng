@@ -21,6 +21,9 @@
 #ifndef _WIN32
 #  include <regex.h>
 #  define PCAPNG_HAVE_REGEX 1
+#else
+/* MSVC spells POSIX strtok_r as strtok_s (identical signature). */
+#  define strtok_r strtok_s
 #endif
 
 /* ── operators ──────────────────────────────────────────────────────────── */
