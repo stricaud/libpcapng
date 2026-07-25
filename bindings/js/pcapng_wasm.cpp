@@ -253,10 +253,16 @@ int loadCapture(val u8) {
 
 int getPacketCount() { return static_cast<int>(g_session.pkts.size()); }
 
-/* Absolute epoch seconds of the first packet (for absolute time display). */
-double getStartTime() {
-  return g_session.pkts.empty() ? 0.0 : packet_seconds(g_session.pkts[0]);
+/* Base epoch: the first packet that actually carries a timestamp. Custom Blocks
+   (and anything with ts=0) must not become the base, or relative times explode. */
+double captureBase() {
+  for (const Packet &p : g_session.pkts)
+    if (p.ts_high || p.ts_low) return packet_seconds(p);
+  return 0.0;
 }
+
+/* Absolute epoch seconds of the first timestamped packet. */
+double getStartTime() { return captureBase(); }
 
 /* Values of a single field (by abbrev) for every packet — a custom column.
    Returns an array of strings aligned with the packet list ("" if absent). */
@@ -282,13 +288,15 @@ val getFieldColumn(std::string abbrev) {
    `time` is seconds relative to the first packet. */
 val getSummaries() {
   val arr = val::array();
-  double t0 =
-      g_session.pkts.empty() ? 0.0 : packet_seconds(g_session.pkts[0]);
+  double t0 = captureBase();
+  double last = 0.0; /* carry time across ts=0 blocks so relative times stay sane */
   for (size_t i = 0; i < g_session.pkts.size(); i++) {
     const Packet &p = g_session.pkts[i];
+    double t = (p.ts_high || p.ts_low) ? packet_seconds(p) - t0 : last;
+    last = t;
     val o = val::object();
     o.set("no", static_cast<int>(i + 1));
-    o.set("time", packet_seconds(p) - t0);
+    o.set("time", t);
     o.set("src", p.src);
     o.set("dst", p.dst);
     o.set("proto", p.proto);
