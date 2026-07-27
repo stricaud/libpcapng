@@ -255,7 +255,10 @@ static int run_posa(dctx_t *c, const char *proto, const uint8_t *pl, int pll,
   char info[192] = "";
   if (!proto || pll <= 0) return 0;
   pcapng_posa_reset_col();
-  pcapng_posa_dissect(proto, pl, pll, root, c->base ? (int)(pl - c->base) : 0, info, sizeof info);
+  /* 0 means the group matched no member (e.g. a mid-stream body segment on an
+     HTTP port): let the caller fall through to the C dissector / TCP data. */
+  if (!pcapng_posa_dissect(proto, pl, pll, root, c->base ? (int)(pl - c->base) : 0, info, sizeof info))
+    return 0;
   pp = pcapng_posa_find(proto);
   col = pcapng_posa_last_col();                     /* the innermost `col`, e.g. SMB2 */
   if (!col) col = (pp && pp->display[0]) ? pp->display : proto;
@@ -271,6 +274,7 @@ static int try_posa_app(dctx_t *c, uint16_t sp, uint16_t dp, int ipproto,
 {
   const char *proto = pcapng_posa_bound_port(ipproto, dp);
   if (!proto) proto = pcapng_posa_bound_port(ipproto, sp);
+  if (!proto) proto = pcapng_posa_bound_content(ipproto, pl, pll);  /* signature, any port */
   return run_posa(c, proto, pl, pll, root);
 }
 
@@ -305,6 +309,21 @@ static void dissect_quic(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
 static void dissect_data(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root);
 static void dissect_text(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root,
                          const char *abbrev, const char *name);
+
+/* Content-signature dispatch to a built-in C dissector. A `rule content "…"`
+   whose target has no .posa definition (e.g. SSH) lands here — it lets the
+   built-in dissectors be picked by payload signature on any port, the same way
+   posa decoders already are. Returns 1 if a signature matched and dissected. */
+static int try_content_c(dctx_t *c, int ipproto, const uint8_t *pl, int pll,
+                         pcapng_field_t *root)
+{
+  const char *name = pcapng_posa_bound_content(ipproto, pl, pll);
+  if (!name) return 0;
+  if      (!strcmp(name, "SSH"))                        dissect_ssh(c, pl, pll, root);
+  else if (!strcmp(name, "TLS") || !strcmp(name, "SSL")) dissect_tls(c, pl, pll, root);
+  else return 0;   /* name targets a posa decoder (handled elsewhere) or is unknown */
+  return 1;
+}
 
 /* ── frame (always present) ─────────────────────────────────────────────── */
 static void dissect_frame(dctx_t *c, const uint8_t *data, uint32_t caplen, uint32_t origlen,
@@ -702,6 +721,7 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     else if (TP(6667))               dissect_text(c, pl, pll, root, "irc", "IRC");
     else if (TP(6379))               dissect_text(c, pl, pll, root, "redis", "Redis");
     else if (TP(53) && pll > 2)      dissect_dns(c, pl + 2, pll - 2, root, "dns"); /* TCP DNS: 2-byte len prefix */
+    else if (try_content_c(c, 6, pl, pll, root)) return;              /* C dissector by signature, any port */
     else if (pll > 0)                dissect_data(c, pl, pll, root);  /* undissected payload */
 #undef TP
   }
@@ -939,11 +959,34 @@ static void dissect_text(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
 }
 
 /* ── HTTP (request/status line + headers) ───────────────────────────────── */
+
+/* Does this TCP payload begin an HTTP message (request line or status line)?
+   Mid-stream body segments (e.g. JPEG bytes of a 200 OK) do not, and must not
+   be parsed as HTTP or we fabricate a garbage request line from binary. */
+static int http_msg_start(const uint8_t *d, int len)
+{
+  static const char *const methods[] = {
+    "GET ", "HEAD ", "POST ", "PUT ", "DELETE ",
+    "CONNECT ", "OPTIONS ", "TRACE ", "PATCH ", NULL
+  };
+  int i;
+  if (len >= 5 && memcmp(d, "HTTP/", 5) == 0) return 1;      /* response */
+  for (i = 0; methods[i]; i++) {
+    int l = (int)strlen(methods[i]);
+    if (len >= l && memcmp(d, methods[i], l) == 0) return 1; /* request  */
+  }
+  return 0;
+}
+
 static void dissect_http(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root)
 {
   pcapng_field_t *h, *f;
   char line[256];
   int i = 0, first = 1;
+
+  /* Not the start of a request/response → a reassembled-PDU segment. Leave it
+     as the TCP data the caller already set up rather than mis-decoding it. */
+  if (!http_msg_start(d, len)) { dissect_data(c, d, len, root); return; }
 
   h = pf_add(root, "http", PCAPNG_FT_NONE);
   pf_set_label(h, "Hypertext Transfer Protocol");

@@ -49,6 +49,7 @@ struct Packet {
   uint16_t linktype = PCAPNG_LINKTYPE_ETHERNET;
   std::vector<uint8_t> bytes;              /* captured bytes (caplen)          */
   std::string proto, src, dst, info;       /* summary columns (dissected once) */
+  std::string srcport, dstport;            /* transport ports ("" if none)     */
   std::string comment;                     /* pcapng opt_comment               */
   bool custom = false;                     /* a pcapng Custom Block, not a frame */
   uint32_t pen = 0;                        /* Custom Block private-enterprise no. */
@@ -182,6 +183,14 @@ std::string field_value(const pcapng_field_t *f) {
   }
 }
 
+/* First matching field value, trying each abbrev in turn ("" if none). */
+std::string first_field(pcapng_field_t *root, const char *a, const char *b) {
+  pcapng_field_t *hit[1];
+  if (pcapng_field_collect(root, a, hit, 1) > 0) return field_value(hit[0]);
+  if (pcapng_field_collect(root, b, hit, 1) > 0) return field_value(hit[0]);
+  return "";
+}
+
 val field_to_val(const pcapng_field_t *f) {
   val o = val::object();
   o.set("abbrev", std::string(f->abbrev));
@@ -245,6 +254,8 @@ int loadCapture(val u8) {
       p.src = d->src;
       p.dst = d->dst;
       p.info = d->info;
+      p.srcport = first_field(d->root, "tcp.srcport", "udp.srcport");
+      p.dstport = first_field(d->root, "tcp.dstport", "udp.dstport");
       pcapng_dissection_free(d);
     }
   }
@@ -299,6 +310,8 @@ val getSummaries() {
     o.set("time", t);
     o.set("src", p.src);
     o.set("dst", p.dst);
+    o.set("srcport", p.srcport);
+    o.set("dstport", p.dstport);
     o.set("proto", p.proto);
     o.set("length", static_cast<int>(p.origlen));
     o.set("info", p.info);

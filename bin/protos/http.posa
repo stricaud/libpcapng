@@ -35,9 +35,14 @@ Object<HTTP> HTTP_RESPONSE
 
     info "%s %s" status_code, reason
 
-Object<HTTP> HTTP_REQUEST default
+Object<HTTP> HTTP_REQUEST
     abbrev "http"
     col "HTTP"
+    # Only decode as a request when the payload begins with a real method — mid-
+    # stream body segments (e.g. JPEG bytes of a 200 OK) start with neither this
+    # nor the "HTTP" response magic, so they fall through to TCP data instead of
+    # being mis-parsed as a request line.
+    starts "GET " "POST " "PUT " "HEAD " "DELETE " "OPTIONS " "TRACE " "CONNECT " "PATCH "
 
     required string method until " " "Method"
     required string uri until " " "Request URI"
@@ -55,5 +60,18 @@ rule tcp.port == 8080 => HTTP
 rule tcp.port == 8000 => HTTP
 rule tcp.port == 8888 => HTTP
 rule tcp.port == 3128 => HTTP
+
+# Content signatures — recognise HTTP on any port, not only the ones above.
+# Tried only when no port rule matched; the group then tells request from
+# response as usual. "HTTP/1." (a status line) is very specific; the method
+# signatures keep their trailing space so "GETTER"-style false hits can't occur.
+rule tcp.content "HTTP/1."  => HTTP
+rule tcp.content "GET "     => HTTP
+rule tcp.content "POST "    => HTTP
+rule tcp.content "HEAD "    => HTTP
+rule tcp.content "PUT "     => HTTP
+rule tcp.content "DELETE "  => HTTP
+rule tcp.content "OPTIONS " => HTTP
+rule tcp.content "PATCH "   => HTTP
 
 color http => black lightgray

@@ -789,6 +789,18 @@ EvalResult eval_primary(Lex *L) {
                 r.raw = buf; r.raw_len = n; r.is_raw = 1;
                 return r;
             }
+            /* rdpcap("file.pcap", "filter") — display packets matching a display filter */
+            if (!strcmp(name,"rdpcap")) {
+                char filename[MAXPATH] = "";
+                char filter[512] = "";
+                if (L->cur.type == T_STR) { strncpy(filename, L->cur.s, sizeof(filename)-1); lex_adv(L); }
+                if (L->cur.type == T_COMMA) lex_adv(L);
+                if (L->cur.type == T_STR) { strncpy(filter, L->cur.s, sizeof(filter)-1); lex_adv(L); }
+                if (L->cur.type == T_RPAREN) lex_adv(L);
+                int n = do_rdpcap(filename, filter);
+                r.is_num = 1; r.num = n;
+                return r;
+            }
             /* replacepkt("file.pcapng", N, new_pkt) — replace packet N in-place */
             if (!strcmp(name,"replacepkt")) {
                 char filename[MAXPATH] = "";
@@ -986,6 +998,7 @@ EvalResult eval_primary(Lex *L) {
                        "  " CCYN "wrpcap" CR "(\"file\",pkt)        write/append pcapng\n"
                        "  " CCYN "load" CR "(\"file.posa\")         load protocol defs\n"
                        "  " CCYN "fromhex" CR "(\"hex\")             parse hex dump → raw bytes\n"
+                       "  " CCYN "rdpcap" CR "(\"file\"[,\"filter\"])  display packets from pcap/pcapng\n"
                        "  " CCYN "frompcapng" CR "(\"file\",N)       read packet #N from pcapng → raw bytes\n"
                        "  " CCYN "replacepkt" CR "(\"file\",N,pkt)   replace packet #N in pcapng in-place\n"
                        "  " CCYN "show" CR "(\"IP/UDP/Proto\", raw)  dissect stacked layers\n"

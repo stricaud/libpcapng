@@ -31,7 +31,7 @@ void completion_cb(const char *buf, linenoiseCompletions *lc) {
     static const char *keywords[] = {
         "IP(","TCP(","UDP(","Ether(","ICMP(","Raw(",
         "DNS(","DNSQR(","DNSRR(","RandShort()",
-        "hexdump(","raw(","ls(","wrpcap(","load(","fromhex(","frompcapng(","replacepkt(","show(",
+        "hexdump(","raw(","ls(","wrpcap(","load(","fromhex(","frompcapng(","replacepkt(","show(","rdpcap(",
         "help()","exit()","quit()",
         "TCPSession(","syn(","syn_ack(","tcp_ack(","client_send(","server_send(",
         "client_fin(","server_fin_ack(",

@@ -66,6 +66,20 @@ typedef struct { int key; char proto[PCAPNG_POSA_NAME_MAX]; int used; } l3bind_t
 static l3bind_t g_ipbinds[MAX_L3_BINDS];  static int g_nipbinds;
 static l3bind_t g_ethbinds[MAX_L3_BINDS]; static int g_nethbinds;
 
+/* Content signatures: `rule [tcp.|udp.]content "<bytes>" => Proto` claims a
+   payload by what it starts with, on ANY port — so a protocol on a non-standard
+   port is still recognised (nDPI-style detection, as opposed to port binding). */
+#define MAX_CONTENT_BINDS 64
+#define CONTENT_SIG_MAX   24
+typedef struct {
+  uint8_t sig[CONTENT_SIG_MAX]; int siglen;
+  int ipproto;                              /* 0 = any, 6 = tcp, 17 = udp */
+  char proto[PCAPNG_POSA_NAME_MAX]; int used;
+} content_bind_t;
+static content_bind_t g_cbinds[MAX_CONTENT_BINDS]; static int g_ncbinds;
+
+static void parse_delim(const char *tok, char *out, int *nout);  /* fwd */
+
 /* Coloring declared by a `color <display filter> => <fg> <bg>` line. The colors
    are kept as opaque names: libpcapng has no notion of a display, it just
    carries what the .posa declared so the front end can apply it. */
@@ -96,7 +110,7 @@ void pcapng_posa_clear(void)
     free(g_src[i]);    g_src[i] = NULL;
     free(g_protos[i]); g_protos[i] = NULL;
   }
-  g_nprotos = 0; g_nbinds = 0; g_ncolors = 0; g_nipbinds = 0; g_nethbinds = 0;
+  g_nprotos = 0; g_nbinds = 0; g_ncolors = 0; g_nipbinds = 0; g_nethbinds = 0; g_ncbinds = 0;
 }
 
 int pcapng_posa_color_count(void) { return g_ncolors; }
@@ -175,6 +189,28 @@ static void bind_add(int ipproto, uint16_t port, const char *proto)
     snprintf(g_binds[g_nbinds].proto, sizeof g_binds[g_nbinds].proto, "%s", proto);
     g_nbinds++;
   }
+}
+static void content_add(int ipproto, const uint8_t *sig, int n, const char *proto)
+{
+  if (n <= 0 || n > CONTENT_SIG_MAX || g_ncbinds >= MAX_CONTENT_BINDS) return;
+  g_cbinds[g_ncbinds].used = 1; g_cbinds[g_ncbinds].ipproto = ipproto;
+  g_cbinds[g_ncbinds].siglen = n; memcpy(g_cbinds[g_ncbinds].sig, sig, (size_t)n);
+  snprintf(g_cbinds[g_ncbinds].proto, sizeof g_cbinds[g_ncbinds].proto, "%s", proto);
+  g_ncbinds++;
+}
+/* Name of the decoder whose content signature this payload starts with, if any.
+   `ipproto` is the transport carrying it (6/17); a rule with ipproto 0 matches
+   either. Tried by the dispatcher only after port binding fails. */
+const char *pcapng_posa_bound_content(int ipproto, const uint8_t *data, int len)
+{
+  int i;
+  if (!data || len <= 0) return NULL;
+  for (i = 0; i < g_ncbinds; i++) {
+    const content_bind_t *b = &g_cbinds[i];
+    if (!b->used || (b->ipproto && b->ipproto != ipproto)) continue;
+    if (b->siglen <= len && memcmp(data, b->sig, (size_t)b->siglen) == 0) return b->proto;
+  }
+  return NULL;
 }
 
 /* ── pcapng_field_t builders (subtree construction) ──────────────────────── */
@@ -292,12 +328,31 @@ static int tokenize(char *line, char *toks[], int max)
 
 /* Parse a `rule <what> == N => Proto` binding. Forms:
      tcp.port == 3389     udp.dstport == 69      (transport ports)
-     ip.proto == 2        eth.type == 0x88cc     (below the transport layer) */
+     ip.proto == 2        eth.type == 0x88cc     (below the transport layer)
+     content "GET "       tcp.content "\x16\x03"  (payload signature, any port) */
 static void parse_rule(const char *rest)
 {
   char t[16] = "", field[24] = "", num[24] = "";
   const char *arrow;
   char proto[PCAPNG_POSA_NAME_MAX] = "";
+
+  /* content signature: rule [tcp.|udp.]content "<bytes>" => Proto */
+  { const char *cw = strstr(rest, "content");
+    if (cw) {
+      const char *q = strchr(cw, '"');
+      int ipproto = 0;                       /* any transport by default */
+      if      (!strncmp(rest, "tcp", 3)) ipproto = 6;
+      else if (!strncmp(rest, "udp", 3)) ipproto = 17;
+      arrow = strstr(rest, "=>");
+      if (q && arrow && sscanf(arrow + 2, " %63s", proto) == 1) {
+        char sig[PCAPNG_POSA_DELIM_MAX]; int n = 0;
+        parse_delim(q, sig, &n);
+        content_add(ipproto, (const uint8_t *)sig, n, proto);
+      }
+      return;
+    }
+  }
+
   if (sscanf(rest, "%15[a-z].%23[a-z] == %23s", t, field, num) != 3) return;
   arrow = strstr(rest, "=>");
   if (!arrow || sscanf(arrow + 2, " %63s", proto) != 1) return;
@@ -320,7 +375,17 @@ static pcapng_posa_fld_t *add_fld(pcapng_posa_proto_t *cur, pcapng_posa_ftype_t 
   return f;
 }
 
-/* Unescape a quoted delimiter ("\r\n" etc.) into raw bytes. */
+static int hexdig(int ch)
+{
+  if (ch >= '0' && ch <= '9') return ch - '0';
+  if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+  if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+  return -1;
+}
+
+/* Unescape a quoted delimiter/signature ("\r\n", "\x16\x03", …) into raw bytes.
+   Supports \r \n \t \0 and \xNN (a byte in hex) — the latter lets content
+   signatures name binary magic like a TLS record header. */
 static void parse_delim(const char *tok, char *out, int *nout)
 {
   int n = 0; const char *p = tok;
@@ -328,9 +393,14 @@ static void parse_delim(const char *tok, char *out, int *nout)
   while (*p && *p != '"' && n < PCAPNG_POSA_DELIM_MAX) {
     if (*p == '\\' && p[1]) {
       p++;
-      switch (*p) { case 'r': out[n++]='\r'; break; case 'n': out[n++]='\n'; break;
-                    case 't': out[n++]='\t'; break; case '0': out[n++]='\0'; break;
-                    default:  out[n++]=*p; }
+      if (*p == 'x' && hexdig((unsigned char)p[1]) >= 0 && hexdig((unsigned char)p[2]) >= 0) {
+        out[n++] = (char)((hexdig((unsigned char)p[1]) << 4) | hexdig((unsigned char)p[2]));
+        p += 2;
+      } else switch (*p) {
+        case 'r': out[n++]='\r'; break; case 'n': out[n++]='\n'; break;
+        case 't': out[n++]='\t'; break; case '0': out[n++]='\0'; break;
+        default:  out[n++]=*p;
+      }
       p++;
     } else out[n++] = *p++;
   }
@@ -437,6 +507,30 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     if (cur && !strncmp(tl, "abbrev", 6) && (tl[6] == ' ' || tl[6] == '"' || tl[6] == '\t')) {
       char *q1 = strchr(tl, '"'), *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
       if (q1 && q2) snprintf(cur->abbrev, sizeof cur->abbrev, "%.*s", (int)(q2 - q1 - 1), q1 + 1);
+      continue;
+    }
+
+    /* starts "GET " "POST " …  — content-based group dispatch: select this
+       member only when the payload begins with one of these literal prefixes.
+       Lets a text protocol (HTTP request, etc.) be recognised without a numeric
+       magic, so binary payloads on the same port are not mis-decoded. */
+    if (cur && !strncmp(tl, "starts", 6) && (tl[6] == ' ' || tl[6] == '"' || tl[6] == '\t')) {
+      const char *p = tl + 6;
+      while (cur->nprefix < 8) {
+        int n; char raw_delim[PCAPNG_POSA_DELIM_MAX];
+        p = strchr(p, '"');
+        if (!p) break;
+        parse_delim(p, raw_delim, &n);
+        if (n > 0 && n < (int)sizeof cur->prefixes[0]) {
+          memcpy(cur->prefixes[cur->nprefix], raw_delim, n);
+          cur->prefix_len[cur->nprefix] = n;
+          cur->nprefix++;
+        }
+        p++;                                  /* past opening quote */
+        p = strchr(p, '"');                   /* closing quote     */
+        if (!p) break;
+        p++;
+      }
       continue;
     }
 
@@ -1190,7 +1284,14 @@ static const pcapng_posa_proto_t *resolve_group(const char *name, const uint8_t 
 {
   const pcapng_posa_proto_t *fallback = NULL;
   int i;
-  for (i = 0; i < g_nprotos; i++) {
+  for (i = 0; i < g_nprotos; i++) {          /* content prefix (e.g. "GET ") */
+    const pcapng_posa_proto_t *p = g_protos[i]; int k;
+    if (!p || p->nprefix == 0 || strcmp(p->parent, name) != 0) continue;
+    for (k = 0; k < p->nprefix; k++)
+      if (p->prefix_len[k] <= len && memcmp(data, p->prefixes[k], p->prefix_len[k]) == 0)
+        return p;
+  }
+  for (i = 0; i < g_nprotos; i++) {          /* first field's numeric magic */
     const pcapng_posa_proto_t *p = g_protos[i]; int sz;
     if (!p) continue;
     if (strcmp(p->parent, name) != 0 || p->nflds == 0) continue;

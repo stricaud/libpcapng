@@ -1,60 +1,136 @@
 # nbns.posa — NetBIOS Name Service (RFC 1001 / RFC 1002)
 #
-# Transport: UDP port 137 (also TCP 137 for zone transfers, rare)
+# Transport: UDP port 137. Used in Windows networks for name registration,
+# name query, name release, and name conflict messages before DNS took over.
 #
-# NBNS is the NetBIOS layer-3 name resolution protocol used in Windows
-# networks before DNS became dominant.  It carries name registration,
-# name query, name release, and name conflict messages.
+# Wire format is identical to DNS: a 12-byte fixed header followed by
+# question and resource-record sections. `dnsname` handles the DNS-style
+# label encoding (including 0xc0 compression pointers) transparently.
 #
-# Note: NBT (NetBIOS Session Service, TCP port 139) is a separate protocol
-# and is defined in the pcapsh built-in protocol set.
+# Note on name display: NBNS applies a second-level encoding on top of the
+# DNS label format. The 16-byte padded NetBIOS name is encoded as a 32-byte
+# label where each nibble of each byte becomes an uppercase letter (nibble
+# + 0x41). The decoded label shown here is therefore the raw encoded form,
+# e.g. "CKFJFJDPFPFPCACACACACACACACAAA" for "DESKTOP-ABC<20>".  Full
+# decoding requires a post-processing step not expressible in POSA field
+# types, but the structure, IP addresses, and flags are fully decoded.
 #
-# Usage examples:
-#   # Name query broadcast (who has FILESERVER?)
-#   Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="10.0.1.1",dst="10.0.1.255")/UDP(sport=137,dport=137)/NBNS(trans_id=0x1234,flags=NAME_QUERY_REQUEST)
+# NB resource record rdata (type 0x0020):
+#   Each address entry is 6 bytes: 2-byte NB flags + 4-byte IP address.
+#   A single NB record can list multiple addresses (rdlength / 6 entries).
+#   NB flag bits:
+#     bit 15  G   — group name (1) vs unique name (0)
+#     bits 14-13  ONT — owner node type: 0=B-node, 1=P-node, 2=M-node, 3=H-node
 #
-#   # Positive name query response
-#   Ether()/IP(src="10.0.1.10",dst="10.0.1.1")/UDP(sport=137,dport=50137)/NBNS(trans_id=0x1234,flags=NAME_QUERY_RESPONSE,ancount=1)
-#
-#   # Name registration request (announces presence on the LAN)
-#   Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="10.0.1.5",dst="10.0.1.255")/UDP(sport=137,dport=137)/NBNS(flags=NAME_REGISTRATION_REQUEST,qdcount=1,arcount=1)
+# NBSTAT rdata (type 0x0021) contains the adapter status response:
+#   1-byte name count, then count × (16-byte name + 2-byte name flags),
+#   then a 6-byte MAC address and 48 bytes of statistics. This is decoded
+#   as a raw payload here; a C dissector would be needed for full decode.
 
+# ── NB resource record (shared by answer / authority / additional) ───────────
+Object<main> NB_RR
+    abbrev "nbns"
+
+    required dnsname name   "Name"
+    required uint16  type   "Type"
+        NB     = 0x0020
+        NBSTAT = 0x0021
+        A      = 0x0001
+        NS     = 0x0002
+        NULL   = 0x000a
+        ANY    = 0x00ff
+    required uint16  class  "Class"
+        IN  = 1
+        ANY = 255
+    required uint32  ttl    "Time to live"
+    required uint16  rdlength "Data length"
+
+    scope rdlength
+        # NB record: one or more address entries, each 6 bytes
+        when type == 0x0020:
+            repeat until end as addr_entry "NB Addresses"
+                label "%s (%s, %s)" ip, group, ont
+                required uint16 nb_flags "NB Flags"
+                    bits nb_flags group 15 1 "Name type"
+                        Unique = 0
+                        Group  = 1
+                    bits nb_flags ont   13 2 "Owner node type"
+                        B-node = 0
+                        P-node = 1
+                        M-node = 2
+                        H-node = 3
+                required ip4 ip "IP Address"
+        # NBSTAT: adapter status — complex binary structure, surface as raw
+        when type == 0x0021:
+            required payload rdata "Adapter Status"
+        when type != 0x0020:
+            required payload rdata "Rdata"
+
+# ── Main NBNS frame ──────────────────────────────────────────────────────────
 Object<main> NBNS
+    abbrev "nbns"
+    col "NBNS"
 
-    # ── Transaction ID ───────────────────────────────────────────────────────
-    # 16-bit identifier; echoed in responses to match query/response pairs.
-    required uint16 trans_id = 0
+    required uint16 transaction_id "Transaction ID"
+    required uint16 flags "Flags"
+        bits flags qr      15 1 "Message type"
+            Query    = 0
+            Response = 1
+        bits flags opcode  11 4 "Opcode"
+            Query        = 0
+            Registration = 5
+            Release      = 6
+            WACK         = 7
+            Refresh      = 8
+        bits flags aa      10 1 "Authoritative answer"
+        bits flags tc       9 1 "Truncated"
+        bits flags rd       8 1 "Recursion desired"
+        bits flags ra       7 1 "Recursion available"
+        bits flags b        4 1 "Broadcast"
+        bits flags rcode    0 4 "Result code"
+            No-error   = 0
+            Format-err = 1
+            Server-err = 2
+            Name-err   = 3
+            Unsupported= 4
+            Refused    = 5
+            Active-err = 6
+            Conflict   = 7
 
-    # ── Flags word ───────────────────────────────────────────────────────────
-    # Bits 15:    R   — 0 = request, 1 = response
-    # Bits 14-11: OPCODE — 0=QUERY, 5=REGISTRATION, 6=RELEASE, 7=WACK, 8=REFRESH
-    # Bit  10:    AA  — authoritative answer
-    # Bit   9:    TC  — truncated
-    # Bit   8:    RD  — recursion desired (unicast to WINS server)
-    # Bit   7:    RA  — recursion available (WINS server only)
-    # Bits 6-4:   0
-    # Bit   3:    B   — broadcast flag
-    # Bits 3-0:   RCODE — 0=ok, 1=fmterr, 2=server err, 3=name err, 4=unsupported, 5=refused, 6=active, 7=conflict
-    required uint16 flags = 0x0110
-        NAME_QUERY_REQUEST       = 0x0110   # RD=1, B=1 — broadcast query
-        NAME_QUERY_UNICAST       = 0x0100   # RD=1 — unicast query to WINS
-        NAME_QUERY_RESPONSE_POS  = 0x8500   # R=1, AA=1, RD=1, RA=1 — positive response
-        NAME_QUERY_RESPONSE_NEG  = 0x8506   # R=1, AA=1, RA=1, RCODE=6 (active) — negative
-        NAME_REGISTRATION_REQUEST= 0x2910   # OPCODE=5, RD=1, B=1
-        NAME_REGISTRATION_RESPONSE=0xAD10  # R=1, OPCODE=5, AA=1, RD=1, RA=1
-        NAME_RELEASE_REQUEST     = 0x3000   # OPCODE=6, B=1
-        NAME_RELEASE_RESPONSE    = 0xB800   # R=1, OPCODE=6, AA=1
-        NAME_WACK                = 0xBC10   # R=1, OPCODE=7, AA=1, RD=1, B=1
-        NAME_REFRESH_REQUEST     = 0x4108   # R=0, OPCODE=8, RD=1, B=1
+    required uint16 questions  "Questions"
+    required uint16 answers    "Answer RRs"
+    required uint16 authority  "Authority RRs"
+    required uint16 additional "Additional RRs"
 
-    # ── Section counts ───────────────────────────────────────────────────────
-    required uint16 qdcount = 1   # questions
-    required uint16 ancount = 0   # answer resource records
-    required uint16 nscount = 0   # authority resource records
-    required uint16 arcount = 0   # additional resource records
+    # ── Questions ─────────────────────────────────────────────────────────────
+    repeat questions as query "Queries"
+        label "%s  type %s" qname, qtype
+        required dnsname qname  "Name"
+        required uint16  qtype  "Type"
+            NB     = 0x0020
+            NBSTAT = 0x0021
+            ANY    = 0x00ff
+        required uint16  qclass "Class"
+            IN  = 1
+            ANY = 255
 
-    # ── Variable-length section data ─────────────────────────────────────────
-    # Contains NetBIOS-encoded question entries, resource records, etc.
-    # NetBIOS names are 32-byte "Level 2" encoded: each byte of the 16-byte
-    # padded name is split into two nibbles, each nibble + 0x41.
-    payload queries
+    # ── Resource-record sections ──────────────────────────────────────────────
+    repeat answers as answer "Answers"
+        label "%s  %s  %s" name, type, ip
+        include NB_RR
+
+    repeat authority as ns_rr "Authority RRs"
+        label "%s  %s" name, type
+        include NB_RR
+
+    repeat additional as extra_rr "Additional RRs"
+        label "%s  %s" name, type
+        include NB_RR
+
+    info "%s 0x%04x %s %s %s" qr, transaction_id, opcode, qname, ip
+
+rule udp.port == 137 => NBNS
+
+color nbns.rcode > 0  => yellow red
+color nbns.qr == 0    => black lightyellow
+color nbns            => white darkblue

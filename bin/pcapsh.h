@@ -296,6 +296,7 @@ const char *pftype_name(pftype_t t);
 /* ─── pcapsh_io.c ───────────────────────────────────────────────────────────── */
 size_t   fromhex_parse(const char *s, uint8_t *out, size_t max);
 uint8_t *frompcapng_read(const char *filename, uint32_t pktnum, size_t *out_len);
+int      do_rdpcap(const char *filename, const char *filter_expr);
 int      replacepkt_in_file(const char *filename, uint32_t pktnum,
                              const uint8_t *newpkt, size_t newlen);
 size_t   show_layer_by_name(const char *proto, const uint8_t *d, size_t avail);

@@ -132,6 +132,13 @@ typedef struct {
                                                         no other one's first field
                                                         matches (an HTTP request has
                                                         no magic; a response does) */
+  char               prefixes[8][16];                /* `starts "GET " "POST "…` — select
+                                                        this member of group G only when the
+                                                        payload begins with one of these
+                                                        literals (content-based dispatch,
+                                                        for text protocols with no magic) */
+  int                nprefix;
+  int                prefix_len[8];                   /* byte length of each prefix         */
 } pcapng_posa_proto_t;
 
 /* Load .posa definitions into the global registry. Redefining a protocol by
@@ -165,6 +172,9 @@ const char *pcapng_posa_last_col(void);
 const char *pcapng_posa_bound_port(int ip_proto, uint16_t port);
 const char *pcapng_posa_bound_ipproto(int ip_proto_num);
 const char *pcapng_posa_bound_ethertype(uint16_t ethertype);
+/* Decoder claimed by a `rule content "…"` signature the payload starts with.
+   ip_proto is the transport (6/17); tried after port binding fails. */
+const char *pcapng_posa_bound_content(int ip_proto, const uint8_t *data, int len);
 
 /* ── Coloring declared by a `color <display filter> => <fg> <bg>` line ───────
  *

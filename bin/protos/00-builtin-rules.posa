@@ -53,6 +53,12 @@ rule tcp.port == 6633  => OpenFlow
 rule tcp.port == 6653  => OpenFlow
 rule tcp.port == 20000 => DNP3
 
+# ── content signatures (any port) ────────────────────────────────────────────
+# Recognise a protocol by what its payload starts with, not by port. These
+# target the built-in C dissectors, so they work on non-standard ports too.
+# SSH always opens with its ASCII version banner ("SSH-2.0-…", "SSH-1.99-…").
+rule tcp.content "SSH-" => SSH
+
 # ── below IP, at the ethernet layer (ethertype) ──────────────────────────────
 rule eth.type == 0x8847 => MPLS
 rule eth.type == 0x8848 => MPLS

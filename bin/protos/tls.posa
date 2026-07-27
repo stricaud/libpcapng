@@ -132,5 +132,11 @@ Object<main> TLS
 rule tcp.port == 443  => TLS
 rule tcp.port == 8443 => TLS
 
+# Content signature — a TLS record on any port. 0x16 = Handshake, 0x03 0x0N =
+# SSL 3.0 / TLS 1.x version, so this fires on the ClientHello/ServerHello that
+# open a session on a non-standard port. (Encrypted app-data records, 0x17, are
+# left to the port rule.)
+rule tcp.content "\x16\x03" => TLS
+
 color tls.alert_level => yellow red
 color tls             => black lightmagenta

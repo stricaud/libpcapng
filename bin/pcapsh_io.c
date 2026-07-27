@@ -154,6 +154,148 @@ uint8_t *frompcapng_read(const char *filename, uint32_t pktnum, size_t *out_len)
     return buf;
 }
 
+/* ─── rdpcap ─────────────────────────────────────────────────────────────────
+ * Read a pcap/pcapng file and print a tshark-style one-line summary for every
+ * packet that matches the given display filter (NULL or "" = all packets).
+ * Returns the number of matching packets printed, or -1 on error.           */
+
+#include <libpcapng/dfilter.h>
+
+typedef struct {
+    pcapng_dfilter_t *df;
+    uint16_t          linktype;
+    uint32_t          matched;
+    uint32_t          total;
+    int               is_classic; /* 1=legacy pcap sec/usec, 0=pcapng 64-bit ticks */
+} rdpcap_ctx_t;
+
+static uint64_t rdpcap_ts_ns(uint32_t ts_hi, uint32_t ts_lo, int is_classic)
+{
+    if (is_classic)
+        return (uint64_t)ts_hi * 1000000000ULL + (uint64_t)ts_lo * 1000ULL;
+    return (((uint64_t)ts_hi << 32) | ts_lo) * 1000ULL; /* pcapng µs resolution */
+}
+
+static int rdpcap_cb(uint32_t block_counter, uint32_t block_type,
+                     uint32_t block_total_length, unsigned char *data,
+                     void *userdata)
+{
+    rdpcap_ctx_t *ctx = (rdpcap_ctx_t *)userdata;
+
+    /* Track linktype from the Interface Description Block.
+     * Classic PCAP wraps its IDB with block_counter=0; real PCAPNG starts at 1. */
+    if (block_type == PCAPNG_INTERFACE_DESCRIPTION_BLOCK) {
+        pcapng_interface_description_block_light_t *idb =
+            (pcapng_interface_description_block_light_t *)data;
+        ctx->linktype   = (uint16_t)idb->linktype;
+        ctx->is_classic = (block_counter == 0) ? 1 : 0;
+        return 0;
+    }
+
+    if (block_type != PCAPNG_ENHANCED_PACKET_BLOCK &&
+        block_type != PCAPNG_SIMPLE_PACKET_BLOCK   &&
+        block_type != PCAPNG_PACKET_BLOCK)
+        return 0;
+
+    uint32_t cap_len    = 0;
+    uint32_t hdr_offset = 0;
+    uint64_t ts_ns      = 0;
+
+    if (block_type == PCAPNG_ENHANCED_PACKET_BLOCK) {
+        if (block_total_length < 8 + 20) return 0;
+        pcapng_enhanced_packet_block_light_t *epb =
+            (pcapng_enhanced_packet_block_light_t *)data;
+        cap_len    = epb->captured_packet_length;
+        hdr_offset = (uint32_t)sizeof(pcapng_enhanced_packet_block_light_t);
+        uint32_t ts_hi, ts_lo;
+        memcpy(&ts_hi, data + 4, 4);
+        memcpy(&ts_lo, data + 8, 4);
+        ts_ns = rdpcap_ts_ns(ts_hi, ts_lo, ctx->is_classic);
+    } else if (block_type == PCAPNG_SIMPLE_PACKET_BLOCK) {
+        if (block_total_length < 12) return 0;
+        cap_len    = block_total_length - 16;
+        hdr_offset = 4;
+    } else {
+        if (block_total_length < 8 + 20) return 0;
+        cap_len    = *(uint32_t *)(data + 12);
+        hdr_offset = 20;
+        uint32_t ts_hi, ts_lo;
+        memcpy(&ts_hi, data + 4, 4);
+        memcpy(&ts_lo, data + 8, 4);
+        ts_ns = rdpcap_ts_ns(ts_hi, ts_lo, ctx->is_classic);
+    }
+
+    if (cap_len > 65535) cap_len = 65535;
+    size_t avail = block_total_length - 8 - hdr_offset;
+    if (cap_len > (uint32_t)avail) cap_len = (uint32_t)avail;
+    if (cap_len == 0) return 0;
+
+    ctx->total++;
+
+    const uint8_t *pkt = data + hdr_offset;
+    pcapng_dissection_t *d = pcapng_dissect(pkt, cap_len, cap_len, ctx->linktype);
+    if (!d) return 0;
+
+    int match = ctx->df ? pcapng_dfilter_match(ctx->df, d->root) : 1;
+    if (match) {
+        ctx->matched++;
+        uint64_t sec  = ts_ns / 1000000000ULL;
+        uint64_t usec = (ts_ns % 1000000000ULL) / 1000ULL;
+        printf(CDIM "%6u" CR "  %llu.%06llu  " CCYN "%-6s" CR
+               "  " CWHT "%s" CR " → " CWHT "%s" CR "  " CYEL "%s" CR "\n",
+               ctx->total,
+               (unsigned long long)sec, (unsigned long long)usec,
+               d->proto[0] ? d->proto : "?",
+               d->src[0]   ? d->src   : "-",
+               d->dst[0]   ? d->dst   : "-",
+               d->info);
+    }
+    pcapng_dissection_free(d);
+    return 0;
+}
+
+int do_rdpcap(const char *filename, const char *filter_expr)
+{
+    if (!filename || !*filename) {
+        fprintf(stderr, CBRED "rdpcap: filename required\n" CR);
+        return -1;
+    }
+
+    /* Expand leading ~ to $HOME */
+    char expanded[MAXPATH];
+    if (filename[0] == '~' && (filename[1] == '/' || filename[1] == '\0')) {
+        const char *home = getenv("HOME");
+        if (home)
+            snprintf(expanded, sizeof expanded, "%s%s", home, filename + 1);
+        else
+            snprintf(expanded, sizeof expanded, "%s", filename);
+        filename = expanded;
+    }
+
+    rdpcap_ctx_t ctx = { .df = NULL, .linktype = 1, .matched = 0, .total = 0, .is_classic = 1 };
+
+    char errbuf[256] = {0};
+    if (filter_expr && *filter_expr) {
+        ctx.df = pcapng_dfilter_compile(filter_expr, errbuf, sizeof errbuf);
+        if (!ctx.df) {
+            fprintf(stderr, CBRED "rdpcap: bad filter: %s\n" CR, errbuf);
+            return -1;
+        }
+    }
+
+    int rc = libpcapng_file_read((char *)filename, rdpcap_cb, &ctx);
+
+    if (ctx.df) pcapng_dfilter_free(ctx.df);
+
+    if (rc < 0) {
+        fprintf(stderr, CBRED "rdpcap: cannot read '%s'\n" CR, filename);
+        return -1;
+    }
+
+    printf(CDIM "%u / %u packet(s) matched\n" CR, ctx.matched, ctx.total);
+    return (int)ctx.matched;
+}
+
 /* ─── replacepkt ────────────────────────────────────────────────────────────── */
 
 /* Replace packet number 'pktnum' (1-based) in 'filename' with 'new_bytes'.
