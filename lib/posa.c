@@ -73,6 +73,7 @@ static l3bind_t g_ethbinds[MAX_L3_BINDS]; static int g_nethbinds;
 #define CONTENT_SIG_MAX   24
 typedef struct {
   uint8_t sig[CONTENT_SIG_MAX]; int siglen;
+  int offset;                               /* byte offset the sig must appear at */
   int ipproto;                              /* 0 = any, 6 = tcp, 17 = udp */
   char proto[PCAPNG_POSA_NAME_MAX]; int used;
 } content_bind_t;
@@ -212,10 +213,11 @@ static void bind_add(int ipproto, uint16_t port, const char *proto)
     g_nbinds++;
   }
 }
-static void content_add(int ipproto, const uint8_t *sig, int n, const char *proto)
+static void content_add(int ipproto, int offset, const uint8_t *sig, int n, const char *proto)
 {
-  if (n <= 0 || n > CONTENT_SIG_MAX || g_ncbinds >= MAX_CONTENT_BINDS) return;
+  if (n <= 0 || n > CONTENT_SIG_MAX || offset < 0 || g_ncbinds >= MAX_CONTENT_BINDS) return;
   g_cbinds[g_ncbinds].used = 1; g_cbinds[g_ncbinds].ipproto = ipproto;
+  g_cbinds[g_ncbinds].offset = offset;
   g_cbinds[g_ncbinds].siglen = n; memcpy(g_cbinds[g_ncbinds].sig, sig, (size_t)n);
   snprintf(g_cbinds[g_ncbinds].proto, sizeof g_cbinds[g_ncbinds].proto, "%s", proto);
   g_ncbinds++;
@@ -230,7 +232,8 @@ const char *pcapng_posa_bound_content(int ipproto, const uint8_t *data, int len)
   for (i = 0; i < g_ncbinds; i++) {
     const content_bind_t *b = &g_cbinds[i];
     if (!b->used || (b->ipproto && b->ipproto != ipproto)) continue;
-    if (b->siglen <= len && memcmp(data, b->sig, (size_t)b->siglen) == 0) return b->proto;
+    if (b->offset + b->siglen <= len &&
+        memcmp(data + b->offset, b->sig, (size_t)b->siglen) == 0) return b->proto;
   }
   return NULL;
 }
@@ -358,18 +361,19 @@ static void parse_rule(const char *rest)
   const char *arrow;
   char proto[PCAPNG_POSA_NAME_MAX] = "";
 
-  /* content signature: rule [tcp.|udp.]content "<bytes>" => Proto */
+  /* content signature: rule [tcp.|udp.]content[@offset] "<bytes>" => Proto */
   { const char *cw = strstr(rest, "content");
     if (cw) {
       const char *q = strchr(cw, '"');
-      int ipproto = 0;                       /* any transport by default */
+      int ipproto = 0, offset = 0;           /* any transport, offset 0 by default */
       if      (!strncmp(rest, "tcp", 3)) ipproto = 6;
       else if (!strncmp(rest, "udp", 3)) ipproto = 17;
+      if (cw[7] == '@') offset = (int)parse_num(cw + 8);
       arrow = strstr(rest, "=>");
       if (q && arrow && sscanf(arrow + 2, " %63s", proto) == 1) {
         char sig[PCAPNG_POSA_DELIM_MAX]; int n = 0;
         parse_delim(q, sig, &n);
-        content_add(ipproto, (const uint8_t *)sig, n, proto);
+        content_add(ipproto, offset, (const uint8_t *)sig, n, proto);
       }
       return;
     }

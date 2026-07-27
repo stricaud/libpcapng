@@ -16,3 +16,8 @@ Object<main> STUN
     required uint16    length = 0
     required uint32    magic_cookie = 0x2112A442
     required bytes<12> transaction_id
+
+# Content signature — the STUN magic cookie 0x2112A442 sits at offset 4, so
+# STUN/TURN is recognised on any port (not just 3478/5349).
+rule udp.content@4 "\x21\x12\xa4\x42" => STUN
+rule tcp.content@4 "\x21\x12\xa4\x42" => STUN

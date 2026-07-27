@@ -10,3 +10,7 @@ Object<main> BGP
         NOTIFICATION  = 3
         KEEPALIVE     = 4
         ROUTE_REFRESH = 5
+
+# Content signature — BGP opens with a 16-byte all-ones marker at offset 0,
+# so it is recognisable on any port, not just 179.
+rule tcp.content "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" => BGP

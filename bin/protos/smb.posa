@@ -337,3 +337,9 @@ rule tcp.port == 445 => NBSS
 color smb2.status > 0 => yellow red
 color smb2           => black lightcyan
 color nbss           => black lightcyan
+
+# Content signatures — SMB carries a 4-byte NetBIOS session header, then the
+# SMB magic (\xfeSMB for SMB2/3, \xffSMB for SMB1) at offset 4. Recognise it on
+# any port, not only 445.
+rule tcp.content@4 "\xfeSMB" => NBSS
+rule tcp.content@4 "\xffSMB" => NBSS
