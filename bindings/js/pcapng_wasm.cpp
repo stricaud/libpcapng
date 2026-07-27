@@ -238,6 +238,12 @@ int loadCapture(val u8) {
   g_session.is_classic = detect_classic(buf.data(), buf.size());
   libpcapng_mem_read(buf.data(), buf.size(), on_block, nullptr);
 
+  /* New capture → drop any sticky flow classifications from the previous one.
+     This first pass runs in file order, so a flow's opening packet (TLS
+     ClientHello, SSH banner) is dissected before its later packets and seeds
+     the flow table they inherit from. */
+  pcapng_dissect_reset_flows();
+
   /* Dissect each packet once for the summary columns. */
   for (auto &p : g_session.pkts) {
     if (p.custom) {

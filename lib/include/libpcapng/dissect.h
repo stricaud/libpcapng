@@ -73,6 +73,12 @@ pcapng_dissection_t *pcapng_dissect(const uint8_t *data, uint32_t caplen,
                                     uint32_t origlen, uint16_t linktype);
 void pcapng_dissection_free(pcapng_dissection_t *d);
 
+/* Sticky flow classification (TLS/SSH etc. recognised from a flow's first
+   packet is remembered for the rest of the flow) persists across dissect calls.
+   Call this once before dissecting a new capture in file order, so the flow
+   table does not carry classifications over from the previous one. */
+void pcapng_dissect_reset_flows(void);
+
 /* The protocol abbrevs this dissector can produce (for listing decoders). The
    returned array is static; *count is set to its length. */
 const char *const *pcapng_dissect_protocols(int *count);

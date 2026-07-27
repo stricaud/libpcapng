@@ -65,6 +65,7 @@ set(LIBPCAPNG_SOURCES
   dfilter.c
   objects.c
   posa.c
+  community_id.c
   wire_layout.c
  )
 

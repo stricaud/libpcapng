@@ -20,6 +20,7 @@
 #include <libpcapng/protocols/bootp.h> /* struct libpcapng_bootp_hdr (DHCP/BOOTP)  */
 #include <libpcapng/protocols/ssl.h>   /* TLS_CONTENT_*, TLS_VERSION_* constants    */
 #include <libpcapng/posa.h>            /* declarative decoders (e.g. bundled RDP)   */
+#include <libpcapng/community_id.h>    /* per-flow Community ID + sticky flow key    */
 #include "builtin_protos.h"           /* g_builtin_posa_protos[] — embedded .posa  */
 
 /* LINKTYPE_* aliases so the ported dissector body is unchanged. */
@@ -268,15 +269,8 @@ static int run_posa(dctx_t *c, const char *proto, const uint8_t *pl, int pll,
   return 1;
 }
 
-/* Apply a posa decoder bound (by a rule) to this transport port, if any. */
-static int try_posa_app(dctx_t *c, uint16_t sp, uint16_t dp, int ipproto,
-                        const uint8_t *pl, int pll, pcapng_field_t *root)
-{
-  const char *proto = pcapng_posa_bound_port(ipproto, dp);
-  if (!proto) proto = pcapng_posa_bound_port(ipproto, sp);
-  if (!proto) proto = pcapng_posa_bound_content(ipproto, pl, pll);  /* signature, any port */
-  return run_posa(c, proto, pl, pll, root);
-}
+/* Transport-port / content dispatch is inlined in dissect_tcp / dissect_udp so
+   the matched decoder name can be remembered for sticky flow classification. */
 
 /* …and the ones bound below the transport layer: `rule ip.proto == 2 => IGMP`,
    `rule eth.type == 0x88cc => LLDP`. */
@@ -310,19 +304,91 @@ static void dissect_data(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
 static void dissect_text(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *root,
                          const char *abbrev, const char *name);
 
-/* Content-signature dispatch to a built-in C dissector. A `rule content "…"`
-   whose target has no .posa definition (e.g. SSH) lands here — it lets the
-   built-in dissectors be picked by payload signature on any port, the same way
-   posa decoders already are. Returns 1 if a signature matched and dissected. */
-static int try_content_c(dctx_t *c, int ipproto, const uint8_t *pl, int pll,
-                         pcapng_field_t *root)
+/* Dispatch by decoder name — posa first, then a built-in C dissector. Used both
+   for content-signature dispatch (e.g. an SSH banner on a non-standard port,
+   whose target has no .posa definition) and to replay a flow's remembered
+   classification onto its later, unrecognisable packets. */
+static int dispatch_named(dctx_t *c, const char *name, const uint8_t *pl, int pll,
+                          pcapng_field_t *root)
 {
-  const char *name = pcapng_posa_bound_content(ipproto, pl, pll);
-  if (!name) return 0;
-  if      (!strcmp(name, "SSH"))                        dissect_ssh(c, pl, pll, root);
-  else if (!strcmp(name, "TLS") || !strcmp(name, "SSL")) dissect_tls(c, pl, pll, root);
-  else return 0;   /* name targets a posa decoder (handled elsewhere) or is unknown */
-  return 1;
+  if (!name || !*name) return 0;
+  if (run_posa(c, name, pl, pll, root)) return 1;
+  if (!strcmp(name, "SSH"))                          { dissect_ssh(c, pl, pll, root); return 1; }
+  if (!strcmp(name, "TLS") || !strcmp(name, "SSL"))  { dissect_tls(c, pl, pll, root); return 1; }
+  return 0;
+}
+
+/* ── sticky flow classification ───────────────────────────────────────────────
+   A flow's application protocol is often only recognisable from its opening
+   packet (a TLS ClientHello, an SSH banner); the encrypted remainder looks like
+   opaque TCP. We key each flow by a direction-independent hash of its 5-tuple
+   (the same tuple the Community ID is built from), remember the protocol the
+   opening packet resolved to, and replay it onto the rest of the flow. */
+#define FLOWTAB_BITS 14
+#define FLOWTAB_SIZE (1u << FLOWTAB_BITS)
+static struct { uint64_t key; char proto[16]; } g_flowtab[FLOWTAB_SIZE];
+static int g_flow_used;
+
+void pcapng_dissect_reset_flows(void) { memset(g_flowtab, 0, sizeof g_flowtab); g_flow_used = 0; }
+
+static uint64_t flow_key(uint8_t proto, const uint8_t *a, const uint8_t *b, int alen,
+                         uint16_t sp, uint16_t dp)
+{
+  const uint8_t *lo = a, *hi = b; uint16_t plo = sp, phi = dp;
+  uint64_t h = 1469598103934665603ULL; /* FNV-1a */
+  int i, cmp = memcmp(a, b, (size_t)alen);
+  if (cmp > 0 || (cmp == 0 && sp > dp)) { lo = b; hi = a; plo = dp; phi = sp; }
+#define FNV(x) do { h ^= (uint8_t)(x); h *= 1099511628211ULL; } while (0)
+  FNV(proto);
+  for (i = 0; i < alen; i++) FNV(lo[i]);
+  for (i = 0; i < alen; i++) FNV(hi[i]);
+  FNV(plo >> 8); FNV(plo & 0xff); FNV(phi >> 8); FNV(phi & 0xff);
+#undef FNV
+  return h ? h : 1;                       /* 0 marks an empty slot */
+}
+
+static const char *flow_lookup(uint64_t key)
+{
+  uint32_t i = (uint32_t)key & (FLOWTAB_SIZE - 1), probes = 0;
+  while (g_flowtab[i].key) {
+    if (g_flowtab[i].key == key) return g_flowtab[i].proto;
+    i = (i + 1) & (FLOWTAB_SIZE - 1);
+    if (++probes >= FLOWTAB_SIZE) break;
+  }
+  return NULL;
+}
+
+static void flow_record(uint64_t key, const char *proto)
+{
+  uint32_t i, probes = 0;
+  if (!key || !proto || !*proto || g_flow_used * 4 >= (int)FLOWTAB_SIZE * 3) return; /* ≤75% load */
+  i = (uint32_t)key & (FLOWTAB_SIZE - 1);
+  while (g_flowtab[i].key) {
+    if (g_flowtab[i].key == key) { snprintf(g_flowtab[i].proto, 16, "%s", proto); return; }
+    i = (i + 1) & (FLOWTAB_SIZE - 1);
+    if (++probes >= FLOWTAB_SIZE) return;
+  }
+  g_flowtab[i].key = key;
+  snprintf(g_flowtab[i].proto, 16, "%s", proto);
+  g_flow_used++;
+}
+
+/* Attach the Community ID field and return the flow key, or 0 if no L3 addrs. */
+static uint64_t flow_annotate(dctx_t *c, pcapng_field_t *layer, uint8_t proto,
+                              uint16_t sp, uint16_t dp)
+{
+  int alen;
+  char cid[32];
+  pcapng_field_t *f;
+  if (!c->l3src || !c->l3dst) return 0;
+  alen = c->l3v6 ? 16 : 4;
+  pcapng_community_id(proto, c->l3src, c->l3dst, alen, sp, dp, 0, cid, sizeof cid);
+  if (cid[0]) {
+    f = pf_add(layer, "communityid", PCAPNG_FT_STR);
+    pf_set_str(f, cid);
+    pf_set_label(f, "Community ID: %s", cid);
+  }
+  return flow_key(proto, c->l3src, c->l3dst, alen, sp, dp);
 }
 
 /* ── frame (always present) ─────────────────────────────────────────────── */
@@ -697,6 +763,8 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     }
   }
 
+  { uint64_t fkey = flow_annotate(c, t, 6, sp, dp);
+
   set_proto(c, "TCP");
   set_info(c, "%u \xe2\x86\x92 %u [%s] Seq=%u Win=%u Len=%d",
            sp, dp, fs, be32(d + 4), be16(d + 14),
@@ -707,7 +775,14 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     const uint8_t *pl = d + doff;
     int pll = len - doff;
     if (pll <= 0) return;
-    if (try_posa_app(c, sp, dp, 6, pl, pll, root)) return;   /* posa-bound (e.g. RDP) */
+
+    /* posa dispatch by port rule, then content signature; remember what the
+       flow resolved to so its later (unrecognisable) packets can inherit it */
+    { const char *nm = pcapng_posa_bound_port(6, dp);
+      if (!nm) nm = pcapng_posa_bound_port(6, sp);
+      if (!nm) nm = pcapng_posa_bound_content(6, pl, pll);
+      if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }
+
 #define TP(x) (sp == (x) || dp == (x))
     if      (TP(80) || TP(8080) || TP(8000) || TP(8888) || TP(3128))
                                      dissect_http(c, pl, pll, root);
@@ -721,10 +796,17 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     else if (TP(6667))               dissect_text(c, pl, pll, root, "irc", "IRC");
     else if (TP(6379))               dissect_text(c, pl, pll, root, "redis", "Redis");
     else if (TP(53) && pll > 2)      dissect_dns(c, pl + 2, pll - 2, root, "dns"); /* TCP DNS: 2-byte len prefix */
-    else if (try_content_c(c, 6, pl, pll, root)) return;              /* C dissector by signature, any port */
-    else if (pll > 0)                dissect_data(c, pl, pll, root);  /* undissected payload */
+    else {
+      /* built-in C dissector claimed by content signature (e.g. SSH banner) */
+      const char *cn = pcapng_posa_bound_content(6, pl, pll);
+      if (cn && dispatch_named(c, cn, pl, pll, root)) { flow_record(fkey, cn); return; }
+      /* nothing recognised this packet — replay the flow's known protocol */
+      cn = flow_lookup(fkey);
+      if (cn && dispatch_named(c, cn, pl, pll, root)) return;
+      if (pll > 0) dissect_data(c, pl, pll, root);   /* undissected payload */
+    }
 #undef TP
-  }
+  } }
 }
 
 /* ── UDP ────────────────────────────────────────────────────────────────── */
@@ -756,6 +838,8 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     set_range(c, bad, d + 6, 2);
   }
 
+  { uint64_t fkey = flow_annotate(c, u, 17, sp, dp);
+
   set_proto(c, "UDP");
   set_info(c, "%u \xe2\x86\x92 %u  Len=%d", sp, dp, len - 8);
 
@@ -763,7 +847,12 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     const uint8_t *pl = d + 8;
     int pll = len - 8;
     if (pll <= 0) return;
-    if (try_posa_app(c, sp, dp, 17, pl, pll, root)) return;   /* posa-bound (by rule) */
+
+    { const char *nm = pcapng_posa_bound_port(17, dp);
+      if (!nm) nm = pcapng_posa_bound_port(17, sp);
+      if (!nm) nm = pcapng_posa_bound_content(17, pl, pll);
+      if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }
+
 #define UP(x) (sp == (x) || dp == (x))
     if      (UP(53))                 dissect_dns(c, pl, pll, root, "dns");
     else if (UP(5353))               dissect_dns(c, pl, pll, root, "mdns");
@@ -775,9 +864,13 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     else if (UP(1812)||UP(1813)||UP(1645)||UP(1646)) dissect_radius(c, pl, pll, root);
     else if (UP(514))                dissect_text(c, pl, pll, root, "syslog", "Syslog");
     else if (UP(443) || UP(80))      dissect_quic(c, pl, pll, root);  /* QUIC over UDP */
-    else if (pll > 0)                dissect_data(c, pl, pll, root);  /* undissected payload */
+    else {
+      const char *cn = flow_lookup(fkey);           /* replay the flow's known protocol */
+      if (cn && dispatch_named(c, cn, pl, pll, root)) return;
+      if (pll > 0) dissect_data(c, pl, pll, root);  /* undissected payload */
+    }
 #undef UP
-  }
+  } }
 }
 
 /* ── NTP (uses libpcapng's struct libpcapng_ntp_hdr for the wire layout) ──── */
