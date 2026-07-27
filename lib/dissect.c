@@ -776,11 +776,17 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     int pll = len - doff;
     if (pll <= 0) return;
 
-    /* posa dispatch by port rule, then content signature; remember what the
-       flow resolved to so its later (unrecognisable) packets can inherit it */
+    /* Content signature wins over port: the payload itself says what it is, so
+       plaintext HTTP on 443 is HTTP, not a mis-parsed TLS record. A real TLS
+       handshake still matches its own "\x16\x03" signature; TLS application data
+       has no signature and falls through to the port rule below. */
+    { const char *cn = pcapng_posa_bound_content(6, pl, pll);
+      if (cn && dispatch_named(c, cn, pl, pll, root)) { flow_record(fkey, cn); return; } }
+
+    /* then the port rule (posa); remember what the flow resolved to so its later
+       (unrecognisable) packets can inherit it via the sticky lookup below */
     { const char *nm = pcapng_posa_bound_port(6, dp);
       if (!nm) nm = pcapng_posa_bound_port(6, sp);
-      if (!nm) nm = pcapng_posa_bound_content(6, pl, pll);
       if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }
 
 #define TP(x) (sp == (x) || dp == (x))
@@ -797,11 +803,9 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     else if (TP(6379))               dissect_text(c, pl, pll, root, "redis", "Redis");
     else if (TP(53) && pll > 2)      dissect_dns(c, pl + 2, pll - 2, root, "dns"); /* TCP DNS: 2-byte len prefix */
     else {
-      /* built-in C dissector claimed by content signature (e.g. SSH banner) */
-      const char *cn = pcapng_posa_bound_content(6, pl, pll);
-      if (cn && dispatch_named(c, cn, pl, pll, root)) { flow_record(fkey, cn); return; }
-      /* nothing recognised this packet — replay the flow's known protocol */
-      cn = flow_lookup(fkey);
+      /* nothing recognised this packet by content or port — replay the flow's
+         remembered protocol (e.g. mid-stream TLS/HTTP), else raw data */
+      const char *cn = flow_lookup(fkey);
       if (cn && dispatch_named(c, cn, pl, pll, root)) return;
       if (pll > 0) dissect_data(c, pl, pll, root);   /* undissected payload */
     }
@@ -848,9 +852,10 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     int pll = len - 8;
     if (pll <= 0) return;
 
+    { const char *cn = pcapng_posa_bound_content(17, pl, pll);   /* content wins over port */
+      if (cn && dispatch_named(c, cn, pl, pll, root)) { flow_record(fkey, cn); return; } }
     { const char *nm = pcapng_posa_bound_port(17, dp);
       if (!nm) nm = pcapng_posa_bound_port(17, sp);
-      if (!nm) nm = pcapng_posa_bound_content(17, pl, pll);
       if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }
 
 #define UP(x) (sp == (x) || dp == (x))
