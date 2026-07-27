@@ -9,6 +9,7 @@
  * License MIT
  */
 #include <libpcapng/dfilter.h>
+#include <libpcapng/posa.h>   /* alias expansion declared by .posa files */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,6 +125,7 @@ static int word_op(const char *s)
 
 /* ── parser ─────────────────────────────────────────────────────────────── */
 static node_t *parse_or(lex_t *L);
+static int g_alias_depth;   /* guards against cyclic macro aliases */
 
 static node_t *mknode(ntype_t t) { node_t *n = calloc(1, sizeof *n); if (n) n->type = t; return n; }
 
@@ -257,9 +259,27 @@ static node_t *parse_primary(lex_t *L)
     return n;
   }
 
-  /* bare field → existence */
+  /* bare term → existence, unless the name is a macro alias (`alias x => <expr>`),
+     which we compile in place so a named expression can be reused as a term */
   {
-    node_t *n = mknode(N_EXISTS);
+    const char *macro = pcapng_posa_alias_macro(field);
+    node_t *n;
+    if (macro) {
+      lex_t inner;
+      node_t *sub;
+      if (++g_alias_depth > 16) {
+        g_alias_depth--;
+        snprintf(L->err, sizeof L->err, "alias '%s' expands too deeply", field);
+        return NULL;
+      }
+      inner.p = macro; inner.err[0] = '\0';
+      lex_next(&inner);
+      sub = parse_or(&inner);
+      g_alias_depth--;
+      if (!sub) { snprintf(L->err, sizeof L->err, "in alias '%s': %s", field, inner.err); return NULL; }
+      return sub;
+    }
+    n = mknode(N_EXISTS);
     if (n) snprintf(n->field, sizeof n->field, "%s", field);
     return n;
   }
@@ -326,6 +346,7 @@ pcapng_dfilter_t *pcapng_dfilter_compile(const char *expr, char *errbuf, size_t 
 
   memset(&L, 0, sizeof L);
   L.p = expr;
+  g_alias_depth = 0;
   lex_next(&L);
   f->root = parse_or(&L);
   if (!f->root || L.cur.t != T_EOF) {
@@ -342,9 +363,16 @@ static int aliases(const char *field, const char *out[4])
 {
   if (!strcmp(field, "ip.addr"))   { out[0] = "ip.src";   out[1] = "ip.dst";   return 2; }
   if (!strcmp(field, "ipv6.addr")) { out[0] = "ipv6.src"; out[1] = "ipv6.dst"; return 2; }
+  /* Core structural aliases for the built-in C dissectors — these span many
+     protocols and are produced in C, so they live here, not in a .posa file. */
   if (!strcmp(field, "tcp.port"))  { out[0] = "tcp.srcport"; out[1] = "tcp.dstport"; return 2; }
   if (!strcmp(field, "udp.port"))  { out[0] = "udp.srcport"; out[1] = "udp.dstport"; return 2; }
   if (!strcmp(field, "eth.addr"))  { out[0] = "eth.src";  out[1] = "eth.dst";  return 2; }
+  if (!strcmp(field, "community.id") || !strcmp(field, "community_id"))
+                                   { out[0] = "communityid"; return 1; }
+  /* Everything else may be declared by an `alias` line in a .posa file. */
+  { const char *tgt[4]; int n = pcapng_posa_alias_expand(field, tgt, 4);
+    if (n > 0) { int i; for (i = 0; i < n; i++) out[i] = tgt[i]; return n; } }
   out[0] = field;
   return 1;
 }

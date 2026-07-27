@@ -78,6 +78,27 @@ typedef struct {
 } content_bind_t;
 static content_bind_t g_cbinds[MAX_CONTENT_BINDS]; static int g_ncbinds;
 
+/* Aliases: `alias <name> => <rhs>` lets a .posa declare filter/column shortcuts.
+   Two shapes, told apart by the right-hand side:
+     • field synonym — RHS is a bare field, or a list of them:
+         alias http.request => http.method
+         alias tcp.port     => tcp.srcport tcp.dstport
+       The name stands in for those abbrevs anywhere a field is used; a list is
+       OR'd (and the comparison operator distributes, like Wireshark's tcp.port).
+     • expression macro — RHS is a full display-filter expression:
+         alias http.error   => http.response.code >= 400
+       The name expands to that whole expression wherever it is used as a term. */
+#define MAX_ALIASES     64
+#define ALIAS_MAX_TGTS  4
+typedef struct {
+  char from[PCAPNG_POSA_NAME_MAX];
+  char to[ALIAS_MAX_TGTS][PCAPNG_POSA_NAME_MAX];  /* field synonym targets   */
+  int  nto;
+  char expr[192];                                 /* macro expression ("" if synonym) */
+  int  is_macro, used;
+} alias_t;
+static alias_t g_aliases[MAX_ALIASES]; static int g_naliases;
+
 static void parse_delim(const char *tok, char *out, int *nout);  /* fwd */
 
 /* Coloring declared by a `color <display filter> => <fg> <bg>` line. The colors
@@ -111,6 +132,7 @@ void pcapng_posa_clear(void)
     free(g_protos[i]); g_protos[i] = NULL;
   }
   g_nprotos = 0; g_nbinds = 0; g_ncolors = 0; g_nipbinds = 0; g_nethbinds = 0; g_ncbinds = 0;
+  g_naliases = 0;
 }
 
 int pcapng_posa_color_count(void) { return g_ncolors; }
@@ -364,6 +386,90 @@ static void parse_rule(const char *rest)
   }
 }
 
+/* A field-name token: only the characters a display-filter abbrev may contain,
+   and not a boolean/operator keyword. Anything else means the RHS is an
+   expression (a macro) rather than a list of field synonyms. */
+static int alias_plain_field(const char *t)
+{
+  static const char *const kw[] = { "and","or","not","in","eq","ne","gt","lt",
+                                    "ge","le","contains","matches",NULL };
+  int i;
+  if (!*t) return 0;
+  for (i = 0; t[i]; i++) {
+    char c = t[i];
+    if (!(isalnum((unsigned char)c) || c=='.' || c=='_' || c==':' || c=='-' || c=='/'))
+      return 0;
+  }
+  for (i = 0; kw[i]; i++) if (!strcmp(t, kw[i])) return 0;
+  return 1;
+}
+
+/* Parse `alias <name> => <rhs>` — see the alias_t comment for the two shapes. */
+static void parse_alias(const char *rest)
+{
+  const char *arrow = strstr(rest, "=>"), *p;
+  char from[PCAPNG_POSA_NAME_MAX] = "";
+  alias_t *a;
+  int macro = 0, ntok = 0;
+  char tgts[ALIAS_MAX_TGTS][PCAPNG_POSA_NAME_MAX];
+
+  if (!arrow || g_naliases >= MAX_ALIASES) return;
+  if (sscanf(rest, " %63s", from) != 1 || !from[0] || !strcmp(from, "=>")) return;
+
+  /* scan the RHS tokens: all plain fields (≤ARRAY) → synonym, else → macro */
+  for (p = arrow + 2; ; ) {
+    char tok[PCAPNG_POSA_NAME_MAX] = "";
+    while (*p == ' ' || *p == '\t' || *p == ',') p++;
+    if (!*p) break;
+    if (sscanf(p, "%63[^ \t,]", tok) != 1 || !tok[0]) break;
+    p += strlen(tok);
+    if (!alias_plain_field(tok) || ntok >= ALIAS_MAX_TGTS) { macro = 1; break; }
+    snprintf(tgts[ntok++], PCAPNG_POSA_NAME_MAX, "%s", tok);
+  }
+  if (ntok == 0) macro = 1;                    /* empty or contained operators */
+
+  a = &g_aliases[g_naliases];
+  memset(a, 0, sizeof *a);
+  snprintf(a->from, sizeof a->from, "%s", from);
+  if (macro) {
+    const char *e = arrow + 2;
+    while (*e == ' ' || *e == '\t') e++;
+    if (!*e) return;                           /* nothing after => */
+    snprintf(a->expr, sizeof a->expr, "%s", e);
+    a->is_macro = 1;
+  } else {
+    int j;
+    for (j = 0; j < ntok; j++) snprintf(a->to[j], PCAPNG_POSA_NAME_MAX, "%s", tgts[j]);
+    a->nto = ntok;
+  }
+  a->used = 1;
+  g_naliases++;
+}
+
+int pcapng_posa_alias_expand(const char *field, const char **out, int max)
+{
+  int i, j, n;
+  if (!field) return 0;
+  for (i = 0; i < g_naliases; i++) {
+    if (!g_aliases[i].used || g_aliases[i].is_macro ||
+        strcmp(g_aliases[i].from, field) != 0) continue;
+    n = g_aliases[i].nto < max ? g_aliases[i].nto : max;
+    for (j = 0; j < n; j++) out[j] = g_aliases[i].to[j];
+    return n;
+  }
+  return 0;
+}
+
+const char *pcapng_posa_alias_macro(const char *name)
+{
+  int i;
+  if (!name) return NULL;
+  for (i = 0; i < g_naliases; i++)
+    if (g_aliases[i].used && g_aliases[i].is_macro && !strcmp(g_aliases[i].from, name))
+      return g_aliases[i].expr;
+  return NULL;
+}
+
 /* ── source parsing ──────────────────────────────────────────────────────── */
 static pcapng_posa_fld_t *add_fld(pcapng_posa_proto_t *cur, pcapng_posa_ftype_t t)
 {
@@ -493,6 +599,14 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     if (!strncmp(tl, "color", 5) && (tl[5] == ' ' || tl[5] == '\t')) {
       char *r = tl + 5; while (*r == ' ' || *r == '\t') r++;
       parse_color(r);
+      continue;
+    }
+
+    /* alias <name> => <target> …  — filter/column synonyms for emitted abbrevs.
+       File-scoped like `rule`/`color`. */
+    if (!strncmp(tl, "alias", 5) && (tl[5] == ' ' || tl[5] == '\t')) {
+      char *r = tl + 5; while (*r == ' ' || *r == '\t') r++;
+      parse_alias(r);
       continue;
     }
 

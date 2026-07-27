@@ -176,6 +176,15 @@ const char *pcapng_posa_bound_ethertype(uint16_t ethertype);
    ip_proto is the transport (6/17); tried after port binding fails. */
 const char *pcapng_posa_bound_content(int ip_proto, const uint8_t *data, int len);
 
+/* Expand a field-synonym alias (`alias <name> => <field> …`). Writes up to
+   `max` target abbrevs into `out` and returns the count, or 0 if `field` is not
+   a synonym alias. Targets are OR'd together by the caller (as `tcp.port` is). */
+int pcapng_posa_alias_expand(const char *field, const char **out, int max);
+
+/* The display-filter expression of a macro alias (`alias <name> => <expr>`), or
+   NULL if `name` is not a macro. The caller compiles the string in place. */
+const char *pcapng_posa_alias_macro(const char *name);
+
 /* ── Coloring declared by a `color <display filter> => <fg> <bg>` line ───────
  *
  *     color tcp.flags.reset == 1 => yellow red

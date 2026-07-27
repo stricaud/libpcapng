@@ -285,6 +285,12 @@ double getStartTime() { return captureBase(); }
    Returns an array of strings aligned with the packet list ("" if absent). */
 val getFieldColumn(std::string abbrev) {
   val arr = val::array();
+  /* Community ID goes by several spellings across tools — normalize to ours. */
+  if (abbrev == "community.id" || abbrev == "community_id") abbrev = "communityid";
+  /* Honour a .posa field-synonym alias (e.g. http.request → http.method) so the
+     same name works for a column as for a filter. Macros aren't single fields. */
+  { const char *tgt[4];
+    if (pcapng_posa_alias_expand(abbrev.c_str(), tgt, 4) >= 1) abbrev = tgt[0]; }
   for (size_t i = 0; i < g_session.pkts.size(); i++) {
     Packet &p = g_session.pkts[i];
     std::string out;

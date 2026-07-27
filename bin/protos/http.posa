@@ -74,4 +74,17 @@ rule tcp.content "DELETE "  => HTTP
 rule tcp.content "OPTIONS " => HTTP
 rule tcp.content "PATCH "   => HTTP
 
-color http => black lightgray
+# Wireshark-compatible filter names → the abbrevs this decoder emits. Field
+# synonyms (single target) work in comparisons too; `http.request` selects the
+# request-only method field, `http.response` the response-only status field.
+alias http.request        => http.method
+alias http.request.method => http.method
+alias http.request.uri    => http.uri
+alias http.response       => http.status_code
+alias http.response.code  => http.status_code
+alias http.response.phrase => http.reason
+# A macro alias — a named expression reusable as a filter term.
+alias http.error          => http.response.code >= 400
+
+# Wireshark paints HTTP light green; match that instead of grey.
+color http => black lightgreen
