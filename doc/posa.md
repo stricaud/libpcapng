@@ -1,4 +1,4 @@
-# posa:�  declarative packet decoders
+# posa:�  declarative packet decoders
 
 A `.posa` file describes how to decode a protocol. libpcapng interprets it and
 builds the same field tree a hand-written C dissector would, so a posa decoder is
@@ -297,20 +297,127 @@ so does the innermost `col`: NetBIOS frames SMB2, and the packet reads `SMB2`.
 
 ## 9. Binding: `rule`
 
+Rules tell the dissector which decoder to apply to a payload. A rule bound by a
+`.posa` file is tried **before** the built-in C dissectors, so a decoder takes
+over a protocol without touching the library. In carcal you can also bind at
+runtime: **Analyze ▸ Decode As…**.
+
+### Port and protocol rules
+
 ```posa
-rule tcp.port == 445    => NBSS
+rule tcp.port == 445    => NBSS      # src OR dst port
+rule tcp.dstport == 69  => TFTP      # destination port only
 rule udp.port == 53     => DNS
-rule ip.proto == 2      => IGMP        # IGMP has no port
-rule eth.type == 0x88cc => LLDP
+rule ip.proto == 2      => IGMP      # IP protocol number — IGMP has no port
+rule eth.type == 0x88cc => LLDP      # ethertype
 ```
 
-A rule bound by a posa file is tried **before** the built-in C dissectors, so a
-`.posa` takes a protocol over without touching the library. In carcal you can
-also bind at runtime: **Analyze ▸ Decode As…**.
+`tcp.port` and `udp.port` match when **either** the source or destination port
+equals the value. Use `tcp.srcport` / `tcp.dstport` (or the UDP equivalents) to
+restrict to one direction.
+
+### Content signatures — protocol without a fixed port
+
+```posa
+rule tcp.content "\x16\x03"         => TLS
+rule tcp.content "HTTP/1."          => HTTP
+rule tcp.content "GET "             => HTTP
+rule udp.content "\xff\xfe\xfd"     => DTLS
+rule content     "SSH-"             => SSH
+```
+
+`rule [tcp.|udp.]content "<bytes>" => Proto` matches when the application
+payload **starts** with the given bytes, regardless of port. This is the primary
+tool for protocols that run on non-standard ports.
+
+* `tcp.content` — only TCP payloads
+* `udp.content` — only UDP payloads
+* `content` (no prefix) — any transport
+
+Content rules are tried **after** port rules, so a connection on the registered
+port is handled by the port rule and content scanning is skipped; a connection on
+an arbitrary port falls through to content detection.
+
+Byte strings use `\xNN` escapes and literal text:
+
+```posa
+rule tcp.content "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" => BGP
+rule tcp.content "AMQP"    => AMQP
+rule tcp.content "SSH-"    => SSH
+```
+
+**Offset variant** — `content@N` checks at byte offset N from the start of the
+payload, not byte 0. STUN's magic cookie is at offset 4:
+
+```posa
+rule udp.content@4 "\x21\x12\xa4\x42" => STUN
+rule tcp.content@4 "\xfeSMB"          => NBSS
+```
+
+### Group member dispatch with `starts`
+
+Inside an `Object<GROUP>` member, `starts` restricts that member to payloads
+whose content begins with one of the given prefixes. It acts like a per-member
+content filter within the group's dispatch:
+
+```posa
+Object<HTTP> HTTP_REQUEST
+    abbrev "http"
+    starts "GET " "POST " "PUT " "HEAD " "DELETE " "OPTIONS " "TRACE " "CONNECT " "PATCH "
+
+    required string method until " " "Method"
+    …
+```
+
+Without `starts`, the group would try to parse every payload that matched the
+group's port rule as a request — `starts` prevents mid-stream TCP segments
+(which look like raw binary) from being mis-decoded as a request line.
+
+Combine `starts` with a magic-field default for groups that have a byte-level
+marker: the `HTTP_RESPONSE` member checks for the 4-byte `HTTP` ASCII magic,
+while the `HTTP_REQUEST` member uses `starts` for the method keywords.
 
 ---
 
-## 10. Coloring
+## 10. Filter aliases: `alias`
+
+```posa
+alias http.request        => http.method
+alias http.request.method => http.method
+alias http.request.uri    => http.uri
+```
+
+`alias <name> => <target>` declares a filter synonym. The alias name works
+anywhere a field name does in a display filter, and the comparison operator
+distributes across all targets if a list is given:
+
+```posa
+alias tcp.port => tcp.srcport tcp.dstport
+# tcp.port == 80  ≡  tcp.srcport == 80 or tcp.dstport == 80
+```
+
+**Expression macros** — when the right-hand side is a full filter expression,
+the alias name expands to that expression:
+
+```posa
+alias http.error => http.response.code >= 400
+# http.error  ≡  http.response.code >= 400
+```
+
+Macros let you name multi-field conditions and reuse them in color rules or
+`rdpcap` filters without repeating the expression. A `.posa` file typically
+declares Wireshark-compatible aliases so that filters written against Wireshark
+field names work unchanged:
+
+```posa
+alias http.request.line   => http.method   # Wireshark compat
+alias http.response.code  => http.status_code
+alias tls.handshake.type  => tls.handshake_type
+```
+
+---
+
+## 11. Coloring
 
 ```posa
 color dns.rcode > 0 => yellow red
@@ -323,7 +430,7 @@ palette. A decoder therefore ships its own look.
 
 ---
 
-## 11. Worked example: DHCP options end to end
+## 12. Worked example: DHCP options end to end
 
 ```posa
 repeat until end as option "Options"
@@ -366,7 +473,54 @@ Options
 
 ---
 
-## 12. Limits and gotchas
+## 13. Worked example: protocol on a non-standard port
+
+Suppose you have an internal binary RPC protocol that runs on port 9000 in
+production but on a random ephemeral port during local testing. With port rules
+alone the test traffic goes unrecognised. The content approach decodes it on any
+port:
+
+```posa
+# myrpc.posa — binary RPC with a 4-byte magic header
+Object<main> MyRPC
+    abbrev "myrpc"
+    col "MyRPC"
+
+    required uint32 magic = 0xDEADBEEF hex "Magic"
+    required uint8  version "Version"
+    required uint8  msg_type "Message Type"
+        Request  = 1
+        Response = 2
+        Error    = 3
+    required uint16 request_id "Request ID"
+    required uint32 payload_length "Payload Length"
+    required payload body "Body"
+
+    info "%s id=%u" msg_type, request_id
+
+# Primary binding — production port
+rule tcp.port == 9000 => MyRPC
+
+# Content signature — any port, any direction.
+# The 4-byte magic at offset 0 identifies the protocol unambiguously.
+rule tcp.content "\xde\xad\xbe\xef" => MyRPC
+
+color myrpc.msg_type == 3 => yellow red    # errors
+color myrpc               => white darkblue
+```
+
+After dropping this file in the protos directory (no rebuild required), every
+TCP connection whose payload opens with `0xDEADBEEF` is decoded as MyRPC —
+regardless of port. The port rule still takes precedence on port 9000, so that
+path costs no content scan.
+
+When the magic alone is not distinctive enough (many protocols share common
+prefixes), add `content@N` to match at a non-zero offset, or combine a
+magic-field default with `starts` inside a group.
+
+---
+
+## 14. Limits and gotchas
 
 * **Indentation defines blocks.** A field indented under a `when` is inside it; a
   line at the same indent as the `when` closes it. Mixed tabs and spaces will
@@ -384,7 +538,7 @@ Options
 * `pcapng_posa_to_text()` reconstructs a *normalized* subset of a decoder and is
   lossy; the original text is kept and is what carcal shows you when you edit.
 
-## 13. Where the files live
+## 15. Where the files live
 
 * carcal loads every `*.posa` in its protos directory at startup — the one it was
   built with, or `$CARCAL_PROTOS_DIR` if you set it. Port bindings can also be
@@ -394,7 +548,7 @@ Options
 * A protocol redefined by name **replaces** the earlier one — drop your own
   `dns.posa` in `protos/` and it wins over the shipped one.
 
-## 14. API
+## 16. API
 
 ```c
 #include <libpcapng/posa.h>
