@@ -270,6 +270,9 @@ int loadCapture(val u8) {
 
 int getPacketCount() { return static_cast<int>(g_session.pkts.size()); }
 
+/* Toggle IP/TCP/UDP checksum validation (off by default, like Wireshark). */
+void setVerifyChecksums(bool on) { pcapng_dissect_set_verify_checksums(on ? 1 : 0); }
+
 /* Base epoch: the first packet that actually carries a timestamp. Custom Blocks
    (and anything with ts=0) must not become the base, or relative times explode. */
 double captureBase() {
@@ -1134,6 +1137,7 @@ val listProtocols() {
 EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("loadCapture", &loadCapture);
   emscripten::function("getPacketCount", &getPacketCount);
+  emscripten::function("setVerifyChecksums", &setVerifyChecksums);
   emscripten::function("getSummaries", &getSummaries);
   emscripten::function("getStartTime", &getStartTime);
   emscripten::function("getFieldColumn", &getFieldColumn);

@@ -331,6 +331,12 @@ static int g_flow_used;
 
 void pcapng_dissect_reset_flows(void) { memset(g_flowtab, 0, sizeof g_flowtab); g_flow_used = 0; }
 
+/* Checksum validation is OFF by default, like Wireshark: outgoing packets
+   captured on the sending host carry unfilled (offloaded) L4 checksums, so
+   validating by default would paint legitimate captures red. Opt in per session. */
+static int g_verify_checksums;
+void pcapng_dissect_set_verify_checksums(int on) { g_verify_checksums = on ? 1 : 0; }
+
 static uint64_t flow_key(uint8_t proto, const uint8_t *a, const uint8_t *b, int alen,
                          uint16_t sp, uint16_t dp)
 {
@@ -521,7 +527,7 @@ static void dissect_ipv4(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
     uint32_t sum = 0; int i;
     for (i = 0; i < ihl; i += 2) sum += be16(d + i);
     while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
-    if ((uint16_t)~sum != 0) { /* correct header sums to 0xffff → ~sum == 0 */
+    if (g_verify_checksums && (uint16_t)~sum != 0) { /* correct header sums to 0xffff → ~sum == 0 */
       pcapng_field_t *bad = pf_add(ip, "ip.checksum.bad", PCAPNG_FT_UINT);
       pf_set_uint(bad, 1);
       pf_set_label(bad, "Bad IP header checksum");
@@ -715,7 +721,7 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   pf_set_label(f, "Window: %u", be16(d + 14)); set_range(c, f, d + 14, 2);
   f = pf_add(t, "tcp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 16));
   pf_set_label(f, "Checksum: 0x%04x", be16(d + 16)); set_range(c, f, d + 16, 2);
-  if (l4_checksum_ok(c, 6, d, len) == 0) {
+  if (g_verify_checksums && l4_checksum_ok(c, 6, d, len) == 0) {
     pcapng_field_t *bad = pf_add(t, "tcp.checksum.bad", PCAPNG_FT_UINT);
     pf_set_uint(bad, 1); pf_set_label(bad, "Bad TCP checksum (or checksum offload)");
     set_range(c, bad, d + 16, 2);
@@ -836,7 +842,7 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
   f = pf_add(u, "udp.checksum", PCAPNG_FT_UINT); pf_set_uint(f, be16(d + 6));
   pf_set_label(f, "Checksum: 0x%04x", be16(d + 6)); set_range(c, f, d + 6, 2);
   /* UDP checksum 0 means "not computed" (valid for IPv4); only flag nonzero mismatches */
-  if (be16(d + 6) != 0 && l4_checksum_ok(c, 17, d, len) == 0) {
+  if (g_verify_checksums && be16(d + 6) != 0 && l4_checksum_ok(c, 17, d, len) == 0) {
     pcapng_field_t *bad = pf_add(u, "udp.checksum.bad", PCAPNG_FT_UINT);
     pf_set_uint(bad, 1); pf_set_label(bad, "Bad UDP checksum (or checksum offload)");
     set_range(c, bad, d + 6, 2);

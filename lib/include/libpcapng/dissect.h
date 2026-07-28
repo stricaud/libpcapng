@@ -79,6 +79,11 @@ void pcapng_dissection_free(pcapng_dissection_t *d);
    table does not carry classifications over from the previous one. */
 void pcapng_dissect_reset_flows(void);
 
+/* Enable/disable L4/IP checksum validation (off by default, like Wireshark).
+   When off, no ip/tcp/udp.checksum.bad fields are emitted, so captures with
+   offloaded (unfilled) checksums are not flagged. */
+void pcapng_dissect_set_verify_checksums(int on);
+
 /* The protocol abbrevs this dissector can produce (for listing decoders). The
    returned array is static; *count is set to its length. */
 const char *const *pcapng_dissect_protocols(int *count);
