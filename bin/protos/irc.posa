@@ -1,0 +1,216 @@
+# irc.posa — Internet Relay Chat — RFC 2812 / RFC 1459
+#
+# IRC is a line-based ASCII plaintext protocol. Each message ends with CR LF.
+# Wire format:  [':' prefix SP] command [SP params] CR LF
+#   prefix  — :nick!user@host  or  :servername
+#   command — text verb (NICK, JOIN, PRIVMSG, …) or 3-digit numeric reply
+#   params  — space-separated list; the last parameter may be prefixed with ':'
+#             to allow embedded spaces ("trailing parameter")
+#
+# Two variants are parsed as a group:
+#   IRC_SERVER  — any message whose first byte is ':' (0x3A), which means it
+#                 carries a prefix. These are always server-originated.
+#   IRC_CLIENT  — messages beginning with a known command word (no prefix).
+#                 Also catches the handful of server messages sent without a
+#                 prefix (PING, ERROR).
+#
+# Fields exposed (both variants share the `irc` abbrev):
+#   irc.prefix   — the full prefix token including the leading ':', e.g.
+#                  ":nick!user@host" or ":irc.example.com"
+#   irc.command  — the command verb or numeric code, e.g. "PRIVMSG" or "433"
+#   irc.params   — everything after the command up to CR LF, e.g.
+#                  "#general :Hello, world!"
+#
+# What is not decoded (add it here, no rebuild needed):
+#   • The prefix is not split into nick / user / host sub-fields.
+#   • The trailing parameter is not stripped of its leading ':'.
+#   • CTCP messages embedded in PRIVMSG are not decoded.
+
+Object<IRC> IRC_SERVER
+    abbrev "irc"
+    col "IRC"
+
+    # Server messages always start with ':' (0x3A). Read that byte as a
+    # discriminator so the group engine selects this variant; then rewind to
+    # position 0 so the prefix string field captures the ':' as well.
+    required uint8 colon = 0x3A "Colon"
+    seek 0
+    required string prefix  until " " "Prefix"
+    required string command until " \r" "Command"
+    required string params  until "\r\n" "Parameters"
+
+    info "%s %s" command, params
+
+Object<IRC> IRC_CLIENT
+    abbrev "irc"
+    col "IRC"
+
+    # Limit decoding to packets that begin with a known IRC command so that
+    # mid-stream TCP segments carrying bulk PRIVMSG data are not mis-parsed.
+    # Commands that can appear without a trailing space (QUIT, LIST, etc.) are
+    # listed without the space so they match the bare form as well.
+    starts "NICK " "USER " "PASS " "JOIN " "PART " "QUIT" "PRIVMSG " "NOTICE "
+           "PING " "PONG " "MODE " "TOPIC " "KICK " "INVITE " "WHOIS " "WHO "
+           "LIST" "NAMES" "OPER " "AWAY" "MOTD" "REHASH" "DIE" "RESTART"
+           "SUMMON " "USERS" "WALLOPS " "USERHOST " "ISON " "LUSERS" "VERSION"
+           "STATS " "LINKS" "TIME" "CONNECT " "TRACE " "ADMIN" "INFO"
+           "CAP " "AUTHENTICATE " "ERROR "
+
+    required string command until " \r" "Command"
+    required string params  until "\r\n" "Parameters"
+
+    info "%s %s" command, params
+
+# ─── Content detection (primary — catches non-standard ports) ─────────────────
+# These are checked before port rules and fire on any TCP stream whose payload
+# begins with a recognisable IRC command or server reply prefix.
+
+rule tcp.content "NICK "    => IRC
+rule tcp.content "USER "    => IRC
+rule tcp.content "PASS "    => IRC
+rule tcp.content "JOIN "    => IRC
+rule tcp.content "PING "    => IRC
+rule tcp.content "PRIVMSG " => IRC
+rule tcp.content "NOTICE "  => IRC
+rule tcp.content ":001 "    => IRC
+rule tcp.content ":PING "   => IRC
+rule tcp.content "CAP "     => IRC
+
+# ─── Port bindings (secondary hints) ─────────────────────────────────────────
+# Standard IRC (plain) and IRC-over-TLS. Port rules are checked only when no
+# content rule matched; they keep the decoder active for the whole TCP stream.
+
+rule tcp.port == 6667 => IRC
+rule tcp.port == 6697 => IRC
+
+# ─── Coloring ─────────────────────────────────────────────────────────────────
+# First match wins. More specific patterns come first; the catch-all is last.
+
+# Chat and direct messaging — green (response/data convention)
+color irc.command == "PRIVMSG" => black lightgreen
+color irc.command == "NOTICE"  => black lightblue
+
+# Channel lifecycle — yellow (request convention)
+color irc.command == "JOIN"    => black lightyellow
+color irc.command == "PART"    => black lightyellow
+color irc.command == "QUIT"    => black lightyellow
+color irc.command == "INVITE"  => black lightyellow
+color irc.command == "KICK"    => yellow red
+
+# State changes (nick, mode, topic)
+color irc.command == "NICK"    => black lightcyan
+color irc.command == "MODE"    => black lightcyan
+color irc.command == "TOPIC"   => black lightcyan
+
+# Keepalives — muted gray
+color irc.command == "PING"    => white darkgray
+color irc.command == "PONG"    => white darkgray
+
+# Fatal error
+color irc.command == "ERROR"   => white red
+
+# ── 4xx numeric error replies ─────────────────────────────────────────────────
+color irc.command == "401"     => white red
+color irc.command == "402"     => white red
+color irc.command == "403"     => white red
+color irc.command == "404"     => white red
+color irc.command == "405"     => white red
+color irc.command == "406"     => white red
+color irc.command == "407"     => white red
+color irc.command == "408"     => white red
+color irc.command == "409"     => white red
+color irc.command == "411"     => white red
+color irc.command == "412"     => white red
+color irc.command == "413"     => white red
+color irc.command == "414"     => white red
+color irc.command == "421"     => white red
+color irc.command == "422"     => white red
+color irc.command == "423"     => white red
+color irc.command == "424"     => white red
+color irc.command == "431"     => white red
+color irc.command == "432"     => white red
+color irc.command == "433"     => white red
+color irc.command == "436"     => white red
+color irc.command == "437"     => white red
+color irc.command == "441"     => white red
+color irc.command == "442"     => white red
+color irc.command == "443"     => white red
+color irc.command == "444"     => white red
+color irc.command == "445"     => white red
+color irc.command == "446"     => white red
+color irc.command == "451"     => white red
+color irc.command == "461"     => white red
+color irc.command == "462"     => white red
+color irc.command == "463"     => white red
+color irc.command == "464"     => white red
+color irc.command == "465"     => white red
+color irc.command == "466"     => white red
+color irc.command == "467"     => white red
+color irc.command == "471"     => white red
+color irc.command == "472"     => white red
+color irc.command == "473"     => white red
+color irc.command == "474"     => white red
+color irc.command == "475"     => white red
+color irc.command == "476"     => white red
+color irc.command == "477"     => white red
+color irc.command == "481"     => white red
+color irc.command == "482"     => white red
+color irc.command == "483"     => white red
+color irc.command == "484"     => white red
+color irc.command == "491"     => white red
+
+# ── Server welcome / registration (001–005) — dark blue ──────────────────────
+color irc.command == "001"     => white darkblue
+color irc.command == "002"     => white darkblue
+color irc.command == "003"     => white darkblue
+color irc.command == "004"     => white darkblue
+color irc.command == "005"     => white darkblue
+
+# ── MOTD lines (372–376) — muted gray ────────────────────────────────────────
+color irc.command == "375"     => white darkgray
+color irc.command == "372"     => white darkgray
+color irc.command == "376"     => white darkgray
+
+# ── WHOIS / WHO / NAMES / LIST replies (3xx) — light gray ────────────────────
+color irc.command == "311"     => black lightgray
+color irc.command == "312"     => black lightgray
+color irc.command == "313"     => black lightgray
+color irc.command == "314"     => black lightgray
+color irc.command == "315"     => black lightgray
+color irc.command == "317"     => black lightgray
+color irc.command == "318"     => black lightgray
+color irc.command == "319"     => black lightgray
+color irc.command == "321"     => black lightgray
+color irc.command == "322"     => black lightgray
+color irc.command == "323"     => black lightgray
+color irc.command == "324"     => black lightgray
+color irc.command == "329"     => black lightgray
+color irc.command == "332"     => black lightgray
+color irc.command == "333"     => black lightgray
+color irc.command == "341"     => black lightgray
+color irc.command == "352"     => black lightgray
+color irc.command == "353"     => black lightgray
+color irc.command == "366"     => black lightgray
+color irc.command == "367"     => black lightgray
+color irc.command == "368"     => black lightgray
+
+# ── Catch-all: any IRC packet not already coloured above ─────────────────────
+# Prefixed server messages get dark blue; unrecognised client commands get gray.
+color irc.prefix != ""         => white darkblue
+color irc                      => white darkgray
+
+# ─── Wireshark-compatible aliases ─────────────────────────────────────────────
+# Map names a Wireshark IRC dissector would emit to the fields this decoder
+# produces, so display-filter expressions written for Wireshark keep working.
+
+alias irc.request.command  => irc.command
+alias irc.response.command => irc.command
+alias irc.request.trailer  => irc.params
+alias irc.response.trailer => irc.params
+alias irc.nick             => irc.prefix
+alias irc.message          => irc.params
+
+# Convenience macro aliases for common filter expressions.
+alias irc.error            => irc.command >= "400" && irc.command < "500"
+alias irc.numeric          => irc.command >= "001" && irc.command < "600"
+alias irc.chat             => irc.command == "PRIVMSG" || irc.command == "NOTICE"

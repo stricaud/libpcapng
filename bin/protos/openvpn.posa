@@ -1,0 +1,70 @@
+# openvpn.posa — OpenVPN packet decoder (RFC-compatible packet format, OpenVPN 2.x)
+#
+# OpenVPN runs over UDP (typically port 1194) or TCP (port 1194 or 443).
+# UDP packets start with a single opcode/key-id byte. TCP packets are framed with a
+# 2-byte big-endian length prefix before the same opcode byte.
+#
+# First byte layout:  bits 7-3 = opcode (5 bits), bits 2-0 = key_id (3 bits)
+#
+# Reference: OpenVPN 2.x protocol documentation and source (ssl_pkt.h)
+
+Object<main> OpenVPN
+    abbrev "openvpn"
+    col "OpenVPN"
+
+    required uint8 opcode_keyid ["Opcode/Key ID"]
+
+    bits opcode_keyid opcode 3 5 ["Opcode"]
+        1  = P_CONTROL_HARD_RESET_CLIENT_V1
+        2  = P_CONTROL_HARD_RESET_SERVER_V1
+        3  = P_CONTROL_SOFT_RESET_V1
+        4  = P_CONTROL_V1
+        5  = P_ACK_V1
+        6  = P_DATA_V1
+        7  = P_CONTROL_HARD_RESET_CLIENT_V2
+        8  = P_CONTROL_HARD_RESET_SERVER_V2
+        9  = P_DATA_V2
+        10 = P_CONTROL_HARD_RESET_CLIENT_V3
+        11 = P_CONTROL_WKC_V1
+
+    bits opcode_keyid key_id 0 3 ["Key ID"]
+
+    required bytes<8> session_id ["Session ID"]
+
+    required payload data ["Payload"]
+
+    info "%s key_id=%u" opcode, key_id
+
+# ── content detection (primary — port-independent) ────────────────────────────
+# Detect by the opcode byte at offset 0. The most common initial handshake packet
+# (P_CONTROL_HARD_RESET_CLIENT_V2) has opcode/key_id byte 0x38 (key_id=0).
+# P_CONTROL_HARD_RESET_SERVER_V2 = 0x40, P_CONTROL_HARD_RESET_CLIENT_V1 = 0x08.
+# TCP framing: first 2 bytes = uint16 packet length, then opcode — 0x00 0x1c 0x38
+# matches a 28-byte reset packet (the minimum control-packet size).
+rule udp.content "\x38" => OpenVPN
+rule udp.content "\x40" => OpenVPN
+rule udp.content "\x08" => OpenVPN
+rule tcp.content "\x00\x1c\x38" => OpenVPN
+
+# ── port binding (secondary hints) ───────────────────────────────────────────
+rule udp.port == 1194 => OpenVPN
+rule tcp.port == 1194 => OpenVPN
+rule tcp.port == 443  => OpenVPN
+
+# ── coloring ──────────────────────────────────────────────────────────────────
+# Handshake / reset packets (connection setup — opcodes 1-3, 7-8, 10-11): yellow
+color openvpn.opcode == 7 || openvpn.opcode == 8 || openvpn.opcode == 1 || openvpn.opcode == 2 || openvpn.opcode == 3 || openvpn.opcode == 10 || openvpn.opcode == 11 => black lightyellow
+# Encrypted tunnel data (P_DATA_V1 / P_DATA_V2): dark blue
+color openvpn.opcode == 6 || openvpn.opcode == 9 => white darkblue
+# ACK-only packets: light gray (low visual weight, administrative)
+color openvpn.opcode == 5 => black lightgray
+# Control / TLS-record packets (P_CONTROL_V1): light green
+color openvpn.opcode == 4 => black lightgreen
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# The Wireshark OpenVPN dissector plugin uses openvpn.type, openvpn.keyid,
+# and openvpn.sessid; map those to the field names used above so display filters
+# written for Wireshark work unchanged here.
+alias openvpn.type   => openvpn.opcode
+alias openvpn.keyid  => openvpn.key_id
+alias openvpn.sessid => openvpn.session_id

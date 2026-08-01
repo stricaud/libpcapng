@@ -1,0 +1,261 @@
+# enip.posa — EtherNet/IP (Ethernet Industrial Protocol), IEC 61158-2 / ODVA CIP Vol. 2
+#
+# EtherNet/IP is the application-layer industrial automation protocol developed
+# by Allen-Bradley (Rockwell Automation) and standardised through ODVA.  It
+# wraps the Common Industrial Protocol (CIP) in an encapsulation layer that
+# runs over standard TCP and UDP, enabling PLCs, drives, I/O modules, and HMIs
+# to communicate on ordinary Ethernet infrastructure.
+#
+# Transport:
+#   TCP/44818 — Explicit Messaging (request/reply, CIP over TCP)
+#   UDP/44818 — I/O Messaging (implicit, time-critical cyclic data)
+#   UDP/2222  — I/O Messaging (alternate port used by some devices)
+#
+# Encapsulation Header (always 24 bytes, all multi-byte fields little-endian):
+#   [0-1]   command        LE uint16  identifies the encapsulation service
+#   [2-3]   length         LE uint16  byte count of data after this 24-byte header
+#   [4-7]   session_handle LE uint32  0 on RegisterSession request; target assigns
+#   [8-11]  status         LE uint32  0x00000000 = success in responses
+#   [12-19] sender_context bytes<8>   opaque bytes; echoed unchanged in reply
+#   [20-23] options        LE uint32  reserved, must be 0
+#   [24..]  data           varies     CPF items for SendRRData/SendUnitData; else empty
+#
+# Encapsulation Commands:
+#   0x0000  NOP              — no-operation; zero-length data
+#   0x0063  ListServices     — target returns list of supported services
+#   0x0064  ListIdentity     — target returns identity object data
+#   0x0065  RegisterSession  — establish a session (must be first exchange)
+#   0x0066  UnRegisterSession — close and release a session
+#   0x006F  SendUnitData     — connected explicit messaging (requires open connection)
+#   0x0070  SendRRData       — unconnected request/reply (most CIP messages)
+#
+# Common Packet Format (CPF) for SendRRData / SendUnitData:
+#   Interface Handle  LE uint32   0 = CIP; distinguishes CIP from other protocols
+#   Timeout           LE uint16   seconds; 0 in SendUnitData
+#   Item Count        LE uint16   number of CPF items following (typically 2)
+#   Items (repeated):
+#     Type ID         LE uint16   0x0000=Null, 0x00A1=ConnAddr, 0x00B1=ConnData,
+#                                 0x00B2=UnconnData, 0x8002=SeqAddr
+#     Length          LE uint16   byte count of item data
+#     Data            bytes       item payload (CIP request/reply or address)
+#
+# Status codes (encapsulation-level; CIP service error codes live inside CPF data):
+#   0x00000000  Success
+#   0x00000001  Invalid Command         — command code unknown
+#   0x00000002  Insufficient Memory     — no resources for session/buffer
+#   0x00000003  Incorrect Data          — malformed encapsulation data
+#   0x00000064  Invalid Session Handle  — session_handle does not match any session
+#   0x00000065  Invalid Length          — length field inconsistent with header
+#   0x00000069  Unsupported Protocol    — encapsulation protocol version not supported
+
+Object<main> EtherNetIP
+    abbrev "enip"
+    col "EtherNet/IP"
+
+    # Command — identifies the encapsulation service; sent in both directions.
+    # The target echoes the same command code in its response.
+    required le_uint16 command ["Command"]
+        NOP               = 0x0000
+        ListServices      = 0x0063
+        ListIdentity      = 0x0064
+        RegisterSession   = 0x0065
+        UnRegisterSession = 0x0066
+        SendUnitData      = 0x006F
+        SendRRData        = 0x0070
+
+    # Length — byte count of the encapsulation data that follows the 24-byte
+    # header.  0 for commands that carry no data (NOP, UnRegisterSession).
+    required le_uint16 length ["Data Length"]
+
+    # Session Handle — assigned by the target in the RegisterSession reply;
+    # must appear in every subsequent command within that session.
+    # Originators send 0 in the RegisterSession request.
+    required le_uint32 session_handle ["Session Handle"]
+
+    # Status — encapsulation-level result code.  Always 0 in requests.
+    # Non-zero in responses indicates the target rejected the command.
+    # CIP-level errors are carried inside the CPF item data, not here.
+    required le_uint32 status ["Status"]
+        Success              = 0x00000000
+        InvalidCommand       = 0x00000001
+        InsufficientMemory   = 0x00000002
+        IncorrectData        = 0x00000003
+        InvalidSessionHandle = 0x00000064
+        InvalidLength        = 0x00000065
+        UnsupportedProtocol  = 0x00000069
+
+    # Sender Context — 8 opaque bytes chosen by the originator; the target
+    # copies them unchanged into the response, allowing request/reply matching.
+    required bytes<8> sender_context ["Sender Context"]
+
+    # Options — reserved for future use; must be 0.
+    required le_uint32 options ["Options"]
+
+    # ── Encapsulation data — presence and format depend on command ────────────
+
+    # SendRRData and SendUnitData both carry a CPF (Common Packet Format) payload
+    # consisting of an interface handle, timeout, and a list of typed items.
+    # The two most common items are:
+    #   Null/Address item — connection addressing (may be zero-length)
+    #   Data item         — the actual CIP request or reply bytes
+
+    when command == 0x0070:
+        # SendRRData — unconnected explicit messaging; most PCCC / CIP messages
+        # use this command.  Interface handle 0 selects the CIP encapsulator.
+        required le_uint32 interface_handle ["Interface Handle"]
+            CIP = 0x00000000
+        required le_uint16 timeout ["Timeout (s)"]
+        required le_uint16 item_count ["Item Count"]
+        repeat item_count as cpf_item ["CPF Item"]
+            label "Item 0x%x" type_id
+            required le_uint16 type_id ["Item Type ID"]
+                NullAddress     = 0x0000
+                ListIdentity    = 0x000C
+                ConnectedAddr   = 0x00A1
+                ConnectedData   = 0x00B1
+                UnconnectedData = 0x00B2
+                ListServices    = 0x0100
+                SockaddrO2T     = 0x8000
+                SockaddrT2O     = 0x8001
+                SeqAddrItem     = 0x8002
+            required le_uint16 item_length ["Item Length"]
+            scope item_length
+                payload item_data ["Item Data"]
+
+    when command == 0x006F:
+        # SendUnitData — connected explicit messaging; a connection must have been
+        # established first (via ForwardOpen).  Timeout is 0 (connection manages
+        # timing); sequence address item carries the connection ID.
+        required le_uint32 interface_handle ["Interface Handle"]
+            CIP = 0x00000000
+        required le_uint16 timeout ["Timeout (s)"]
+        required le_uint16 item_count ["Item Count"]
+        repeat item_count as cpf_item ["CPF Item"]
+            label "Item 0x%x" type_id
+            required le_uint16 type_id ["Item Type ID"]
+                NullAddress     = 0x0000
+                ConnectedAddr   = 0x00A1
+                ConnectedData   = 0x00B1
+                UnconnectedData = 0x00B2
+                SeqAddrItem     = 0x8002
+            required le_uint16 item_length ["Item Length"]
+            scope item_length
+                payload item_data ["Item Data"]
+
+    when command == 0x0064:
+        # ListIdentity — target returns identity objects describing itself.
+        # Used by network scanning tools and IO scanners to discover devices.
+        required le_uint16 item_count ["Item Count"]
+        repeat item_count as id_item ["Identity Item"]
+            required le_uint16 type_id ["Item Type ID"]
+            required le_uint16 item_length ["Item Length"]
+            scope item_length
+                payload item_data ["Item Data"]
+
+    when command == 0x0063:
+        # ListServices — target returns the list of CIP services it supports.
+        # Typically returns one item describing the "Communications" service.
+        required le_uint16 item_count ["Item Count"]
+        repeat item_count as svc_item ["Service Item"]
+            required le_uint16 type_id ["Item Type ID"]
+            required le_uint16 item_length ["Item Length"]
+            scope item_length
+                payload item_data ["Item Data"]
+
+    else:
+        # NOP, RegisterSession, UnRegisterSession, and future commands.
+        # RegisterSession data (LE): protocol version uint16 + option flags uint16.
+        payload data ["Data"]
+
+    info "%s  Sess=0x%x  %s" command, session_handle, status
+
+
+# ── Content Detection Rules (primary — port-independent) ──────────────────────
+#
+# EtherNet/IP command codes are little-endian uint16, so the first two bytes of
+# any encapsulation frame are the low byte then the high byte.  The six most
+# common commands all have a high byte of 0x00 and a distinct low byte:
+#
+#   RegisterSession  → \x65\x00
+#   SendRRData       → \x70\x00
+#   ListServices     → \x63\x00
+#   ListIdentity     → \x64\x00
+#   SendUnitData     → \x6f\x00
+#   UnRegisterSession→ \x66\x00
+#
+# These two-byte anchors are combined with the fact that the subsequent two bytes
+# (length) are also LE uint16, making false positives very unlikely in practice.
+# Content rules are listed before port rules so the protocol is recognised even
+# on non-standard ports used in some industrial networks.
+
+rule tcp.content "\x65\x00" => EtherNetIP
+rule tcp.content "\x70\x00" => EtherNetIP
+rule tcp.content "\x63\x00" => EtherNetIP
+rule tcp.content "\x64\x00" => EtherNetIP
+rule tcp.content "\x6f\x00" => EtherNetIP
+rule tcp.content "\x66\x00" => EtherNetIP
+rule udp.content@0 "\x6f\x00" => EtherNetIP
+rule udp.content@0 "\x63\x00" => EtherNetIP
+rule udp.content@0 "\x64\x00" => EtherNetIP
+
+# ── Port Rules (secondary — hint when content rules did not match) ─────────────
+# Standard ODVA-assigned ports for EtherNet/IP encapsulation.
+rule tcp.port == 44818 => EtherNetIP
+rule udp.port == 44818 => EtherNetIP
+rule udp.port == 2222  => EtherNetIP
+
+
+# ── Coloring Rules ─────────────────────────────────────────────────────────────
+# Most-specific rules first; first match wins.
+
+# Encapsulation-level errors — the target rejected the command entirely.
+# Red background makes these immediately visible during troubleshooting.
+color enip.status != 0x00000000 => white red
+
+# Session setup — RegisterSession request/reply pair.
+# Yellow: security-relevant session establishment, requires manual attention.
+color enip.command == 0x0065 => black lightyellow
+
+# Session teardown — UnRegisterSession.
+# Yellow: session lifecycle event, same palette as setup.
+color enip.command == 0x0066 => black lightyellow
+
+# Discovery — ListServices and ListIdentity.
+# Yellow: network scanning / device discovery, not application data.
+color enip.command == 0x0063 => black lightyellow
+color enip.command == 0x0064 => black lightyellow
+
+# Data exchange — SendRRData and SendUnitData carry the actual CIP payload.
+# Green: application-level I/O, the productive traffic in an industrial network.
+color enip.command == 0x0070 => black lightgreen
+color enip.command == 0x006F => black lightgreen
+
+# NOP — keepalive / padding frame.
+color enip.command == 0x0000 => black lightgray
+
+# Protocol catch-all — any EtherNet/IP frame not matched by a more specific rule.
+color enip => white darkgreen
+
+
+# ── Wireshark-Compatible Aliases ───────────────────────────────────────────────
+# Map field names from Wireshark's enip dissector (as of Wireshark 4.x) to the
+# POSA abbrevs so that existing display filters work without modification.
+
+# Core encapsulation header
+alias enip.command        => enip.command
+alias enip.length         => enip.length
+alias enip.session        => enip.session_handle
+alias enip.status         => enip.status
+alias enip.sendercontext  => enip.sender_context
+alias enip.options        => enip.options
+
+# CPF fields (inside SendRRData / SendUnitData)
+alias enip.cpf.count      => enip.item_count
+alias enip.cpf.typeid     => enip.type_id
+alias enip.cpf.length     => enip.item_length
+alias enip.cpf.cdi.seqcnt => enip.type_id
+
+# Convenience macro aliases
+alias enip.request        => enip.session_handle == 0
+alias enip.response       => enip.session_handle != 0
+alias enip.error          => enip.status != 0

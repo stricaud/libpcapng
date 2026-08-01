@@ -1,0 +1,115 @@
+# ntp.posa — Network Time Protocol (RFC 5905)
+#
+# NTP carries clock synchronisation over UDP port 123. The minimum packet size
+# is 48 bytes; optional extension fields and an optional MAC follow.
+#
+# Byte 0 packs three sub-fields:
+#   bits 7-6  LI  — leap-second warning the current UTC day
+#   bits 5-3  VN  — protocol version (1–4; 3 and 4 in common use)
+#   bits 2-0  Mode — packet role: client (3), server (4), broadcast (5), …
+#
+# Root delay and root dispersion are NTP short format: 16-bit unsigned seconds
+# followed by 16-bit unsigned fraction (big-endian, total 32 bits each).
+# All timestamps are NTP 64-bit format: 32-bit unsigned seconds since
+# 1900-01-01 00:00:00 UTC concatenated with a 32-bit binary fraction.
+#
+# The Reference ID (ref_id) is interpreted differently by stratum:
+#   stratum 0  — four-character ASCII kiss code (e.g. "DENY", "RATE", "STEP")
+#   stratum 1  — four-character ASCII source ID (e.g. "GPS\0", "PPS\0", "LOCL")
+#   stratum 2+ — IPv4 address of the upstream reference (or MD5 hash for IPv6)
+#
+# Content-based detection is not used: byte 0 bit patterns for valid LI/VN/Mode
+# combinations (e.g. 0x1b, 0x23, 0x24) are too common in unrelated UDP traffic
+# to serve as a reliable signature. Port 123 is the canonical identifier.
+
+Object<main> NTP
+    abbrev "ntp"
+    col "NTP"
+
+    # ── Byte 0: LI + VN + Mode ──────────────────────────────────────────────────
+    required uint8 li_vn_mode "Flags"
+        bits li_vn_mode li 6 2 "Leap Indicator"
+            No Warning = 0
+            Last Minute 61 Seconds = 1
+            Last Minute 59 Seconds = 2
+            Unsynchronized = 3
+        bits li_vn_mode vn 3 3 "Version Number"
+        bits li_vn_mode mode 0 3 "Mode"
+            Reserved = 0
+            Symmetric Active = 1
+            Symmetric Passive = 2
+            Client = 3
+            Server = 4
+            Broadcast = 5
+            Control = 6
+            Private = 7
+
+    # ── Bytes 1-3: Stratum, Poll, Precision ─────────────────────────────────────
+    # poll and precision are signed log2 values; stored as uint8 (two's-complement
+    # interpretation applies: e.g. precision 0xF6 = -10 means ~1 ms resolution).
+    required uint8 stratum "Stratum"
+        Kiss of Death = 0
+        Primary Reference = 1
+        Stratum 2 = 2
+        Stratum 3 = 3
+        Stratum 4 = 4
+        Stratum 5 = 5
+        Stratum 6 = 6
+        Stratum 7 = 7
+        Stratum 8 = 8
+        Stratum 9 = 9
+        Stratum 10 = 10
+        Stratum 11 = 11
+        Stratum 12 = 12
+        Stratum 13 = 13
+        Stratum 14 = 14
+        Stratum 15 = 15
+    required uint8 poll "Poll Interval (log2 seconds)"
+    required uint8 precision "Clock Precision (log2 seconds)"
+
+    # ── Bytes 4-11: Root delay and dispersion (NTP short format) ─────────────────
+    required uint32 root_delay "Root Delay"
+    required uint32 root_dispersion "Root Dispersion"
+
+    # ── Bytes 12-15: Reference ID ─────────────────────────────────────────────────
+    required bytes<4> ref_id "Reference ID"
+
+    # ── Bytes 16-47: Timestamps (NTP 64-bit format) ───────────────────────────────
+    required bytes<8> ref_timestamp  "Reference Timestamp"
+    required bytes<8> orig_timestamp "Originate Timestamp (T1)"
+    required bytes<8> recv_timestamp "Receive Timestamp (T2)"
+    required bytes<8> xmit_timestamp "Transmit Timestamp (T3)"
+
+    # ── Bytes 48+: Optional extension fields and MAC ──────────────────────────────
+    # Extension fields follow (RFC 7822): each is a 16-bit type, 16-bit length,
+    # then length bytes of value. A MAC appended after extensions is 4 bytes of
+    # key ID followed by 16 bytes (MD5) or 20 bytes (SHA-1) of digest.
+    # These are carried through undecoded until a dedicated extension decoder
+    # is added.
+    required payload extensions_mac "Extensions and MAC"
+
+    info "v%u %s %s" vn, mode, stratum
+
+# ── Port binding ────────────────────────────────────────────────────────────────
+# Content detection is omitted (see header comment). Port 123 is the only rule.
+rule udp.port == 123 => NTP
+
+# ── Coloring ────────────────────────────────────────────────────────────────────
+# Kiss-of-Death packets (stratum 0): server is refusing or reporting an error.
+color ntp.stratum == 0                    => white red
+# Primary reference server (stratum 1): directly connected to a reference clock.
+color ntp.stratum == 1 && ntp.mode == 4  => black lightgreen
+# Server response (other strata): secondary synchronisation in progress.
+color ntp.mode == 4                       => black lightblue
+# Client request: outbound poll.
+color ntp.mode == 3                       => black lightyellow
+# Broadcast, symmetric, control, and private modes — catch-all.
+color ntp                                 => white darkblue
+
+# ── Wireshark-compatible field aliases ──────────────────────────────────────────
+# Wireshark's ntp dissector surfaces the byte-0 sub-fields under ntp.flags.*;
+# map those paths to the bits fields defined here so saved display filters work.
+alias ntp.flags.li   => ntp.li
+alias ntp.flags.vn   => ntp.vn
+alias ntp.flags.mode => ntp.mode
+alias ntp.stratum    => ntp.stratum

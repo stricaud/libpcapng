@@ -1,0 +1,261 @@
+# ftp.posa — File Transfer Protocol (RFC 959)
+#
+# FTP is a line-oriented text protocol.  The control connection uses TCP port 21.
+# Active-mode data transfers use TCP port 20; passive-mode data uses an ephemeral
+# port announced in the server's 227 (PASV) or 229 (EPSV) reply.
+#
+# Three object classes share the FTP group:
+#
+#   FTP_RESPONSE       — server → client; opens with a 3-digit ASCII reply code,
+#                        then either ' ' (final line) or '-' (multi-line continuation),
+#                        then human-readable text, then CRLF.
+#                        The code is read as bytes<3> so both "220 " and "220-"
+#                        parse cleanly — the separator byte is the 4th byte.
+#
+#   FTP_COMMAND        — client → server; verb, a space, an argument, CRLF.
+#                        Covers every RFC 959 command that requires an argument
+#                        (USER, PASS, RETR, STOR, CWD, …) plus the optional-argument
+#                        commands when they are followed by a space (LIST /dir, STAT
+#                        /path, …).  The USER command additionally exposes a named
+#                        `username` field for direct filter access.
+#
+#   FTP_COMMAND_BARE   — client → server; verb, CRLF, no argument.
+#                        Covers PASV, QUIT, ABOR, CDUP, PWD, SYST, NOOP, FEAT, and
+#                        the no-argument forms of LIST/NLST/STAT/HELP.  Separating
+#                        these ensures the command field contains exactly the verb
+#                        without an embedded CRLF.
+#
+# Content detection fires on the server greeting and the most common client verbs.
+# Port rules for 21 and 20 act as secondary hints.
+
+Object<GROUP> FTP
+
+# ─── Server → client: 3-digit code, separator byte, text, CRLF ──────────────
+Object<FTP> FTP_RESPONSE
+    abbrev "ftp"
+    col "FTP"
+    starts "1" "2" "3" "4" "5"
+
+    # 3 ASCII decimal digits — no string parsing needed, exact byte width
+    required bytes<3> code "Response Code"
+        DATA_CONN_ALREADY_OPEN   = "125"
+        FILE_STATUS_OK           = "150"
+        CMD_OK                   = "200"
+        SYSTEM_STATUS            = "211"
+        DIRECTORY_STATUS         = "212"
+        FILE_STATUS              = "213"
+        HELP_MESSAGE             = "214"
+        SYSTEM_TYPE              = "215"
+        SERVICE_READY            = "220"
+        SERVICE_CLOSING          = "221"
+        DATA_CONN_OPEN           = "225"
+        CLOSING_DATA_CONN        = "226"
+        ENTERING_PASSIVE_MODE    = "227"
+        ENTERING_LONG_PASSIVE    = "228"
+        ENTERING_EXT_PASSIVE     = "229"
+        USER_LOGGED_IN           = "230"
+        USER_LOGGED_OUT          = "231"
+        LOGOUT_NOTE              = "232"
+        ACTION_OK                = "250"
+        PATHNAME_CREATED         = "257"
+        USER_OK_NEED_PASS        = "331"
+        NEED_ACCOUNT_LOGIN       = "332"
+        ACTION_PENDING           = "350"
+        SERVICE_UNAVAIL          = "421"
+        CANT_OPEN_DATA_CONN      = "425"
+        CONN_CLOSED_XFER_ABORT   = "426"
+        INVALID_CREDENTIALS      = "430"
+        FILE_ACTION_NOT_TAKEN    = "450"
+        LOCAL_ERROR              = "451"
+        INSUFF_STORAGE           = "452"
+        SYNTAX_ERROR             = "500"
+        SYNTAX_ERROR_PARAMS      = "501"
+        CMD_NOT_IMPLEMENTED      = "502"
+        BAD_CMD_SEQUENCE         = "503"
+        CMD_PARAM_NOT_IMPL       = "504"
+        NOT_LOGGED_IN            = "530"
+        NEED_ACCOUNT_STORE       = "532"
+        FILE_UNAVAILABLE         = "550"
+        PAGE_TYPE_UNKNOWN        = "551"
+        EXCEEDED_STORAGE_ALLOC   = "552"
+        FILENAME_NOT_ALLOWED     = "553"
+
+    # ' ' (0x20) = final reply line; '-' (0x2d) = more lines follow with same code
+    required bytes<1> continuation "Continuation"
+        FINAL      = " "
+        MULTI_LINE = "-"
+
+    required string message until "\r\n" "Reply Text"
+
+    info "%s %s" code, message
+
+# ─── Client → server: commands that carry an argument ────────────────────────
+Object<FTP> FTP_COMMAND
+    abbrev "ftp"
+    col "FTP"
+    starts "USER " "PASS " "ACCT " "CWD "  "PORT " "EPRT " "TYPE " "STRU "
+           "MODE " "RETR " "STOR " "APPE " "ALLO " "REST " "RNFR " "RNTO "
+           "DELE " "RMD "  "MKD "  "SITE " "OPTS " "MLST " "MLSD " "SIZE "
+           "MDTM " "AUTH " "ADAT " "PROT " "PBSZ " "MIC "  "CONF " "ENC "
+           "LIST " "NLST " "STAT " "HELP "
+
+    required string command until " " "Command"
+        USER = "USER"
+        PASS = "PASS"
+        ACCT = "ACCT"
+        CWD  = "CWD"
+        PORT = "PORT"
+        EPRT = "EPRT"
+        TYPE = "TYPE"
+        STRU = "STRU"
+        MODE = "MODE"
+        RETR = "RETR"
+        STOR = "STOR"
+        APPE = "APPE"
+        ALLO = "ALLO"
+        REST = "REST"
+        RNFR = "RNFR"
+        RNTO = "RNTO"
+        DELE = "DELE"
+        RMD  = "RMD"
+        MKD  = "MKD"
+        LIST = "LIST"
+        NLST = "NLST"
+        SITE = "SITE"
+        STAT = "STAT"
+        HELP = "HELP"
+        OPTS = "OPTS"
+        MLST = "MLST"
+        MLSD = "MLSD"
+        SIZE = "SIZE"
+        MDTM = "MDTM"
+        AUTH = "AUTH"
+        ADAT = "ADAT"
+        PROT = "PROT"
+        PBSZ = "PBSZ"
+        MIC  = "MIC"
+        CONF = "CONF"
+        ENC  = "ENC"
+
+    # Expose the username separately on USER so capture filters can name it directly.
+    # All other arguments (password, path, PORT spec, …) land in the generic field.
+    when command == "USER":
+        required string username until "\r\n" "Username"
+    else:
+        required string argument until "\r\n" "Argument"
+
+    # Gap auto-close: only whichever of username/argument exists is printed
+    info "%s %s%s" command, username, argument
+
+# ─── Client → server: commands that take NO argument ─────────────────────────
+# These commands are followed directly by CRLF; reading until "\r\n" gives the
+# clean verb without an embedded newline in the command field.
+Object<FTP> FTP_COMMAND_BARE
+    abbrev "ftp"
+    col "FTP"
+    starts "PASV\r" "EPSV\r" "STOU\r" "ABOR\r" "CDUP\r" "QUIT\r" "REIN\r"
+           "PWD\r"  "SYST\r" "NOOP\r" "FEAT\r" "CCC\r"
+           "LIST\r" "NLST\r" "STAT\r" "HELP\r"
+
+    required string command until "\r\n" "Command"
+        PASV = "PASV"
+        EPSV = "EPSV"
+        STOU = "STOU"
+        ABOR = "ABOR"
+        CDUP = "CDUP"
+        QUIT = "QUIT"
+        REIN = "REIN"
+        PWD  = "PWD"
+        SYST = "SYST"
+        NOOP = "NOOP"
+        FEAT = "FEAT"
+        CCC  = "CCC"
+        LIST = "LIST"
+        NLST = "NLST"
+        STAT = "STAT"
+        HELP = "HELP"
+
+    info "%s" command
+
+# ─── Content detection (primary — port-independent) ───────────────────────────
+# "220 " and "220-" both identify a server greeting; a bare "220" prefix would
+# also match mid-stream data, so the space/hyphen is always included.
+# Client verb rules keep their trailing space so partial collisions with URI
+# paths or body text cannot trigger a false decode.
+rule tcp.content "220 "  => FTP
+rule tcp.content "220-"  => FTP
+rule tcp.content "USER " => FTP
+rule tcp.content "PASS " => FTP
+rule tcp.content "PASV"  => FTP
+rule tcp.content "RETR " => FTP
+rule tcp.content "STOR " => FTP
+rule tcp.content "LIST"  => FTP
+rule tcp.content "QUIT"  => FTP
+
+# ─── Port bindings (secondary — hints when content is ambiguous) ───────────────
+rule tcp.port == 21 => FTP
+rule tcp.port == 20 => FTP
+
+# ─── Coloring (first-match wins; most-specific rules go first) ────────────────
+
+# Positive completion (2xx) — green: session milestones and successful transfers
+color tcp.content "200 " => black lightgreen   # Command OK (e.g. TYPE response)
+color tcp.content "220 " => black lightgreen   # Service ready / greeting
+color tcp.content "220-" => black lightgreen   # Greeting, multi-line
+color tcp.content "221 " => black lightgreen   # Goodbye
+color tcp.content "225 " => black lightgreen   # Data connection already open
+color tcp.content "226 " => black lightgreen   # Transfer complete
+color tcp.content "227 " => black lightgreen   # Entering passive mode (h,h,h,h,p,p)
+color tcp.content "228 " => black lightgreen   # Entering long passive mode
+color tcp.content "229 " => black lightgreen   # Entering extended passive mode (EPSV)
+color tcp.content "230 " => black lightgreen   # User logged in
+color tcp.content "250 " => black lightgreen   # Requested file action OK
+color tcp.content "257 " => black lightgreen   # Pathname created (MKD/PWD reply)
+
+# Positive preliminary (1xx) — light blue: transfer initiated, not yet complete
+color tcp.content "125 " => black lightblue    # Data connection already open; starting
+color tcp.content "150 " => black lightblue    # Opening data connection
+
+# Positive intermediate (3xx) — yellow: more information needed before completion
+color tcp.content "331 " => black lightyellow  # Username OK, need password
+color tcp.content "332 " => black lightyellow  # Need account for login
+color tcp.content "350 " => black lightyellow  # File action pending further info
+
+# Transient negative (4xx) — orange: temporary failure; client may retry
+color tcp.content "421 " => black orange       # Service not available; closing connection
+color tcp.content "425 " => black orange       # Can't open data connection
+color tcp.content "426 " => black orange       # Connection closed; transfer aborted
+color tcp.content "430 " => black orange       # Invalid username or password
+color tcp.content "450 " => black orange       # Requested file action not taken (file busy)
+color tcp.content "451 " => black orange       # Action aborted: local error in processing
+color tcp.content "452 " => black orange       # Action not taken: insufficient storage
+
+# Permanent negative (5xx) — red: action will not succeed without change
+color tcp.content "500 " => white red          # Syntax error, command unrecognized
+color tcp.content "501 " => white red          # Syntax error in parameters or arguments
+color tcp.content "502 " => white red          # Command not implemented
+color tcp.content "503 " => white red          # Bad sequence of commands
+color tcp.content "504 " => white red          # Command parameter not implemented
+color tcp.content "530 " => white red          # Not logged in
+color tcp.content "532 " => white red          # Need account for storing files
+color tcp.content "550 " => white red          # File unavailable (not found, no access)
+color tcp.content "551 " => white red          # Page type unknown
+color tcp.content "552 " => white red          # Exceeded storage allocation
+color tcp.content "553 " => white red          # File name not allowed
+
+# Client commands (both FTP_COMMAND and FTP_COMMAND_BARE) — light yellow
+color ftp.command => black lightyellow
+
+# Catch-all: unclassified FTP frames (e.g. active data-channel segments)
+color ftp => white darkblue
+
+# ─── Wireshark-compatible field aliases ───────────────────────────────────────
+# Map Wireshark's built-in ftp dissector field names to the abbrevs used here
+# so that display filters written against a Wireshark capture continue to work.
+alias ftp.response.code    => ftp.code
+alias ftp.response.arg     => ftp.message
+alias ftp.request.command  => ftp.command
+alias ftp.request.arg      => ftp.argument ftp.username
+alias ftp.username         => ftp.username
+# The passive-address string lives in the message field of a 227/229 reply
+alias ftp.passive.address  => ftp.message

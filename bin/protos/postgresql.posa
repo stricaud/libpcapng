@@ -1,0 +1,233 @@
+# postgresql.posa — PostgreSQL Frontend/Backend Protocol v3
+# Reference: https://www.postgresql.org/docs/current/protocol-message-formats.html
+#
+# Two objects in the PostgreSQL group:
+#   Startup  — the initial client message (uint32 length + uint32 version, no type byte)
+#   Message  — all subsequent messages from both sides (uint8 type + uint32 length + body)
+#
+# Detection: the protocol version magic 0x00030000 always sits at byte offset 4 of the
+# startup message, so `tcp.content@4` fires on any port without needing port 5432.
+# The port rule is a secondary hint for sessions where the startup is not captured.
+#
+# The startup length field encodes the total message size including itself (4 bytes), so
+# the body is (startup_length - 8) bytes. The same applies to regular msg_length fields:
+# the body is (msg_length - 4) bytes. Scope is not applied here because POSA scopes are
+# absolute byte counts from the current position, not offsets.
+
+# ── Startup / SSL negotiation ─────────────────────────────────────────────────────────
+# Client sends this first. No type byte precedes it. The length field's high bytes are
+# always 0x00 for any realistic message size, making `starts "\x00\x00"` a safe
+# discriminator against the regular message format (which starts with a printable ASCII
+# type byte, 0x31–0x74).
+
+Object<PostgreSQL> Startup
+    abbrev "postgresql"
+    col "PGSQL"
+    starts "\x00\x00"
+
+    required uint32 startup_length "Message Length"
+    required uint32 protocol "Protocol Version"
+        PostgreSQL v3 = 0x00030000
+        SSL Request = 0x04D2162F
+        GSS Enc Request = 0x04D21630
+
+    # Startup parameters: a sequence of cstring key/value pairs, terminated by \0.
+    # Only present for the main v3 startup, not for SSL/GSS negotiation messages.
+    when protocol == 0x00030000:
+        repeat until "\x00" as startup_param "Startup Parameters"
+            label "%s=%s" param_key, param_value
+            required cstring param_key "Parameter Name"
+            required cstring param_value "Parameter Value"
+
+    info "Startup 0x%x" protocol
+
+
+# ── Regular typed messages (after startup, both directions) ───────────────────────────
+# Every message begins with a single-byte ASCII type tag, then a uint32 length that
+# counts itself but not the type byte. The body fields decoded below are the most common
+# ones; everything else falls through to the payload catch-all.
+
+Object<PostgreSQL> Message
+    abbrev "postgresql"
+    col "PGSQL"
+
+    required uint8 msg_type "Message Type"
+        # Server → Client
+        Authentication = 82          # 'R'
+        ParameterStatus = 83         # 'S'  (conflicts with client Sync, server wins here)
+        BackendKeyData = 75          # 'K'
+        ReadyForQuery = 90           # 'Z'
+        RowDescription = 84          # 'T'
+        DataRow = 68                 # 'D'  (conflicts with client Describe)
+        CommandComplete = 67         # 'C'  (conflicts with client Close)
+        ErrorResponse = 69           # 'E'  (conflicts with client Execute)
+        NoticeResponse = 78          # 'N'
+        NotificationResponse = 65    # 'A'
+        EmptyQueryResponse = 73      # 'I'
+        CopyInResponse = 71          # 'G'
+        CopyOutResponse = 72         # 'H'
+        CopyBothResponse = 87        # 'W'
+        FunctionCallResponse = 86    # 'V'
+        ParseComplete = 49           # '1'
+        BindComplete = 50            # '2'
+        CloseComplete = 51           # '3'
+        NoData = 110                 # 'n'
+        PortalSuspended = 115        # 's'
+        ParameterDescription = 116   # 't'
+        # Client → Server (after startup)
+        SimpleQuery = 81             # 'Q'
+        Parse = 80                   # 'P'
+        Bind = 66                    # 'B'
+        Execute = 69                 # 'E'  — same byte as ErrorResponse; server/client context differs
+        Sync = 83                    # 'S'  — same byte as ParameterStatus
+        Flush = 72                   # 'H'  — same byte as CopyOutResponse
+        Terminate = 88               # 'X'
+        PasswordMessage = 112        # 'p'
+        CopyData = 100               # 'd'
+        CopyDone = 99                # 'c'
+        CopyFail = 102               # 'f'
+
+    required uint32 msg_length "Message Length"
+
+    # ── Authentication request (server → client, msg_type == 'R' == 82) ──────────────
+    when msg_type == 82:
+        required uint32 auth_type "Authentication Type"
+            Authentication OK = 0
+            Kerberos V5 = 2
+            Cleartext Password = 3
+            MD5 Password = 5
+            SCM Credential = 6
+            GSSAPI = 7
+            GSSAPI Continue = 8
+            SSPI = 9
+            SASL = 10
+            SASL Continue = 11
+            SASL Final = 12
+        payload auth_data "Authentication Data"
+
+    # ── ReadyForQuery (server → client, msg_type == 'Z' == 90) ───────────────────────
+    when msg_type == 90:
+        required uint8 tx_status "Transaction Status"
+            Idle = 73                # 'I'
+            In Transaction = 84     # 'T'
+            In Failed Transaction = 69  # 'E'
+
+    # ── SimpleQuery (client → server, msg_type == 'Q' == 81) ─────────────────────────
+    when msg_type == 81:
+        required cstring query "Query String"
+
+    # ── CommandComplete (server → client, msg_type == 'C' == 67) ─────────────────────
+    when msg_type == 67:
+        required cstring command_tag "Command Tag"
+
+    # ── BackendKeyData (server → client, msg_type == 'K' == 75) ─────────────────────
+    when msg_type == 75:
+        required uint32 backend_pid "Backend PID"
+        required uint32 secret_key "Secret Key"
+
+    # ── ParameterStatus (server → client, msg_type == 'S' == 83) ────────────────────
+    when msg_type == 83:
+        required cstring param_name "Parameter Name"
+        required cstring param_value "Parameter Value"
+
+    # ── ErrorResponse (server → client, msg_type == 'E' == 69) ──────────────────────
+    # Fields are (uint8 code, cstring value) pairs terminated by a single 0x00 byte.
+    # `repeat until "\x00"` stops before reading a null field_code, leaving the list
+    # terminator unread (it will be absorbed by the next-message boundary).
+    when msg_type == 69:
+        repeat until "\x00" as error_field "Error Fields"
+            label "%s" field_value
+            required uint8 field_code "Field Code"
+                Severity = 83            # 'S'
+                Severity Nonloc = 86     # 'V'
+                SQL State = 67           # 'C'
+                Message = 77             # 'M'
+                Detail = 68              # 'D'
+                Hint = 72                # 'H'
+                Position = 80            # 'P'
+                Internal Position = 112  # 'p'
+                Internal Query = 113     # 'q'
+                Where = 87               # 'W'
+                Schema = 115             # 's'
+                Table = 116              # 't'
+                Column = 99              # 'c'
+                Data Type = 100          # 'd'
+                Constraint = 110         # 'n'
+                File = 70                # 'F'
+                Line = 76                # 'L'
+                Routine = 82             # 'R'
+            required cstring field_value "Field Value"
+
+    # ── RowDescription (server → client, msg_type == 'T' == 84) ─────────────────────
+    when msg_type == 84:
+        required uint16 field_count "Field Count"
+        repeat field_count as row_field "Row Fields"
+            label "%s" field_name
+            required cstring field_name "Field Name"
+            required uint32 table_oid "Table OID"
+            required uint16 column_attr "Column Attribute"
+            required uint32 type_oid "Type OID"
+            required uint16 type_size "Type Size"
+            required uint32 type_modifier "Type Modifier"
+            required uint16 format_code "Format Code"
+                Text = 0
+                Binary = 1
+
+    # ── DataRow (server → client, msg_type == 'D' == 68) ─────────────────────────────
+    when msg_type == 68:
+        required uint16 field_count "Field Count"
+        payload row_data "Row Data"
+
+    # ── PasswordMessage / SASL response (client → server, msg_type == 'p' == 112) ────
+    when msg_type == 112:
+        payload password_data "Password Data"
+
+    else:
+        payload msg_body "Message Body"
+
+    info "%s" msg_type
+
+
+# ── Detection rules ───────────────────────────────────────────────────────────────────
+# Content rule first: the startup protocol version magic at byte offset 4.
+# Also add the SSL request magic (80877103 = 0x04D2162F) at offset 4.
+rule tcp.content@4 "\x00\x03\x00\x00" => PostgreSQL
+rule tcp.content@4 "\x04\xd2\x16\x2f" => PostgreSQL
+# Port fallback: handles sessions where the startup is not captured.
+rule tcp.port == 5432 => PostgreSQL
+
+# ── Coloring rules ────────────────────────────────────────────────────────────────────
+# Errors — white on red
+color postgresql.msg_type == 69 => white red
+
+# Notices — black on yellow
+color postgresql.msg_type == 78 => black lightyellow
+
+# ReadyForQuery — green: session is idle and accepting commands
+color postgresql.msg_type == 90 => black lightgreen
+
+# Authentication negotiation — yellow (security-relevant)
+color postgresql.msg_type == 82 => black lightyellow
+
+# Client queries — light yellow (outbound command)
+color postgresql.msg_type == 81 => black lightyellow
+
+# Completed commands — light green (successful response)
+color postgresql.msg_type == 67 => black lightgreen
+
+# Data rows and row descriptions — light gray (bulk data)
+color postgresql.msg_type == 84 => black lightgray
+color postgresql.msg_type == 68 => black lightgray
+
+# SSL / GSS encryption requests — dark blue (tunneled path)
+color postgresql.protocol == 0x04D2162F => white darkblue
+color postgresql.protocol == 0x04D21630 => white darkblue
+
+# Catch-all — unclassified PostgreSQL traffic
+color postgresql => white darkgray
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────────────
+alias pgsql.startup.protocol => postgresql.protocol
+alias pgsql.type             => postgresql.msg_type
+alias pgsql.query            => postgresql.query
+alias pgsql.authtype         => postgresql.auth_type

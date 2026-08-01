@@ -1,0 +1,140 @@
+# quic.posa — QUIC (Quick UDP Internet Connections) RFC 9000 / RFC 9369
+#
+# QUIC multiplexes streams over UDP with mandatory TLS 1.3 encryption.
+# Two header forms are distinguished by the high bit of the first byte:
+#
+#   QUIC_LONG  (bit 7 = 1, bit 6 = 1 fixed) — used during the handshake and
+#              for 0-RTT data.  Carries explicit version, destination CID and
+#              source CID.  Four long-header packet types (bits 5-4):
+#                  00 = Initial   (key exchange, always unencrypted header)
+#                  01 = 0-RTT     (early data before handshake completes)
+#                  10 = Handshake (crypto frames after Initial exchange)
+#                  11 = Retry     (server requests address validation)
+#
+#   QUIC_SHORT (bit 7 = 0, bit 6 = 1 fixed) — 1-RTT data packets after the
+#              handshake.  Destination CID length is inferred from context
+#              (negotiated during handshake), so the payload is opaque here.
+#
+# QUIC uses variable-length integers (varints) for token_length, packet
+# length, and similar fields after the SCID.  POSA has no native varint type,
+# so those trailing bytes are captured as a single payload field.
+#
+# Known version values:
+#   0x00000000  Version Negotiation (not a real version; signals negotiation)
+#   0x00000001  QUICv1 (RFC 9000)
+#   0x6b3343cf  QUICv2 (RFC 9369)
+#   0x51303434  Google QUIC Q044
+#   0x51303530  Google QUIC Q050
+#   0xff000000 | N  IETF draft version N
+
+Object<GROUP> QUIC
+
+# ─── Long Header ─────────────────────────────────────────────────────────────
+# First byte: 0xC0-0xCF = Initial, 0xD0-0xDF = 0-RTT,
+#             0xE0-0xEF = Handshake, 0xF0-0xFF = Retry
+# The reserved bits (3-2) must be 00 per RFC 9000; bits 1-0 encode pn_length,
+# so valid values per type are: 0, 1, 2, 3 → xC0-xC3, xD0-xD3, xE0-xE3, xF0-xF3.
+# Additional values (reserved bits set) are listed for resilience.
+Object<QUIC> QUIC_LONG
+    abbrev "quic"
+    col "QUIC"
+    starts "\xc0" "\xc1" "\xc2" "\xc3"
+           "\xd0" "\xd1" "\xd2" "\xd3"
+           "\xe0" "\xe1" "\xe2" "\xe3"
+           "\xf0" "\xf1" "\xf2" "\xf3"
+
+    required uint8 first_byte "First Byte"
+    bits first_byte header_form 7 1 "Header Form"
+    bits first_byte fixed_bit 6 1 "Fixed Bit"
+    bits first_byte long_packet_type 4 2 "Long Packet Type"
+        0 = Initial
+        1 = 0-RTT
+        2 = Handshake
+        3 = Retry
+    bits first_byte type_specific_bits 0 4 "Type Specific Bits"
+
+    required uint32 version hex "Version"
+        0x00000000 = Version Negotiation
+        0x00000001 = QUIC v1
+        0x6b3343cf = QUIC v2
+        0x51303434 = Google QUIC Q044
+        0x51303530 = Google QUIC Q050
+
+    required uint8 dcil "Destination Connection ID Length"
+    required bytes[dcil] dcid "Destination Connection ID"
+    required uint8 scil "Source Connection ID Length"
+    required bytes[scil] scid "Source Connection ID"
+
+    # Remaining bytes hold type-specific varint-encoded fields:
+    #   Initial:   token_length (varint), token (bytes), length (varint),
+    #              packet_number (1-4 bytes), crypto/STREAM frames
+    #   0-RTT:     length (varint), packet_number, encrypted frames
+    #   Handshake: length (varint), packet_number, crypto frames
+    #   Retry:     retry_token (variable), retry_integrity_tag (16 bytes)
+    payload remaining "Remaining (Token / Length / PN / Payload)"
+
+    info "QUIC Long %s ver=%s dcid=%s scid=%s" long_packet_type, version, dcid, scid
+
+# ─── Short Header (1-RTT) ────────────────────────────────────────────────────
+# First byte: bit 7=0 (short), bit 6=1 (fixed), bit 5=spin, bits 4-3=reserved,
+#             bit 2=key_phase, bits 1-0=pn_length.
+# Destination CID length is opaque here (negotiated during handshake).
+# Listed starts: spin=0 kp=0,1 and spin=1 kp=0,1, all four pn_lengths each.
+Object<QUIC> QUIC_SHORT
+    abbrev "quic"
+    col "QUIC"
+    starts "\x40" "\x41" "\x42" "\x43"
+           "\x44" "\x45" "\x46" "\x47"
+           "\x60" "\x61" "\x62" "\x63"
+           "\x64" "\x65" "\x66" "\x67"
+
+    required uint8 first_byte "First Byte"
+    bits first_byte header_form 7 1 "Header Form"
+    bits first_byte fixed_bit 6 1 "Fixed Bit"
+    bits first_byte spin_bit 5 1 "Spin Bit"
+    bits first_byte reserved_bits 3 2 "Reserved Bits"
+    bits first_byte key_phase 2 1 "Key Phase"
+    bits first_byte pn_length 0 2 "Packet Number Length"
+
+    # DCID length not encoded in-packet for Short Header; treat remainder as opaque
+    payload dcid_and_payload "Destination Connection ID + Encrypted Payload"
+
+    info "QUIC Short (1-RTT) spin=%u key_phase=%u" spin_bit, key_phase
+
+# ─── Content detection (primary — port-independent) ──────────────────────────
+# Most specific first: full 5-byte QUICv1 Initial prefix fires before the
+# single-byte fallbacks.  Ordering ensures the longest match wins.
+rule udp.content "\xc0\x00\x00\x00\x01" => QUIC   # QUICv1 Initial (RFC 9000)
+rule udp.content "\xc0\x6b\x33\x43\xcf" => QUIC   # QUICv2 Initial (RFC 9369)
+rule udp.content "\xc0\x00\x00\x00\x00" => QUIC   # Version Negotiation
+rule udp.content "\xc0" => QUIC                    # Long Header Initial
+rule udp.content "\xd0" => QUIC                    # Long Header 0-RTT
+rule udp.content "\xe0" => QUIC                    # Long Header Handshake
+rule udp.content "\xf0" => QUIC                    # Long Header Retry
+
+# ─── Port bindings (secondary — hints when content prefix is ambiguous) ───────
+rule udp.port == 443 => QUIC
+rule udp.port == 80  => QUIC
+
+# ─── Coloring ─────────────────────────────────────────────────────────────────
+# Long Header types ordered most-to-least specific; catch-all covers 1-RTT data.
+color quic.long_packet_type == 0 => black lightyellow    # Initial (key exchange)
+color quic.long_packet_type == 1 => white darkblue       # 0-RTT (early encrypted data)
+color quic.long_packet_type == 2 => black lightgreen     # Handshake (crypto completion)
+color quic.long_packet_type == 3 => white red            # Retry (address validation)
+color quic                       => white darkblue        # Short Header 1-RTT (encrypted)
+
+# ─── Wireshark-compatible field aliases ───────────────────────────────────────
+# Wireshark's quic dissector uses these names; map them to our abbrev fields
+# so display filters written against Wireshark captures continue to work.
+alias quic.version          => quic.version
+alias quic.dcid             => quic.dcid
+alias quic.scid             => quic.scid
+alias quic.packet_type      => quic.long_packet_type
+alias quic.long.packet_type => quic.long_packet_type
+alias quic.header_form      => quic.header_form
+alias quic.fixed_bit        => quic.fixed_bit
+alias quic.spin_bit         => quic.spin_bit
+alias quic.key_phase        => quic.key_phase
+alias quic.dcil             => quic.dcil
+alias quic.scil             => quic.scil

@@ -1,11 +1,246 @@
-# AMQP 0-9-1 frame header (used by RabbitMQ, ActiveMQ)
-# TCP port 5672 (plain) or 5671 (TLS). frame_size = payload length (excludes 8-byte framing).
-# Each frame ends with a 1-byte frame-end marker (0xCE), not modelled here.
+# amqp.posa — Advanced Message Queuing Protocol (versions 0-9-1 and 1.0)
+# AMQP 0-9-1 is the wire protocol used by RabbitMQ, Apache Qpid, and Azure Service Bus.
+# AMQP 1.0 is the ISO/IEC 19464:2014 standard adopted by ActiveMQ Artemis, Azure, etc.
+#
+# Standard TCP ports:
+#   5672  — plaintext AMQP
+#   5671  — TLS-wrapped AMQP (AMQPS)
+#
+# Connection lifecycle (0-9-1):
+#   1. Client sends 8-byte protocol header: "AMQP" + protocol_id + major + minor + revision
+#   2. Server replies with Connection.Start method frame (or its own protocol header)
+#   3. Both sides exchange method frames, content header frames, body frames, heartbeats
+#
+# Frame structure (AMQP 0-9-1, all integers big-endian):
+#   [0]    frame_type  uint8   1=METHOD 2=HEADER 3=BODY 4=HEARTBEAT
+#   [1-2]  channel     uint16  0 = connection-level, 1+ = session channels
+#   [3-6]  payload_size uint32 byte count of payload that follows
+#   [7..]  payload     varies  METHOD: class_id(2)+method_id(2)+args
+#                              HEADER: class_id(2)+weight(2)+body_size(8)+properties
+#                              BODY:   raw message content chunk
+#                              HEARTBEAT: empty (payload_size = 0)
+#   [end]  frame_end   uint8   must be 0xCE; mismatches indicate framing errors
+#
+# Method frame class IDs (0-9-1):
+#   10=CONNECTION  20=CHANNEL  30=EXCHANGE  40=QUEUE  50=BASIC  60=TX  90=CONFIRM
+#
+# AMQP 1.0 uses a different framing format (type codes, performatives, AMQP types);
+# this decoder recognises the 1.0 protocol header and labels the connection but does
+# not attempt to parse 1.0 frames, which require a type-code-driven decoder.
+
+# ── Protocol header group ─────────────────────────────────────────────────────
+# Dispatched on the first eight bytes; the two most common versions get their
+# own sub-object so the minor/revision display reads correctly for each.
+# A third catch-all sub-object matches any remaining "AMQP" prefix.
+
+Object<GROUP> AMQP_HEADER
+
+# ─── AMQP 0-9-1 protocol header ──────────────────────────────────────────────
+# Sent by the client immediately on TCP connect to negotiate protocol version.
+# The server responds with Connection.Start (method frame) on the same channel 0.
+
+Object<AMQP_HEADER> AMQP_091_HEADER
+    abbrev "amqp"
+    col    "AMQP"
+    starts "AMQP\x00\x00\x09\x01"
+
+    required bytes<4> magic = "AMQP" "Protocol Magic"
+    required uint8 protocol_id "Protocol ID"
+        0 = "AMQP"
+        1 = "TLS"
+        2 = "SASL"
+        3 = "SASL-AMQP"
+    required uint8 major    "Major Version"
+    required uint8 minor    "Minor Version"
+    required uint8 revision "Revision"
+
+    info "AMQP 0-9-1 Header  protocol-id=%u  v%u.%u.%u" protocol_id, major, minor, revision
+
+# ─── AMQP 1.0 protocol header ─────────────────────────────────────────────────
+# ISO/IEC 19464:2014.  Uses a completely different framing format from 0-9-1;
+# only the 8-byte handshake header is decoded structurally here.
+
+Object<AMQP_HEADER> AMQP_10_HEADER
+    abbrev "amqp"
+    col    "AMQP"
+    starts "AMQP\x00\x01\x00\x00"
+
+    required bytes<4> magic = "AMQP" "Protocol Magic"
+    required uint8 protocol_id "Protocol ID"
+        0 = "AMQP"
+        1 = "TLS"
+        2 = "SASL"
+    required uint8 major    "Major Version"
+    required uint8 minor    "Minor Version"
+    required uint8 revision "Revision"
+
+    info "AMQP 1.0 Header  protocol-id=%u  v%u.%u.%u" protocol_id, major, minor, revision
+
+# ─── Generic AMQP protocol header (unknown version) ───────────────────────────
+# Catches any AMQP version whose exact header bytes were not listed above.
+
+Object<AMQP_HEADER> AMQP_GENERIC_HEADER
+    abbrev "amqp"
+    col    "AMQP"
+    starts "AMQP"
+
+    required bytes<4> magic = "AMQP" "Protocol Magic"
+    required uint8 protocol_id "Protocol ID"
+        0 = "AMQP"
+        1 = "TLS"
+        2 = "SASL"
+        3 = "SASL-AMQP"
+    required uint8 major    "Major Version"
+    required uint8 minor    "Minor Version"
+    required uint8 revision "Revision"
+
+    info "AMQP Header  protocol-id=%u  v%u.%u.%u" protocol_id, major, minor, revision
+
+# ── AMQP 0-9-1 frame decoder ──────────────────────────────────────────────────
+# Decodes the repeating frame stream that follows the protocol header exchange.
+# All integers are in network byte order (big-endian); no little-endian fields.
+
 Object<main> AMQP
-    required uint8  frame_type = 1
-        METHOD    = 1
-        HEADER    = 2
-        BODY      = 3
-        HEARTBEAT = 8
-    required uint16 channel = 0
-    required uint32 frame_size = 0
+    abbrev "amqp"
+    col    "AMQP"
+
+    # Frame type — upper 3 types are the data plane; HEARTBEAT is a keepalive.
+    required uint8 frame_type "Frame Type"
+        1 = "METHOD"
+        2 = "HEADER"
+        3 = "BODY"
+        4 = "HEARTBEAT"
+
+    # Channel 0 is reserved for connection-level communication; channels 1–65535
+    # are session channels negotiated during Connection.Open / Channel.Open.
+    required uint16 channel      "Channel"
+    required uint32 payload_size "Payload Size"
+
+    # ── METHOD frame payload ───────────────────────────────────────────────────
+    # Payload = class_id (2) + method_id (2) + method-specific arguments.
+    # The scope bounds class_id + method_id + method_args to exactly payload_size bytes.
+    when frame_type == 1:
+        scope payload_size
+            required uint16 class_id "Class ID"
+                10  = "CONNECTION"
+                20  = "CHANNEL"
+                30  = "EXCHANGE"
+                40  = "QUEUE"
+                50  = "BASIC"
+                60  = "TX"
+                90  = "CONFIRM"
+
+            # method_id meaning depends on class_id (e.g. 10=start for CONNECTION,
+            # 10=open for CHANNEL).  The numeric value is always shown; a future
+            # when/class branch could decode it symbolically per class.
+            required uint16 method_id "Method ID"
+
+            # Remaining bytes are class- and method-specific argument fields
+            # encoded in the AMQP type system (tables, short-strings, longs, etc.).
+            required payload method_args "Method Arguments"
+
+    # ── HEADER (content header) frame payload ─────────────────────────────────
+    # Carries the class_id of the following body, the full body size across all
+    # BODY frames, and a property bitmask followed by present property values.
+    when frame_type == 2:
+        scope payload_size
+            required uint16 class_id "Class ID"
+                10  = "CONNECTION"
+                20  = "CHANNEL"
+                30  = "EXCHANGE"
+                40  = "QUEUE"
+                50  = "BASIC"
+                60  = "TX"
+                90  = "CONFIRM"
+
+            # weight is always 0 in AMQP 0-9-1 (reserved for future use).
+            required uint16 weight    "Weight"
+            # body_size is the total byte count across ALL subsequent BODY frames
+            # for this message, allowing receivers to reassemble large messages.
+            required uint64 body_size "Body Size"
+            # property flags (16-bit bitmask) and present property fields follow.
+            required payload header_props "Header Properties"
+
+    # ── BODY frame payload ─────────────────────────────────────────────────────
+    # Raw application message bytes; one message may span multiple BODY frames.
+    # The total byte count across all BODY frames equals body_size from the
+    # preceding HEADER frame.
+    when frame_type == 3:
+        required bytes[payload_size] body "Message Body"
+
+    # ── HEARTBEAT frame ────────────────────────────────────────────────────────
+    # payload_size is always 0; no payload bytes follow.  Sent periodically on
+    # channel 0 to keep the connection alive across idle periods or NAT timeouts.
+    # (No payload field needed — payload_size == 0 means nothing to decode.)
+
+    # Frame-end marker: 0xCE must terminate every frame.  A mismatch indicates
+    # framing corruption, a buggy broker, or a non-AMQP connection.
+    required uint8 frame_end = 0xCE "Frame End"
+
+    info "AMQP %s  ch=%u  size=%u" frame_type, channel, payload_size
+
+# ── Content detection rules (primary — port-independent) ──────────────────────
+# Exact 8-byte version strings provide the most reliable signatures; the shorter
+# "AMQP" rule is listed last as a broader fallback for unknown version headers.
+# Content rules always fire before port rules so the protocol is identified even
+# on non-standard ports.
+
+rule tcp.content "AMQP\x00\x00\x09\x01" => AMQP
+rule tcp.content "AMQP\x00\x01\x00\x00" => AMQP
+rule tcp.content "AMQP" => AMQP
+
+# ── Port rules (secondary — hint when content rules did not match) ─────────────
+rule tcp.port == 5672 => AMQP
+rule tcp.port == 5671 => AMQP
+
+# ── Coloring rules ─────────────────────────────────────────────────────────────
+
+# Framing errors — frame_end byte is not 0xCE.  Most urgent, listed first.
+color amqp.frame_end != 0xCE => white red
+
+# METHOD frames — client/server control exchange (requests and replies);
+# yellow signals active protocol negotiation (Connection.*, Channel.*, etc.).
+color amqp.frame_type == 1 => black lightyellow
+
+# HEADER (content header) frames — accompanies BASIC.Publish / BASIC.Deliver;
+# yellow shares the method palette because headers arrive with method frames.
+color amqp.frame_type == 2 => black lightyellow
+
+# BODY frames — application message payload; dark blue for bulk data plane traffic.
+color amqp.frame_type == 3 => white darkblue
+
+# HEARTBEAT frames — connection keepalive probes; gray (background, not data).
+color amqp.frame_type == 4 => black lightgray
+
+# Catch-all — any AMQP frame not matched above (e.g. unknown frame types).
+color amqp => white darkgray
+
+# ── Wireshark-compatible aliases ───────────────────────────────────────────────
+# Map the field names used in Wireshark's AMQP dissector to the POSA abbrevs so
+# that display filters written for Wireshark continue to work without modification.
+
+# Core frame header fields
+alias amqp.type          => amqp.frame_type
+alias amqp.channel       => amqp.channel
+alias amqp.payload.size  => amqp.payload_size
+alias amqp.frame_end     => amqp.frame_end
+
+# Method / content-header payload fields
+alias amqp.class         => amqp.class_id
+alias amqp.method        => amqp.method_id
+alias amqp.weight        => amqp.weight
+alias amqp.body_size     => amqp.body_size
+
+# Protocol header fields (version negotiation)
+alias amqp.protocol.id       => amqp.protocol_id
+alias amqp.protocol.version.major => amqp.major
+alias amqp.protocol.version.minor => amqp.minor
+alias amqp.protocol.version.revision => amqp.revision
+
+# Convenience macro aliases
+alias amqp.is_method     => amqp.frame_type == 1
+alias amqp.is_header     => amqp.frame_type == 2
+alias amqp.is_body       => amqp.frame_type == 3
+alias amqp.is_heartbeat  => amqp.frame_type == 4
+alias amqp.connection    => amqp.class_id == 10
+alias amqp.basic         => amqp.class_id == 50

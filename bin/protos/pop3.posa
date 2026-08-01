@@ -1,0 +1,118 @@
+# pop3.posa — Post Office Protocol version 3  (RFC 1939)
+#
+# POP3 is a line-based, plaintext mail retrieval protocol.  Each PDU is a single
+# CR LF-terminated ASCII line.  Two parties share one TCP connection:
+#
+#   Server → Client  "+OK [message]\r\n"    — positive response
+#                    "-ERR [reason]\r\n"    — negative response
+#   Client → Server  "COMMAND [arg]\r\n"   — command (argument optional)
+#
+# Multi-line data (RETR, LIST, UIDL, TOP, CAPA responses) is terminated by a
+# lone "." on its own line (".\r\n").  The decoder handles the first line of each
+# exchange; the continuation data appears as a payload field.
+#
+# Greeting: the very first bytes from the server are always "+OK", which makes an
+# offset-0 content rule reliable without needing port 110.  "USER " and "PASS "
+# catch client-side traffic that arrives before any server response is seen.
+#
+# TCP port 110 — plain-text POP3.
+# TCP port 995 — POP3S (implicit TLS); the POP3 handshake runs inside TLS, so
+#                content rules will not fire on 995; the port rule is the primary
+#                hint there.
+
+Object<main> POP3
+    abbrev "pop3"
+    col "POP3"
+
+    # First token: "+OK", "-ERR", or an uppercase command keyword such as "USER".
+    # "string until" stops at the first space; for argument-free commands (STAT,
+    # NOOP, RSET, QUIT, CAPA, STLS) it stops at \r and the CRLF is left in the
+    # buffer to be consumed by whichever "until \r\n" field follows.
+    required string keyword until " "            ["Command/Status"]
+
+    # ── Server responses ──────────────────────────────────────────────────────
+    when keyword == "+OK":
+        string response until "\r\n"             ["Server Response"]
+        payload response_body                    ["Response Body"]
+
+    when keyword == "-ERR":
+        string error_detail until "\r\n"         ["Error Detail"]
+
+    # ── Authentication commands ───────────────────────────────────────────────
+    when keyword == "USER":
+        string username until "\r\n"             ["Username"]
+
+    when keyword == "PASS":
+        string password until "\r\n"             ["Password"]
+
+    when keyword == "AUTH":
+        string auth_mech until "\r\n"            ["Auth Mechanism"]
+
+    # ── Retrieval and listing commands ────────────────────────────────────────
+    when keyword == "RETR":
+        string retr_num until "\r\n"             ["Message Number"]
+
+    when keyword == "TOP":
+        string top_args until "\r\n"             ["Msg Num / Lines"]
+
+    when keyword == "DELE":
+        string dele_num until "\r\n"             ["Message Number"]
+
+    when keyword == "LIST":
+        string list_arg until "\r\n"             ["Message Number"]
+
+    when keyword == "UIDL":
+        string uidl_arg until "\r\n"             ["Message Number"]
+
+    # ── Catch-all: STAT NOOP RSET QUIT CAPA STLS and any unrecognised line ───
+    else:
+        string argument until "\r\n"             ["Argument"]
+
+    # Info column: keyword then whichever detail field is populated.
+    # Only one conditional field is set per line; missing fields shrink to
+    # nothing, so the result is always "KEYWORD detail" with no extra spaces.
+    info "%s %s%s%s%s%s%s%s%s%s%s" keyword, response, error_detail, \
+         username, password, auth_mech, retr_num, top_args, dele_num, \
+         list_arg, argument
+
+# ── Content detection rules (primary — port-independent) ─────────────────────
+# Anchored at offset 0: the server greeting "+OK" is always the first payload
+# byte of a new connection, making this a low-false-positive rule.
+rule tcp.content@0 "+OK"  => POP3
+# Non-anchored fallbacks cover mid-session captures and client-originated lines.
+rule tcp.content "+OK"    => POP3
+rule tcp.content "-ERR"   => POP3
+rule tcp.content "USER "  => POP3
+rule tcp.content "PASS "  => POP3
+
+# ── Port bindings (secondary) ─────────────────────────────────────────────────
+rule tcp.port == 110 => POP3
+rule tcp.port == 995 => POP3
+
+# ── Coloring rules (highest specificity first) ────────────────────────────────
+# Server errors — white on red, maximum visibility.
+color pop3.keyword == "-ERR"                                            => white red
+
+# Positive server responses — black on light green.
+color pop3.keyword == "+OK"                                             => black lightgreen
+
+# Authentication and TLS upgrade commands — yellow, security-relevant traffic.
+color pop3.keyword == "USER" || pop3.keyword == "PASS" || \
+      pop3.keyword == "AUTH" || pop3.keyword == "STLS"                  => black lightyellow
+
+# Message retrieval commands — dark blue (bulk / data-plane direction).
+color pop3.keyword == "RETR" || pop3.keyword == "TOP"                   => white darkblue
+
+# Catch-all for any remaining POP3 frames on standard ports.
+color tcp.port == 110 || tcp.port == 995                                => black lightgray
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Wireshark's built-in "pop" dissector uses the field prefix "pop", not "pop3".
+# These aliases let display filters written for Wireshark continue to work.
+alias pop.response.indicator => pop3.keyword
+alias pop.response           => pop3.response
+alias pop.request.command    => pop3.keyword
+alias pop.request.parameter  => pop3.argument
+alias pop3.command           => pop3.keyword
+alias pop3.status            => pop3.keyword
+alias pop3.response          => pop3.response

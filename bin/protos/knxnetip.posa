@@ -1,0 +1,128 @@
+# knxnetip.posa — KNXnet/IP building-automation protocol over IP
+# Reference: KNX Association — KNXnet/IP Core specification (03_08_02)
+#            ISO 22510 / IEC 14543-3-x
+#
+# KNXnet/IP encapsulates KNX telegrams (cEMI frames) in UDP or TCP datagrams
+# for transport across standard IP networks.  Every frame starts with a fixed
+# 6-byte header: header_length=0x06, version=0x10, 16-bit service type, 16-bit
+# total length.  The two-byte prefix "\x06\x10" is used for content detection.
+#
+# Service families decoded here:
+#   0x02xx  Core   — device discovery, connection setup, state, disconnect
+#   0x03xx  Device Management — configuration of KNX devices
+#   0x04xx  Tunnelling — unicast delivery of cEMI frames (most common)
+#   0x05xx  Routing   — multicast delivery of cEMI frames
+
+Object<main> KNXnetIP
+    abbrev "knxip"
+    col "KNXnet/IP"
+
+    # ── Fixed 6-byte KNXnet/IP Header ────────────────────────────────────────
+    required uint8  header_length ["Header Length"]
+    required uint8  version       ["Version"]
+        0x10 = KNXnet/IP 1.0
+    required uint16 service_type  ["Service Type"]
+        0x0201 = SEARCH_REQUEST
+        0x0202 = SEARCH_RESPONSE
+        0x0203 = DESCRIPTION_REQUEST
+        0x0204 = DESCRIPTION_RESPONSE
+        0x0205 = CONNECT_REQUEST
+        0x0206 = CONNECT_RESPONSE
+        0x0207 = CONNECTIONSTATE_REQUEST
+        0x0208 = CONNECTIONSTATE_RESPONSE
+        0x0209 = DISCONNECT_REQUEST
+        0x020A = DISCONNECT_RESPONSE
+        0x0310 = CONFIGURATION_REQUEST
+        0x0311 = CONFIGURATION_ACK
+        0x0420 = TUNNELLING_REQUEST
+        0x0421 = TUNNELLING_ACK
+        0x0530 = ROUTING_INDICATION
+        0x0531 = ROUTING_LOST_MESSAGE
+        0x0532 = ROUTING_BUSY
+    required uint16 total_length ["Total Length"]
+
+    # ── TUNNELLING_REQUEST (0x0420) ───────────────────────────────────────────
+    # The tunnelling request is the most common KNXnet/IP message type.  After
+    # the 6-byte header comes a 4-byte Connection Header structure followed by
+    # a cEMI (Common External Message Interface) frame carrying the raw KNX
+    # telegram.  The sequence counter is echoed in the corresponding ACK.
+    when service_type == 0x0420:
+        required uint8  conn_header_len ["Conn Header Length"]
+        required uint8  channel_id      ["Channel ID"]
+        required uint8  seq_counter     ["Sequence Counter"]
+        required uint8  reserved        ["Reserved"]
+        # cEMI frame — message code selects the KNX telegram direction
+        required uint8  cemi_msg_code   ["cEMI Message Code"]
+            0x11 = L_data.req
+            0x2E = L_data.con
+            0x29 = L_data.ind
+        payload cemi_data ["cEMI Data"]
+
+    # ── TUNNELLING_ACK (0x0421) ───────────────────────────────────────────────
+    # ACK carries the same 4-byte connection header as the request; the echoed
+    # sequence counter lets the sender correlate with the original request.
+    when service_type == 0x0421:
+        required uint8  conn_header_len ["Conn Header Length"]
+        required uint8  channel_id      ["Channel ID"]
+        required uint8  seq_counter     ["Sequence Counter"]
+        required uint8  status          ["Status"]
+            0x00 = No Error
+            0x04 = Tunnelling Error
+
+    # ── All other service types ───────────────────────────────────────────────
+    # SEARCH, DESCRIPTION, CONNECT, CONNECTIONSTATE, DISCONNECT, CONFIGURATION,
+    # and ROUTING messages are captured verbatim for inspection.
+    else:
+        payload data ["Data"]
+
+    info "%s seq=%u" service_type, seq_counter
+
+
+# ── Content Detection Rules (primary — port-independent) ──────────────────────
+#
+# The two-byte fixed prefix "\x06\x10" (header_length=6, version=1.0) is present
+# in every valid KNXnet/IP frame, in both UDP and TCP streams.  Matching these
+# two bytes is sufficient for reliable heuristic detection on non-standard ports.
+rule udp.content "\x06\x10" => KNXnetIP
+rule tcp.content "\x06\x10" => KNXnetIP
+
+# ── Port Rules (secondary hints) ──────────────────────────────────────────────
+# IANA-assigned port 3671 for both UDP (default, used for routing multicast on
+# 224.0.23.12) and TCP (optional, used for tunnelling when UDP is not available).
+rule udp.port == 3671 => KNXnetIP
+rule tcp.port == 3671 => KNXnetIP
+
+
+# ── Coloring Rules ────────────────────────────────────────────────────────────
+# Most-specific first; first match wins.
+
+# Disconnect — red: session teardown, potential connectivity loss
+color knxip.service_type == 0x0209 or knxip.service_type == 0x020A => white red
+
+# Tunnelling — green: cEMI frames carrying live KNX telegrams (data plane)
+color knxip.service_type == 0x0420 or knxip.service_type == 0x0421 => black lightgreen
+
+# Routing — blue: multicast cEMI indication and router status messages
+color knxip.service_type == 0x0530 or knxip.service_type == 0x0531 or knxip.service_type == 0x0532 => black lightblue
+
+# Search — yellow: device discovery on the network
+color knxip.service_type == 0x0201 or knxip.service_type == 0x0202 => black lightyellow
+
+# Connection setup — yellow for requests, green for responses
+color knxip.service_type == 0x0203 or knxip.service_type == 0x0205 or knxip.service_type == 0x0207 => black lightyellow
+color knxip.service_type == 0x0204 or knxip.service_type == 0x0206 or knxip.service_type == 0x0208 => black lightgreen
+
+# Configuration — gray: device management background traffic
+color knxip.service_type == 0x0310 or knxip.service_type == 0x0311 => black lightgray
+
+# Protocol catch-all — any KNXnet/IP frame not matched above
+color knxip => white darkgreen
+
+
+# ── Wireshark-Compatible Aliases ──────────────────────────────────────────────
+# Map field names used by the Wireshark knxip dissector so that existing display
+# filters and coloring rules written for Wireshark continue to work unchanged.
+
+alias knxip.service_type  => knxip.service_type
+alias knxip.seq           => knxip.seq_counter
+alias knxip.cemi.msg_code => knxip.cemi_msg_code

@@ -1,0 +1,120 @@
+# LDAP (Lightweight Directory Access Protocol) — RFC 4511
+# BER/ASN.1 encoding over TCP port 389 (plain) or 636 (LDAPS/TLS-wrapped).
+#
+# Every LDAP message is an ASN.1 LDAPMessage SEQUENCE:
+#
+#   LDAPMessage ::= SEQUENCE {        tag 0x30
+#       messageID   INTEGER,          tag 0x02 + 1-byte len + value bytes
+#       protocolOp  CHOICE { ... },   Application-class tag 0x60–0x79
+#       controls   [0] OPTIONAL }
+#
+# BER length is simplified to short form (1 byte, value 0–127). Messages
+# larger than 127 bytes use the long form (first byte = 0x80|numBytes) but
+# the operation tag is still decoded from the known offset that follows the
+# messageID TLV, so field alignment is preserved for typical LDAP traffic.
+#
+# LDAPS on port 636 wraps LDAP inside a TLS session; the TLS dissector will
+# handle those packets first, so the content rule (0x30) only fires on port
+# 389 plain-text sessions. The port-636 rule remains as a label hint.
+
+Object<main> LDAP
+    abbrev "ldap"
+    col "LDAP"
+
+    # ── Outer SEQUENCE wrapper ────────────────────────────────────────────────
+    # 0x30 = universal constructed tag 16 (SEQUENCE)
+    required uint8 sequence_tag = 0x30 hex "Sequence Tag"
+
+    # Short-form BER length (1 byte). Covers messages up to 127 bytes.
+    # Long-form lengths (first byte 0x81 or 0x82) will misparse here but the
+    # operation tag is still visible after the messageID TLV at a fixed offset.
+    required uint8 sequence_len "Sequence Length"
+
+    # ── MessageID — ASN.1 INTEGER ─────────────────────────────────────────────
+    # 0x02 = universal primitive tag 2 (INTEGER)
+    required uint8 msg_id_tag = 0x02 hex "Message ID Tag"
+    required uint8 msg_id_len "Message ID Length"
+    required bytes[msg_id_len] message_id hex "Message ID"
+
+    # ── ProtocolOp — Application-class CHOICE ─────────────────────────────────
+    # Each operation is encoded as a constructed Application tag (0x60–0x79).
+    # The tag value alone identifies the operation type; the body varies per op.
+    required uint8 op_tag hex "Operation"
+        BindRequest           = 0x60
+        BindResponse          = 0x61
+        UnbindRequest         = 0x62
+        SearchRequest         = 0x63
+        SearchResultEntry     = 0x64
+        SearchResultDone      = 0x65
+        ModifyRequest         = 0x66
+        ModifyResponse        = 0x67
+        AddRequest            = 0x68
+        AddResponse           = 0x69
+        DelRequest            = 0x6A
+        DelResponse           = 0x6B
+        ModifyDNRequest       = 0x6C
+        ModifyDNResponse      = 0x6D
+        CompareRequest        = 0x6E
+        CompareResponse       = 0x6F
+        AbandonRequest        = 0x70
+        SearchResultReference = 0x73
+        ExtendedRequest       = 0x77
+        ExtendedResponse      = 0x78
+        IntermediateResponse  = 0x79
+
+    # Remainder of the operation body — BER-structured, varies per op type
+    payload
+
+    info "id=%s %s" message_id, op_tag
+
+# ── Content detection ─────────────────────────────────────────────────────────
+# Every LDAP message begins with the ASN.1 SEQUENCE tag 0x30. This is a
+# common byte (e.g. TLS also uses it in some contexts), so combine with the
+# port rules below rather than relying on this alone.
+rule tcp.content "\x30" => LDAP
+
+# ── Port bindings ─────────────────────────────────────────────────────────────
+# Port rules are secondary: the content rule fires first on non-standard ports.
+# Port 636 (LDAPS) is TLS-wrapped; the 0x30 content rule will not match there
+# (a TLS ClientHello starts with 0x16), so the port rule is the sole trigger.
+rule tcp.port == 389 => LDAP
+rule tcp.port == 636 => LDAP
+
+# ── Coloring rules ────────────────────────────────────────────────────────────
+# Bind and authentication operations — yellow (security-sensitive)
+color ldap.op_tag == 0x60 => black yellow
+color ldap.op_tag == 0x61 => black yellow
+color ldap.op_tag == 0x62 => black yellow
+
+# Search operations (request, entry results, done, referral) — green
+color ldap.op_tag == 0x63 => black lightgreen
+color ldap.op_tag == 0x64 => black lightgreen
+color ldap.op_tag == 0x65 => black lightgreen
+color ldap.op_tag == 0x73 => black lightgreen
+
+# Modify / Add / Delete / ModifyDN / Compare requests — lightyellow
+color ldap.op_tag == 0x66 => black lightyellow
+color ldap.op_tag == 0x68 => black lightyellow
+color ldap.op_tag == 0x6A => black lightyellow
+color ldap.op_tag == 0x6C => black lightyellow
+color ldap.op_tag == 0x6E => black lightyellow
+color ldap.op_tag == 0x70 => black lightyellow
+
+# Modify / Add / Delete / ModifyDN / Compare responses — lightcyan
+color ldap.op_tag == 0x67 => black lightcyan
+color ldap.op_tag == 0x69 => black lightcyan
+color ldap.op_tag == 0x6B => black lightcyan
+color ldap.op_tag == 0x6D => black lightcyan
+color ldap.op_tag == 0x6F => black lightcyan
+
+# Extended / Intermediate operations — darkblue (tunneled/special)
+color ldap.op_tag == 0x77 => white darkblue
+color ldap.op_tag == 0x78 => white darkblue
+color ldap.op_tag == 0x79 => white darkblue
+
+# Catch-all — unclassified LDAP traffic
+color ldap => white darkgray
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+alias ldap.messageID => ldap.message_id
+alias ldap.operation => ldap.op_tag

@@ -1,0 +1,138 @@
+# RADIUS — Remote Authentication Dial-In User Service (RFC 2865 / RFC 2866)
+# Authentication port: UDP 1812 (legacy 1645)
+# Accounting port:     UDP 1813 (legacy 1646)
+#
+# Every RADIUS packet has a fixed 20-byte header followed by zero or more
+# Type-Length-Value attributes. The Length field in each attribute encodes
+# the total attribute size including the type and length bytes themselves,
+# so the value payload is (attr_length - 2) bytes.
+#
+# The Authenticator field is 16 bytes: in Access-Request it is a random
+# nonce; in responses it is an MD5 hash over (code + id + length + req-auth + attrs + secret).
+#
+# RFC 3576 (Dynamic Authorization) adds Disconnect and CoA message types,
+# also carried on UDP 3799 in that RFC but vendors commonly reuse 1812/1813.
+
+Object<main> RADIUS
+    abbrev "radius"
+    col "RADIUS"
+
+    required uint8 code "Code"
+        1   = "Access-Request"
+        2   = "Access-Accept"
+        3   = "Access-Reject"
+        4   = "Accounting-Request"
+        5   = "Accounting-Response"
+        11  = "Access-Challenge"
+        12  = "Status-Server"
+        13  = "Status-Client"
+        40  = "Disconnect-Request"
+        41  = "Disconnect-ACK"
+        42  = "Disconnect-NAK"
+        43  = "CoA-Request"
+        44  = "CoA-ACK"
+        45  = "CoA-NAK"
+        255 = "Reserved"
+
+    required uint8 identifier "Identifier"
+    required uint16 length "Length"
+    required bytes<16> authenticator "Authenticator"
+
+    repeat until end as attribute "Attributes"
+        label "%s" attr_type
+        required uint8 attr_type "Type"
+            1   = "User-Name"
+            2   = "User-Password"
+            3   = "CHAP-Password"
+            4   = "NAS-IP-Address"
+            5   = "NAS-Port"
+            6   = "Service-Type"
+            7   = "Framed-Protocol"
+            8   = "Framed-IP-Address"
+            11  = "Filter-Id"
+            12  = "Framed-MTU"
+            14  = "Login-IP-Host"
+            18  = "Reply-Message"
+            19  = "Callback-Number"
+            24  = "State"
+            25  = "Class"
+            26  = "Vendor-Specific"
+            27  = "Session-Timeout"
+            28  = "Idle-Timeout"
+            30  = "Called-Station-Id"
+            31  = "Calling-Station-Id"
+            32  = "NAS-Identifier"
+            40  = "Acct-Status-Type"
+            41  = "Acct-Delay-Time"
+            42  = "Acct-Input-Octets"
+            43  = "Acct-Output-Octets"
+            44  = "Acct-Session-Id"
+            45  = "Acct-Authentic"
+            46  = "Acct-Session-Time"
+            60  = "CHAP-Challenge"
+            61  = "NAS-Port-Type"
+            64  = "Tunnel-Type"
+            65  = "Tunnel-Medium-Type"
+            80  = "Message-Authenticator"
+            85  = "Acct-Interim-Interval"
+            87  = "NAS-Port-Id"
+        required uint8 attr_length "Length"
+        scope attr_length - 2
+            required payload value "Value"
+
+    info "%s id=%u" code, identifier
+
+
+# ── Detection rules ───────────────────────────────────────────────────────────
+# Content rule first: the high byte of the 16-bit Length field at offset 2 is
+# always 0x00 for any normal RADIUS packet (max 4096 bytes, so high byte <= 0x0F;
+# common packets are well under 256 bytes). This catches RADIUS on non-standard ports.
+rule udp.content@2 "\x00" => RADIUS
+# Standard authentication and accounting ports (RFC 2865 / RFC 2866).
+rule udp.port == 1812 => RADIUS
+rule udp.port == 1813 => RADIUS
+# Legacy ports originally registered to livingstn-passwd / livingstn-billing.
+rule udp.port == 1645 => RADIUS
+rule udp.port == 1646 => RADIUS
+
+# ── Coloring rules ────────────────────────────────────────────────────────────
+# Access-Request — client credential submission (yellow: outbound auth attempt)
+color radius.code == 1  => black lightyellow
+
+# Access-Accept — authentication granted (green: success)
+color radius.code == 2  => black lightgreen
+
+# Access-Reject — authentication denied (red: failure / alert)
+color radius.code == 3  => white red
+
+# Accounting-Request / Accounting-Response — session accounting (blue: data plane)
+color radius.code == 4  => white darkblue
+color radius.code == 5  => white darkblue
+
+# Access-Challenge — server requires further interaction (yellow: pending)
+color radius.code == 11 => black lightyellow
+
+# Status-Server / Status-Client — keepalive probes (gray: management)
+color radius.code == 12 => black lightgray
+color radius.code == 13 => black lightgray
+
+# Disconnect-Request / CoA-Request — dynamic authorization (yellow: outbound command)
+color radius.code == 40 => black lightyellow
+color radius.code == 43 => black lightyellow
+
+# Disconnect-ACK / CoA-ACK — command accepted (green: success)
+color radius.code == 41 => black lightgreen
+color radius.code == 44 => black lightgreen
+
+# Disconnect-NAK / CoA-NAK — command refused (red: failure)
+color radius.code == 42 => white red
+color radius.code == 45 => white red
+
+# Catch-all — unclassified RADIUS traffic
+color radius => white darkgray
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+alias radius.code         => radius.code
+alias radius.id           => radius.identifier
+alias radius.User_Name    => radius.attribute.attr_type == 1
+alias radius.NAS_IP_Address => radius.attribute.attr_type == 4

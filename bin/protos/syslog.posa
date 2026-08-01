@@ -1,0 +1,174 @@
+# syslog.posa — Syslog Protocol (RFC 3164 BSD Syslog / RFC 5424 IETF Structured Syslog)
+#
+# Two formats share the Syslog group:
+#
+#   SYSLOG_5424 (RFC 5424):
+#     <PRI>VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID SP SD MSG
+#     VERSION is always the ASCII digit '1'; the two bytes "1 " immediately after
+#     the closing '>' distinguish this format from RFC 3164 (which has a letter there).
+#     Example: <165>1 2003-10-11T22:14:15.003Z mymachine.example.com evntslog - ID47
+#              [exampleSDID@32473 iut="3"] BOMAn application event log entry...
+#
+#   SYSLOG_3164 (RFC 3164 — BSD Syslog):
+#     <PRI>Mmm DD HH:MM:SS HOSTNAME MSG
+#     Catch-all for any message whose byte after '>' is not '1'.
+#     Example: <34>Oct 11 22:14:15 mymachine su: 'su root' failed for lonvick on /dev/pts/8
+#
+# Priority encoding — PRI is a decimal integer (0-191) in ASCII between '<' and '>':
+#   Facility = integer(PRI) >> 3        range 0-23, identifies the subsystem
+#   Severity = integer(PRI) & 0x07     range 0-7,  indicates urgency
+#
+# The runtime derives syslog.facility and syslog.severity from the text value of
+# syslog.pri_raw (integer(pri_raw) >> 3 and & 7 respectively).  Color rules and
+# the info line reference these derived integer fields with their enum names.
+#
+# Facility values (0-23):
+#   kern=0  user=1  mail=2  daemon=3  auth=4  syslog=5  lpr=6  news=7
+#   uucp=8  cron=9  authpriv=10  ftp=11  ntp=12  logaudit=13  logalert=14
+#   cron2=15  local0=16..local7=23
+#
+# Severity values (0-7):
+#   emergency=0  alert=1  critical=2  error=3  warning=4  notice=5  info=6  debug=7
+#
+# Ports:  UDP/514 (RFC 5426), TCP/514 (BSD plain),
+#         TCP/601 (RFC 3195 reliable delivery), TCP/6514 (RFC 5425 TLS)
+# Content: all syslog messages begin with '<' (0x3C)
+
+Object<GROUP> Syslog
+
+# ── RFC 5424: IETF Structured Syslog ─────────────────────────────────────────
+#
+# Tried first by the GROUP engine.  The two bytes "1 " (version digit + mandatory
+# SP) immediately after the closing '>' act as the discriminator; RFC 3164 has an
+# upper-case letter in that position instead (start of a month abbreviation).
+# If the required field check fails the GROUP falls through to SYSLOG_3164.
+
+Object<Syslog> SYSLOG_5424
+    abbrev "syslog"
+    col "Syslog"
+    starts "<"
+
+    # Priority block: <FACILITY*8 + SEVERITY>
+    # After the closing '>' the runtime computes:
+    #   syslog.facility = integer(pri_raw) >> 3   (Facility enum, 0-23)
+    #   syslog.severity = integer(pri_raw) & 0x07 (Severity enum, 0-7)
+    string pri_raw until ">" "Priority"
+
+    # Version byte '1' (0x31) + mandatory SP (0x20).
+    # Fails and causes GROUP fallthrough for any RFC 3164 message.
+    required bytes<2> version_sp = "1 " "Version"
+
+    # TIMESTAMP: ISO 8601 extended, e.g. "2003-10-11T22:14:15.003Z" or "-"
+    string timestamp until " " "Timestamp"
+
+    # HOSTNAME, APP-NAME, PROCID, MSGID — each NILVALUE-able as "-"
+    string hostname until " " "Hostname"
+    string appname  until " " "App-Name"
+    string procid   until " " "ProcID"
+    string msgid    until " " "MsgID"
+
+    # Structured Data: NILVALUE '-' or one-or-more '[SD-ID PARAM-LIST]' elements.
+    # 'until " "' correctly handles the NILVALUE case and single-element SD whose
+    # parameters contain no internal spaces.  For SD elements with quoted spaces
+    # (e.g. [exampleSDID@32473 iut="3" eventSource="Application"]) the value will
+    # be truncated at the first space inside the element; multi-element SD is
+    # captured up to the first ']' + space only.  Full SD tokenisation requires
+    # a custom implementation extension.
+    string sd_raw until " " "Structured Data"
+
+    # MSG: optional UTF-8 payload (may be preceded by a UTF-8 BOM, EF BB BF)
+    required payload message "Message"
+
+    info "%s.%s %s %s %s: %s" facility, severity, hostname, appname, msgid, message
+
+# ── RFC 3164: BSD Syslog ──────────────────────────────────────────────────────
+#
+# Catch-all — matches anything that SYSLOG_5424 did not claim.
+# The HEADER timestamp "Mmm DD HH:MM:SS" is always exactly 15 bytes; single-digit
+# days are space-padded (e.g. "Oct  6 22:14:15" has two spaces before the '6').
+
+Object<Syslog> SYSLOG_3164
+    abbrev "syslog"
+    col "Syslog"
+    starts "<"
+
+    # Priority block: same encoding as RFC 5424.
+    # Runtime computes syslog.facility and syslog.severity as above.
+    string pri_raw until ">" "Priority"
+
+    # HEADER: fixed 15-byte timestamp "Mmm DD HH:MM:SS"
+    required bytes<15> timestamp "Timestamp"
+    # Separator SP between HEADER and HOSTNAME
+    required bytes<1>  ts_sp    "SP"
+
+    # HOSTNAME is up to 255 chars; in practice a short DNS name or IP literal
+    string hostname until " " "Hostname"
+
+    # MSG optionally begins with a TAG field "program[pid]: " — parsed as payload
+    required payload message "Message"
+
+    info "%s.%s %s: %s" facility, severity, hostname, message
+
+# ── Content detection (primary — fires before port rules) ────────────────────
+# '<' (0x3C) is the required first byte of every syslog message.  The content
+# rules cover non-standard ports; port rules below are secondary refinements.
+rule udp.content "<" => Syslog
+rule tcp.content "<" => Syslog
+
+# ── Port bindings (secondary hints) ──────────────────────────────────────────
+rule udp.port == 514  => Syslog      # RFC 5426  UDP syslog
+rule tcp.port == 514  => Syslog      # BSD plain TCP syslog
+rule tcp.port == 601  => Syslog      # RFC 3195  reliable delivery
+rule tcp.port == 6514 => Syslog      # RFC 5425  TLS syslog
+
+# ── Severity-based coloring ───────────────────────────────────────────────────
+# References syslog.severity — the runtime-derived integer (integer(pri_raw) & 7).
+# Rules are ordered most-severe first; the first match wins.
+
+# 0=emergency, 1=alert, 2=critical — highest urgency: white on red
+color syslog.severity <= 2 => white red
+
+# 3=error — serious but not immediate: yellow on red
+color syslog.severity == 3 => yellow red
+
+# 4=warning — potential problem: black on yellow
+color syslog.severity == 4 => black yellow
+
+# 5=notice, 6=info — normal operational messages: black on light gray
+color syslog.severity == 5 => black lightgray
+color syslog.severity == 6 => black lightgray
+
+# 7=debug — verbose tracing: black on light blue
+color syslog.severity == 7 => black lightblue
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Map the Wireshark syslog dissector field names to their POSA equivalents so
+# that display filters written for Wireshark captures continue to work.
+
+alias syslog.facility  => syslog.facility     # derived integer field, matches WS name
+alias syslog.severity  => syslog.severity     # derived integer field, matches WS name
+alias syslog.hostname  => syslog.hostname     # field name matches
+alias syslog.appname   => syslog.appname      # field name matches
+alias syslog.procid    => syslog.procid       # field name matches
+alias syslog.msgid     => syslog.msgid        # field name matches
+alias syslog.msg       => syslog.message      # Wireshark uses "msg" not "message"
+alias syslog.time      => syslog.timestamp    # Wireshark uses "time" not "timestamp"
+alias syslog.data      => syslog.sd_raw       # Wireshark uses "data" for structured data
+
+# Convenience macro aliases for common filter expressions
+alias syslog.is_emergency => syslog.severity == 0
+alias syslog.is_critical  => syslog.severity <= 2
+alias syslog.is_error     => syslog.severity <= 3
+alias syslog.is_warning   => syslog.severity <= 4
+alias syslog.kern         => syslog.facility == 0
+alias syslog.user         => syslog.facility == 1
+alias syslog.daemon       => syslog.facility == 3
+alias syslog.auth         => syslog.facility == 4
+alias syslog.local0       => syslog.facility == 16
+alias syslog.local1       => syslog.facility == 17
+alias syslog.local2       => syslog.facility == 18
+alias syslog.local3       => syslog.facility == 19
+alias syslog.local4       => syslog.facility == 20
+alias syslog.local5       => syslog.facility == 21
+alias syslog.local6       => syslog.facility == 22
+alias syslog.local7       => syslog.facility == 23

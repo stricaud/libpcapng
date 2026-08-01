@@ -1,0 +1,90 @@
+# pptp.posa — Point-to-Point Tunneling Protocol (RFC 2637)
+#
+# PPTP uses a TCP control connection on port 1723 for session management.
+# All control messages carry a fixed 12-byte header followed by type-specific
+# attributes. A mandatory 4-byte magic cookie (0x1A2B3C4D) sits at offset 4
+# in every control message and serves as the primary content fingerprint,
+# enabling decoding on non-standard ports without relying on the port number.
+#
+# GRE data tunnels carry PPP frames using Enhanced GRE (IP protocol 47,
+# GRE key type 0x880B); those frames are not decoded here.
+
+Object<main> PPTP
+    abbrev "pptp"
+    col "PPTP"
+
+    required uint16 length               "Length"
+    required uint16 pptp_message_type    "PPTP Message Type"
+        Control    = 1
+        Management = 2
+    required uint32 magic_cookie = 0x1A2B3C4D hex "Magic Cookie"
+    required uint16 control_message_type "Control Message Type"
+        Start-Control-Connection-Request = 1
+        Start-Control-Connection-Reply   = 2
+        Stop-Control-Connection-Request  = 3
+        Stop-Control-Connection-Reply    = 4
+        Echo-Request                     = 5
+        Echo-Reply                       = 6
+        Outgoing-Call-Request            = 7
+        Outgoing-Call-Reply              = 8
+        Incoming-Call-Request            = 9
+        Incoming-Call-Reply              = 10
+        Incoming-Call-Connected          = 11
+        Call-Clear-Request               = 12
+        Call-Disconnect-Notify           = 13
+        WAN-Error-Notify                 = 14
+        Set-Link-Info                    = 15
+    required uint16 reserved             "Reserved"
+    payload
+
+    info "%s" control_message_type
+
+# ── Content rule (primary — port-independent) ─────────────────────────────────
+# The magic cookie 0x1A2B3C4D is mandatory in every PPTP control message and
+# sits at a fixed byte offset of 4, making it a reliable content fingerprint.
+# This rule fires before the port rule so PPTP is recognised on any port.
+
+rule tcp.content@4 "\x1a\x2b\x3c\x4d" => PPTP
+
+# ── Port rule (secondary — hint when content rule is insufficient) ────────────
+
+rule tcp.port == 1723 => PPTP
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Map the Wireshark PPTP dissector field names to the abbrevs emitted above so
+# that display filters written for Wireshark continue to work unchanged.
+
+alias pptp.msg_type => pptp.control_message_type
+alias pptp.magic    => pptp.magic_cookie
+alias pptp.length   => pptp.length
+
+# ── Coloring rules (most specific first) ──────────────────────────────────────
+
+# Connection setup — Start-Control-Connection Request (1) and Reply (2): yellow.
+color pptp.control_message_type == 1 => black lightyellow
+color pptp.control_message_type == 2 => black lightyellow
+
+# Connection teardown — Stop-Control-Connection (3, 4) and
+# Call-Clear / Call-Disconnect (12, 13): red.
+color pptp.control_message_type == 3  => white red
+color pptp.control_message_type == 4  => white red
+color pptp.control_message_type == 12 => white red
+color pptp.control_message_type == 13 => white red
+
+# Data call signalling — Outgoing-Call (7, 8), Incoming-Call (9, 10, 11): green.
+color pptp.control_message_type == 7  => black lightgreen
+color pptp.control_message_type == 8  => black lightgreen
+color pptp.control_message_type == 9  => black lightgreen
+color pptp.control_message_type == 10 => black lightgreen
+color pptp.control_message_type == 11 => black lightgreen
+
+# Keepalive — Echo-Request (5) and Echo-Reply (6): neutral gray.
+color pptp.control_message_type == 5  => black lightgray
+color pptp.control_message_type == 6  => black lightgray
+
+# Error / management — WAN-Error-Notify (14): red; Set-Link-Info (15): gray.
+color pptp.control_message_type == 14 => white red
+color pptp.control_message_type == 15 => black lightgray
+
+# Catch-all: any PPTP frame not matched above (e.g. unknown future message types).
+color pptp => white darkblue

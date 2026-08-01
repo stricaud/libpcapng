@@ -1,19 +1,192 @@
-# RTP header (RFC 3550) — 12 bytes minimum
-# ver_p_x_cc: V(2)=2 | P(1) | X(1) | CC(4). Default 0x80 = V=2, no padding, no extension, CC=0.
-# m_pt: M(1) | PT(7). Payload types 96-127 are dynamic; common fixed types listed below.
+# rtp.posa — Real-time Transport Protocol (RFC 3550)
+#
+# RTP carries audio and video over UDP using dynamically negotiated ports.
+# The most common allocation range is 16384–32767 (even ports for media, odd
+# for the companion RTCP stream), though any ephemeral port pair may be used
+# when negotiated via SDP, SIP, or RTSP.  IANA also registers port 5004 for
+# RTP and port 5005 for RTCP as conventional defaults.
+#
+# Fixed 12-byte header, then optional CSRC list and extension:
+#
+#   Byte  0  : V(2) P(1) X(1) CC(4)   — version, padding, extension, CSRC count
+#   Byte  1  : M(1) PT(7)              — marker, payload type
+#   Bytes 2–3: sequence_number         — increments by 1 per packet sent
+#   Bytes 4–7: timestamp               — sampling instant; clock rate is PT-dependent
+#   Bytes 8–11: ssrc                   — synchronisation source identifier
+#   Bytes 12..12+CC×4–1: csrc list     — contributing source identifiers (0–15 entries)
+#   If X=1:
+#     +0..1  ext_profile               — extension profile (app-defined or IETF)
+#     +2..3  ext_length                — extension length in 32-bit words
+#     +4..   ext_data                  — ext_length × 4 bytes of extension data
+#   Remainder: media payload
+#
+# Content detection: any byte value in the range 0x80–0xBF in position 0 means
+# V=2 (bits 7–6 = 10).  The most commonly seen values are listed below; less
+# common combinations (padding+extension, CSRC counts > 4) are caught by the
+# port rules.
+
 Object<main> RTP
-    required uint8  ver_p_x_cc = 0x80
-    required uint8  m_pt = 0
-        PCMU = 0
-        GSM  = 3
-        G723 = 4
-        PCMA = 8
-        G722 = 9
-        G729 = 18
-        H264 = 96
-        H265 = 98
-        VP8  = 96
-        OPUS = 111
-    required uint16 seq = 0
-    required uint32 timestamp = 0
-    required uint32 ssrc = 0
+    abbrev "rtp"
+    col "RTP"
+
+    # ── Byte 0: version, padding, extension, CSRC count ─────────────────────────
+    required uint8 first_byte "Flags"
+        bits first_byte version    6 2 "Version"
+        bits first_byte padding    5 1 "Padding"
+        bits first_byte extension  4 1 "Extension"
+        bits first_byte csrc_count 0 4 "CC (CSRC Count)"
+
+    # ── Byte 1: marker bit and payload type ──────────────────────────────────────
+    required uint8 second_byte "Marker / Payload Type"
+        bits second_byte marker       7 1 "Marker"
+        bits second_byte payload_type 0 7 "Payload Type"
+            PCMU (G.711 µ-law)          =  0
+            GSM                         =  3
+            G.723                       =  4
+            DVI4 (8000 Hz)              =  5
+            DVI4 (16000 Hz)             =  6
+            LPC                         =  7
+            PCMA (G.711 A-law)          =  8
+            G.722                       =  9
+            L16 (Mono)                  = 10
+            L16 (Stereo)                = 11
+            QCELP                       = 12
+            CN (Comfort Noise)          = 13
+            MPA (MPEG Audio)            = 14
+            G.728                       = 15
+            DVI4 (11025 Hz)             = 16
+            DVI4 (22050 Hz)             = 17
+            G.729                       = 18
+            CelB                        = 25
+            JPEG                        = 26
+            nv                          = 28
+            H.261                       = 31
+            MPV (MPEG-1/2 Video)        = 32
+            MP2T (MPEG-2 Transport)     = 33
+            H.263                       = 34
+            Dynamic (96)                = 96
+            Dynamic (97)                = 97
+            Dynamic (98)                = 98
+            Dynamic (99)                = 99
+            Dynamic (100)               = 100
+            Dynamic (101)               = 101
+            Dynamic (102)               = 102
+            Dynamic (103)               = 103
+            Dynamic (104)               = 104
+            Dynamic (105)               = 105
+            Dynamic (106)               = 106
+            Dynamic (107)               = 107
+            Dynamic (108)               = 108
+            Dynamic (109)               = 109
+            Dynamic (110)               = 110
+            Dynamic (111)               = 111
+            Dynamic (112)               = 112
+            Dynamic (113)               = 113
+            Dynamic (114)               = 114
+            Dynamic (115)               = 115
+            Dynamic (116)               = 116
+            Dynamic (117)               = 117
+            Dynamic (118)               = 118
+            Dynamic (119)               = 119
+            Dynamic (120)               = 120
+            Dynamic (121)               = 121
+            Dynamic (122)               = 122
+            Dynamic (123)               = 123
+            Dynamic (124)               = 124
+            Dynamic (125)               = 125
+            Dynamic (126)               = 126
+            Dynamic (127)               = 127
+
+    # ── Bytes 2–11: sequence, timestamp, SSRC ────────────────────────────────────
+    required uint16 sequence_number "Sequence Number"
+    required uint32 timestamp "Timestamp"
+    required uint32 ssrc hex "SSRC"
+
+    # ── Bytes 12+: CSRC list (CC entries, 4 bytes each) ──────────────────────────
+    repeat csrc_count as csrc "CSRC List"
+        label "CSRC 0x%x" csrc_id
+        required uint32 csrc_id hex "CSRC"
+
+    # ── Optional header extension (present when X bit = 1) ───────────────────────
+    # ext_length counts 32-bit words; actual extension data is ext_length × 4 bytes.
+    # The scope reads ext_length bytes — a known limitation when no arithmetic
+    # expression is available in the length specifier; add a manual extension decoder
+    # for profiles that pad to exact word boundaries (RFC 5285 one-byte/two-byte headers).
+    when extension == 1:
+        required uint16 ext_profile hex "Extension Profile"
+        required uint16 ext_length "Extension Length (words)"
+        required bytes[ext_length] ext_data "Extension Data"
+
+    # ── Media payload ─────────────────────────────────────────────────────────────
+    required payload media_payload "Media Payload"
+
+    info "PT=%s Seq=%u SSRC=0x%x" payload_type, sequence_number, ssrc
+
+# ── Content detection (primary — port-independent) ────────────────────────────
+# V=2 requires first_byte & 0xC0 == 0x80, giving 0x80–0xBF.  The most common
+# values are enumerated; CC=0 (0x80/0x90/0xa0) and CC=1 (0x81/0x91) cover the
+# overwhelming majority of real captures.  Port rules below catch the rest.
+rule udp.content "\x80" => RTP
+rule udp.content "\x81" => RTP
+rule udp.content "\x82" => RTP
+rule udp.content "\x83" => RTP
+rule udp.content "\x84" => RTP
+rule udp.content "\x85" => RTP
+rule udp.content "\x86" => RTP
+rule udp.content "\x87" => RTP
+rule udp.content "\x88" => RTP
+rule udp.content "\x89" => RTP
+rule udp.content "\x8a" => RTP
+rule udp.content "\x8b" => RTP
+rule udp.content "\x8c" => RTP
+rule udp.content "\x8d" => RTP
+rule udp.content "\x8e" => RTP
+rule udp.content "\x8f" => RTP
+# X=1 (with header extension), CC=0–3
+rule udp.content "\x90" => RTP
+rule udp.content "\x91" => RTP
+rule udp.content "\x92" => RTP
+rule udp.content "\x93" => RTP
+# P=1 (with padding), CC=0–1
+rule udp.content "\xa0" => RTP
+rule udp.content "\xa1" => RTP
+# P=1, X=1
+rule udp.content "\xb0" => RTP
+rule udp.content "\xb1" => RTP
+
+# ── Port bindings (secondary hint) ────────────────────────────────────────────
+rule udp.port == 5004 => RTP
+rule udp.port == 5005 => RTP
+
+# ── Coloring rules (most specific first) ──────────────────────────────────────
+# Static video payload types: JPEG, H.261, MPEG-1/2 video, MPEG-2 TS, H.263
+color rtp.payload_type == 26 || rtp.payload_type == 31 || rtp.payload_type == 32 || rtp.payload_type == 33 || rtp.payload_type == 34 => white darkblue
+
+# Dynamic payload types 96–127: H.264, H.265, VP8, VP9, Opus, etc. (SDP-negotiated)
+color rtp.payload_type >= 96 => black lightblue
+
+# Static audio payload types: PCMU, GSM, G.723, LPC, PCMA, G.722, L16, QCELP,
+# CN, MPA, G.728, G.729
+color rtp.payload_type == 0 || rtp.payload_type == 3 || rtp.payload_type == 4 || rtp.payload_type == 7 || rtp.payload_type == 8 || rtp.payload_type == 9 || rtp.payload_type == 10 || rtp.payload_type == 11 || rtp.payload_type == 12 || rtp.payload_type == 13 || rtp.payload_type == 14 || rtp.payload_type == 15 || rtp.payload_type == 18 => black lightgreen
+
+# Marker bit set: end of talk-spurt or last packet of a video frame boundary
+color rtp.marker == 1 => black lightyellow
+
+# Protocol catch-all
+color rtp => black lightgray
+
+# ── Wireshark-compatible field aliases ────────────────────────────────────────
+# Map Wireshark's rtp dissector field names to the abbrevs defined above so
+# that display filters written for Wireshark work without modification.
+alias rtp.version     => rtp.version
+alias rtp.padding     => rtp.padding
+alias rtp.extension   => rtp.extension
+alias rtp.cc          => rtp.csrc_count
+alias rtp.marker      => rtp.marker
+alias rtp.p_type      => rtp.payload_type
+alias rtp.seq         => rtp.sequence_number
+alias rtp.timestamp   => rtp.timestamp
+alias rtp.ssrc        => rtp.ssrc
+alias rtp.csrc.item   => rtp.csrc.csrc_id
+alias rtp.ext.profile => rtp.ext_profile
+alias rtp.ext.len     => rtp.ext_length

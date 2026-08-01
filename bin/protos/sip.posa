@@ -1,0 +1,274 @@
+# sip.posa — Session Initiation Protocol (RFC 3261)
+#
+# SIP is a line-oriented text protocol sharing HTTP's "method URI version\r\n"
+# header-block body shape.  Two object variants form the SIP group:
+#
+#   SIP_RESPONSE — starts with "SIP/" (magic 0x5349502F); seek 0 then parse
+#                  "SIP/2.0 STATUS REASON\r\n" as text fields.
+#   SIP_REQUEST  — disambiguated by `starts` on the method keyword; first line
+#                  is "METHOD sip:URI SIP/2.0\r\n".
+#
+# Headers are captured in a repeat-until-blank-line block (same as http.posa).
+# Key headers (Via, From, To, Call-ID, CSeq, Contact, …) are declared as named
+# fields BEFORE the catch-all repeat; a text-protocol-aware runtime extracts
+# them by matching the declared label against "Header-Name: value\r\n" lines.
+# Missing fields expand to nothing automatically in the info line.
+#
+# Runs over UDP and TCP; standard port 5060, TLS-wrapped variant on TCP 5061.
+# Content rules fire first so SIP on non-standard ports (e.g. 5080, 5090) is
+# still recognised.
+
+Object<SIP> SIP_RESPONSE
+    abbrev "sip"
+    col "SIP"
+
+    # The group dispatcher reads the first four bytes to tell a response
+    # ("SIP/") from a request (method keyword).  0x5349502F = big-endian "SIP/"
+    # After matching, seek 0 rewinds so the full status line can be read as text.
+    required uint32 magic = 0x5349502F hex "Magic"
+    seek 0
+
+    required string version until " " "SIP-Version"
+
+    required string status_code until " " "Status-Code"
+        "100" = "Trying"
+        "180" = "Ringing"
+        "181" = "Call Is Being Forwarded"
+        "182" = "Queued"
+        "183" = "Session Progress"
+        "200" = "OK"
+        "202" = "Accepted"
+        "301" = "Moved Permanently"
+        "302" = "Moved Temporarily"
+        "305" = "Use Proxy"
+        "380" = "Alternative Service"
+        "400" = "Bad Request"
+        "401" = "Unauthorized"
+        "403" = "Forbidden"
+        "404" = "Not Found"
+        "405" = "Method Not Allowed"
+        "406" = "Not Acceptable"
+        "407" = "Proxy Authentication Required"
+        "408" = "Request Timeout"
+        "410" = "Gone"
+        "413" = "Request Entity Too Large"
+        "414" = "Request-URI Too Long"
+        "415" = "Unsupported Media Type"
+        "420" = "Bad Extension"
+        "480" = "Temporarily Unavailable"
+        "481" = "Call Leg Does Not Exist"
+        "482" = "Loop Detected"
+        "483" = "Too Many Hops"
+        "484" = "Address Incomplete"
+        "485" = "Ambiguous"
+        "486" = "Busy Here"
+        "487" = "Request Terminated"
+        "488" = "Not Acceptable Here"
+        "491" = "Request Pending"
+        "494" = "Security Agreement Required"
+        "500" = "Internal Server Error"
+        "501" = "Not Implemented"
+        "502" = "Bad Gateway"
+        "503" = "Service Unavailable"
+        "504" = "Server Timeout"
+        "505" = "Version Not Supported"
+        "513" = "Message Too Large"
+        "600" = "Busy Everywhere"
+        "603" = "Decline"
+        "604" = "Does Not Exist Anywhere"
+        "606" = "Not Acceptable"
+
+    required string reason until "\r\n" "Reason-Phrase"
+
+    # Key SIP headers — extracted by label-name matching before the repeat sweep.
+    string via until "\r\n" "Via"
+    string from until "\r\n" "From"
+    string to until "\r\n" "To"
+    string call_id until "\r\n" "Call-ID"
+    string cseq until "\r\n" "CSeq"
+    string contact until "\r\n" "Contact"
+    string content_type until "\r\n" "Content-Type"
+    string content_length until "\r\n" "Content-Length"
+    string user_agent until "\r\n" "User-Agent"
+    string www_authenticate until "\r\n" "WWW-Authenticate"
+    string proxy_authenticate until "\r\n" "Proxy-Authenticate"
+    string record_route until "\r\n" "Record-Route"
+    string server until "\r\n" "Server"
+    string allow until "\r\n" "Allow"
+    string supported until "\r\n" "Supported"
+    string require until "\r\n" "Require"
+
+    # Remaining / unrecognised headers — one entry per line until blank line.
+    repeat until "\r\n" as header "All Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+    required string blank until "\r\n" "End of Headers"
+
+    required payload body "Message Body"
+
+    info "%s %s [%s]" status_code, reason, call_id
+
+Object<SIP> SIP_REQUEST
+    abbrev "sip"
+    col "SIP"
+
+    # All fourteen RFC 3261 / RFC 3265 / RFC 3515 methods, each followed by a
+    # space to prevent false matches on words that start with a method name.
+    starts "INVITE " "ACK " "BYE " "CANCEL " "OPTIONS " "REGISTER " "REFER " \
+           "SUBSCRIBE " "NOTIFY " "INFO " "PRACK " "UPDATE " "MESSAGE " "PUBLISH "
+
+    required string method until " " "Method"
+        "INVITE"    = "INVITE"
+        "ACK"       = "ACK"
+        "BYE"       = "BYE"
+        "CANCEL"    = "CANCEL"
+        "OPTIONS"   = "OPTIONS"
+        "REGISTER"  = "REGISTER"
+        "REFER"     = "REFER"
+        "SUBSCRIBE" = "SUBSCRIBE"
+        "NOTIFY"    = "NOTIFY"
+        "INFO"      = "INFO"
+        "PRACK"     = "PRACK"
+        "UPDATE"    = "UPDATE"
+        "MESSAGE"   = "MESSAGE"
+        "PUBLISH"   = "PUBLISH"
+
+    required string request_uri until " " "Request-URI"
+    required string version until "\r\n" "SIP-Version"
+
+    # Key SIP headers — extracted by label-name matching before the repeat sweep.
+    string via until "\r\n" "Via"
+    string from until "\r\n" "From"
+    string to until "\r\n" "To"
+    string call_id until "\r\n" "Call-ID"
+    string cseq until "\r\n" "CSeq"
+    string contact until "\r\n" "Contact"
+    string content_type until "\r\n" "Content-Type"
+    string content_length until "\r\n" "Content-Length"
+    string max_forwards until "\r\n" "Max-Forwards"
+    string user_agent until "\r\n" "User-Agent"
+    string authorization until "\r\n" "Authorization"
+    string proxy_authorization until "\r\n" "Proxy-Authorization"
+    string route until "\r\n" "Route"
+    string record_route until "\r\n" "Record-Route"
+    string allow until "\r\n" "Allow"
+    string supported until "\r\n" "Supported"
+    string require until "\r\n" "Require"
+    string expires until "\r\n" "Expires"
+    string event until "\r\n" "Event"
+    string subscription_state until "\r\n" "Subscription-State"
+    string refer_to until "\r\n" "Refer-To"
+    string referred_by until "\r\n" "Referred-By"
+
+    # Remaining / unrecognised headers — one entry per line until blank line.
+    repeat until "\r\n" as header "All Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+    required string blank until "\r\n" "End of Headers"
+
+    required payload body "Message Body"
+
+    info "%s %s [%s]" method, request_uri, call_id
+
+# ── Content-based detection (primary — fires on ANY port) ────────────────────
+# Method + "sip:" is specific enough to avoid false positives.  "SIP/2.0 " on
+# a bare response covers servers that reply on a non-standard source port.
+# UDP rules mirror TCP so SIP over UDP is caught equally.
+
+rule tcp.content "INVITE sip:"    => SIP
+rule tcp.content "REGISTER sip:"  => SIP
+rule tcp.content "BYE sip:"       => SIP
+rule tcp.content "ACK sip:"       => SIP
+rule tcp.content "CANCEL sip:"    => SIP
+rule tcp.content "OPTIONS sip:"   => SIP
+rule tcp.content "REFER sip:"     => SIP
+rule tcp.content "SUBSCRIBE sip:" => SIP
+rule tcp.content "NOTIFY sip:"    => SIP
+rule tcp.content "MESSAGE sip:"   => SIP
+rule tcp.content "PUBLISH sip:"   => SIP
+rule tcp.content "SIP/2.0 "       => SIP
+
+rule udp.content "INVITE sip:"    => SIP
+rule udp.content "REGISTER sip:"  => SIP
+rule udp.content "BYE sip:"       => SIP
+rule udp.content "ACK sip:"       => SIP
+rule udp.content "CANCEL sip:"    => SIP
+rule udp.content "OPTIONS sip:"   => SIP
+rule udp.content "SIP/2.0 "       => SIP
+
+# ── Port-based detection (secondary) ─────────────────────────────────────────
+# Tried only when no content rule matched; keeps a cheap fast-path for
+# standard deployments while non-standard-port SIP is still detected above.
+
+rule udp.port == 5060 => SIP
+rule tcp.port == 5060 => SIP
+rule tcp.port == 5061 => SIP   # SIPS — SIP over TLS
+
+# ── Coloring rules ────────────────────────────────────────────────────────────
+# Ordered most-specific first (first match wins).
+
+# Session teardown and cancellation — yellow-on-red (orange) signals urgency.
+color sip.method == "BYE" || sip.method == "CANCEL" => yellow red
+
+# INVITE — yellow background, session-setup highlight.
+color sip.method == "INVITE" => black lightyellow
+
+# Other request methods (REGISTER, OPTIONS, REFER, …) — request tint.
+color sip.method => black lightyellow
+
+# 4xx / 5xx / 6xx — error palette.
+color sip.status_code == "400" || sip.status_code == "401" || sip.status_code == "403" || sip.status_code == "404" || sip.status_code == "405" || sip.status_code == "407" || sip.status_code == "408" => white red
+color sip.status_code == "480" || sip.status_code == "481" || sip.status_code == "486" || sip.status_code == "487" || sip.status_code == "488" || sip.status_code == "491" => white red
+color sip.status_code == "500" || sip.status_code == "501" || sip.status_code == "502" || sip.status_code == "503" || sip.status_code == "504" || sip.status_code == "513" => white red
+color sip.status_code == "600" || sip.status_code == "603" || sip.status_code == "604" || sip.status_code == "606" => white red
+
+# 2xx — success.
+color sip.status_code == "200" || sip.status_code == "202" => black lightgreen
+
+# 3xx — redirect.
+color sip.status_code == "301" || sip.status_code == "302" || sip.status_code == "305" || sip.status_code == "380" => black lightgray
+
+# 1xx — informational / provisional.
+color sip.status_code == "100" || sip.status_code == "180" || sip.status_code == "181" || sip.status_code == "182" || sip.status_code == "183" => black lightblue
+
+# Catch-all — any SIP frame not matched above (e.g. unknown status class).
+color sip => white darkblue
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Map Wireshark's sip dissector field names so existing display filters work.
+
+alias sip.Method             => sip.method
+alias sip.request.method     => sip.method
+alias sip.request-line       => sip.request_uri
+alias sip.Status-Code        => sip.status_code
+alias sip.response.code      => sip.status_code
+alias sip.reason-phrase      => sip.reason
+alias sip.from               => sip.from
+alias sip.to                 => sip.to
+alias sip.Call-ID            => sip.call_id
+alias sip.CSeq               => sip.cseq
+alias sip.Via                => sip.via
+alias sip.Contact            => sip.contact
+alias sip.User-Agent         => sip.user_agent
+alias sip.Authorization      => sip.authorization
+alias sip.WWW-Authenticate   => sip.www_authenticate
+alias sip.Content-Type       => sip.content_type
+alias sip.Content-Length     => sip.content_length
+alias sip.Max-Forwards       => sip.max_forwards
+alias sip.Expires            => sip.expires
+alias sip.Event              => sip.event
+alias sip.Refer-To           => sip.refer_to
+alias sip.Record-Route       => sip.record_route
+alias sip.Route              => sip.route
+alias sip.Allow              => sip.allow
+alias sip.Supported          => sip.supported
+
+# Convenience macro aliases for common filter expressions.
+alias sip.is_request         => sip.method
+alias sip.is_response        => sip.status_code
+alias sip.is_invite          => sip.method == "INVITE"
+alias sip.is_register        => sip.method == "REGISTER"
+alias sip.is_bye             => sip.method == "BYE"
+alias sip.error              => sip.status_code >= 400
+alias sip.success            => sip.status_code >= 200 && sip.status_code < 300
+alias sip.provisional        => sip.status_code >= 100 && sip.status_code < 200

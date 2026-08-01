@@ -1,0 +1,95 @@
+# telnet.posa — Telnet (RFC 854)
+#
+# Telnet carries two kinds of traffic: raw terminal data and IAC (Interpret As
+# Command) control sequences. Every IAC sequence starts with byte 0xFF, followed
+# by a command byte, and — for negotiation commands (WILL/WONT/DO/DONT/SB) — an
+# option byte and, for SB, an option-specific subnegotiation payload.
+#
+# Structure per record:
+#   0xFF cmd          — simple command (NOP, Break, GA, AYT, …)
+#   0xFF cmd option   — negotiation (WILL/WONT/DO/DONT) or subnegotiation start (SB)
+#   0xFF 0xFA option payload — subnegotiation: option byte + data until IAC SE
+#   <data>            — raw terminal bytes (non-IAC)
+#
+# Content detection fires on the IAC byte at offset 0, so the decoder activates
+# on any port whose session opens with a negotiation exchange (very common).
+# TCP 23 is the standard fallback for sessions that begin with raw data.
+
+Object<main> Telnet
+    abbrev "telnet"
+    col "TELNET"
+
+    # First byte: 0xFF marks an IAC sequence; anything else is raw terminal data.
+    required uint8 iac "IAC Marker"
+
+    when iac == 0xFF:
+        required uint8 cmd "Command"
+            NOP                  = 0xF1
+            Data Mark            = 0xF2
+            Break                = 0xF3
+            Interrupt Process    = 0xF4
+            Abort Output         = 0xF5
+            Are You There        = 0xF6
+            Erase Character      = 0xF7
+            Erase Line           = 0xF8
+            Go Ahead             = 0xF9
+            Subnegotiation Begin = 0xFA
+            WILL                 = 0xFB
+            WONT                 = 0xFC
+            DO                   = 0xFD
+            DONT                 = 0xFE
+            IAC                  = 0xFF
+
+        # SB (0xFA) and negotiation commands 0xFB–0xFE all carry an option byte.
+        # Simple commands (NOP, Break, GA, AYT, …) end after the command byte.
+        when cmd >= 0xFA:
+            required uint8 option "Option"
+                Binary Transmission    = 0
+                Echo                   = 1
+                Suppress Go Ahead      = 3
+                Status                 = 5
+                Timing Mark            = 6
+                Terminal Type          = 24
+                Window Size            = 31
+                Terminal Speed         = 32
+                Remote Flow Control    = 33
+                Linemode               = 34
+                X Display Location     = 35
+                Environment Variables  = 36
+                Encryption Option      = 38
+                New Environment Option = 39
+
+            # SB carries option-specific payload until the peer sends IAC SE (0xFF 0xF0).
+            when cmd == 0xFA:
+                required payload subneg "Subnegotiation Data"
+
+    else:
+        # Non-IAC: raw terminal data. iac holds the first data byte; the rest follows.
+        required payload data "Data"
+
+    # cmd and option are absent for raw-data records — missing fields collapse,
+    # so the info line reads "IAC NOP", "IAC WILL Echo", "IAC DO Terminal Type", etc.
+    info "IAC %s %s" cmd, option
+
+# Content detection — IAC byte at the start of the stream. Most telnet sessions
+# open with a WILL/DO negotiation exchange, making this the primary trigger.
+# Listed first so the decoder fires on non-standard ports without relying on port 23.
+rule tcp.content "\xff" => Telnet
+
+# Port 23 is the standard telnet assignment and catches sessions that open with
+# raw data (no leading IAC to trigger the content rule above).
+rule tcp.port == 23 => Telnet
+
+# Coloring — negotiation commands by direction; raw data is neutral grey.
+#   DO / WILL  (enabling a capability)  → blue
+#   DONT / WONT (refusing a capability) → yellow
+#   SB (subnegotiation exchange)        → cyan
+#   Raw terminal data / catch-all       → light grey
+color telnet.cmd == 0xFD or telnet.cmd == 0xFB => black lightblue
+color telnet.cmd == 0xFE or telnet.cmd == 0xFC => black lightyellow
+color telnet.cmd == 0xFA                        => black lightcyan
+color telnet                                    => black lightgray
+
+# Wireshark-compatible filter aliases.
+# Wireshark exposes the command byte as "telnet.command"; our abbrev uses "telnet.cmd".
+alias telnet.command => telnet.cmd

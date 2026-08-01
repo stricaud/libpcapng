@@ -1,0 +1,129 @@
+# rtsp.posa — Real Time Streaming Protocol (RFC 2326)
+#
+# RTSP is an HTTP-shaped text protocol used to initiate and control real-time
+# media streams; it shares the line-based header syntax of HTTP but has its own
+# method set and version string ("RTSP/1.0" rather than "HTTP/1.x").
+#
+# Two message types share the Object<RTSP> group:
+#
+#   RTSP_RESPONSE — status line "RTSP/1.0 <code> <reason>\r\n" followed by
+#                   CRLF-terminated headers and an optional body.
+#   RTSP_REQUEST  — request line "<METHOD> <URI> RTSP/1.0\r\n" likewise.
+#
+# The group is dispatched on the first field: a response begins with the four
+# bytes "RTSP" (0x52545350), so RTSP_RESPONSE claims those packets; everything
+# else — any recognised method prefix — falls to RTSP_REQUEST via `starts`.
+# A `seek 0` rewinds after the magic check so the full status line is then
+# re-read as the human-readable text it actually is.
+#
+# Headers are parsed as raw CRLF-terminated lines exactly as HTTP does; the
+# blank CRLF that ends the header section is captured as a separate field so
+# the parser does not loop past the boundary into the body.
+
+# ── Response object ───────────────────────────────────────────────────────────
+
+Object<RTSP> RTSP_RESPONSE
+    abbrev "rtsp"
+    col "RTSP"
+
+    # Dispatch: the first four bytes of a response are "RTSP" = 0x52545350.
+    # After the check passes, seek 0 rewinds so the status line is read as text.
+    required uint32 magic = 0x52545350 hex "Magic"
+    seek 0
+
+    required string version     until " "    "Version"
+    required string status_code until " "    "Status Code"
+    required string reason      until "\r\n" "Reason Phrase"
+
+    repeat until "\r\n" as header "Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+
+    required string blank until "\r\n" "End of headers"
+    required payload body "Body"
+
+    info "%s %s" status_code, reason
+
+# ── Request object ────────────────────────────────────────────────────────────
+
+Object<RTSP> RTSP_REQUEST
+    abbrev "rtsp"
+    col "RTSP"
+
+    # The `starts` prefixes include a trailing space so method-like tokens inside
+    # URIs or user-agent strings cannot trigger a false decode. OPTIONS is the one
+    # method whose request-URI may legally be "*" rather than an rtsp:// absolute
+    # URI, so only its method name (plus space) is listed; all other methods
+    # require an absolute URI and the content rules already confirm that.
+    starts "OPTIONS " "DESCRIBE " "ANNOUNCE " "SETUP " "PLAY " "PAUSE "
+           "TEARDOWN " "GET_PARAMETER " "SET_PARAMETER " "RECORD " "REDIRECT "
+
+    required string method  until " "    "Method"
+    required string uri     until " "    "Request URI"
+    required string version until "\r\n" "Version"
+
+    repeat until "\r\n" as header "Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+
+    required string blank until "\r\n" "End of headers"
+    required payload body "Body"
+
+    info "%s %s" method, uri
+
+# ── Port rules (secondary — active only when content rules do not match) ──────
+
+rule tcp.port == 554  => RTSP
+rule tcp.port == 8554 => RTSP
+
+# ── Content rules (primary — port-independent) ────────────────────────────────
+# "RTSP/1.0" identifies responses; method + "rtsp://" avoids false positives
+# on mid-stream body bytes that happen to begin with a short word. GET_PARAMETER
+# and SET_PARAMETER use slightly longer prefixes because they share a prefix
+# with the two-word tokens above them.
+
+rule tcp.content "RTSP/1.0"              => RTSP
+rule tcp.content "OPTIONS rtsp://"       => RTSP
+rule tcp.content "OPTIONS *"             => RTSP
+rule tcp.content "DESCRIBE rtsp://"      => RTSP
+rule tcp.content "ANNOUNCE rtsp://"      => RTSP
+rule tcp.content "SETUP rtsp://"         => RTSP
+rule tcp.content "PLAY rtsp://"          => RTSP
+rule tcp.content "PAUSE rtsp://"         => RTSP
+rule tcp.content "TEARDOWN rtsp://"      => RTSP
+rule tcp.content "GET_PARAMETER rtsp://" => RTSP
+rule tcp.content "SET_PARAMETER rtsp://" => RTSP
+rule tcp.content "RECORD rtsp://"        => RTSP
+rule tcp.content "REDIRECT rtsp://"      => RTSP
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Map Wireshark RTSP dissector field names to the abbrevs emitted here so that
+# display filters written for Wireshark continue to work without modification.
+
+alias rtsp.request        => rtsp.method
+alias rtsp.request.method => rtsp.method
+alias rtsp.request.uri    => rtsp.uri
+alias rtsp.response       => rtsp.status_code
+alias rtsp.response.code  => rtsp.status_code
+alias rtsp.response.phrase => rtsp.reason
+
+# Macro aliases: boolean expressions usable as a single filter term.
+alias rtsp.success        => rtsp.response.code >= 200 && rtsp.response.code < 300
+alias rtsp.error          => rtsp.response.code >= 400
+
+# ── Coloring rules (most specific first) ──────────────────────────────────────
+# RTSP 2xx — stream playing or session established; match Wireshark HTTP-200 green.
+color tcp.content "RTSP/1.0 2" => black lightgreen
+
+# RTSP 3xx — redirect; share the request palette since the client must retry.
+color tcp.content "RTSP/1.0 3" => black lightyellow
+
+# RTSP 4xx / 5xx — errors; classic alert palette.
+color tcp.content "RTSP/1.0 4" => white red
+color tcp.content "RTSP/1.0 5" => white red
+
+# RTSP requests — yellow to signal client-to-server direction.
+color rtsp.method => black lightyellow
+
+# Catch-all: any RTSP frame not matched above (interleaved binary data, etc.).
+color rtsp => white darkblue

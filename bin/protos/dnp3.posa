@@ -1,10 +1,134 @@
-# DNP3 link-layer frame header (IEEE 1815 / IEC 60870-5)
-# TCP port 20000, UDP port 20000. start is always 0x0564.
-# control byte direction: 0x44 = primary→secondary data frame.
+# DNP3 — Distributed Network Protocol 3 (IEEE 1815 / IEC 60870-5)
+#
+# SCADA/ICS protocol used in electric grids, water treatment, oil & gas pipelines.
+# Transport: TCP or UDP port 20000. Detected by fixed magic bytes 0x05 0x64.
+#
+# Frame layers:
+#   Data Link Layer (DLL) — 10-byte header (6 bytes + 2-byte dest/src + 2-byte CRC)
+#   Transport Layer  (TL) — 1 byte: FIR | FIN | 6-bit sequence
+#   Application Layer (AL) — control byte + function code + data objects
+#
+# DLL control byte bit layout:
+#   bit 7   DIR  — 1 when frame originated from master (master→outstation)
+#   bit 6   PRM  — 1 for primary station frames
+#   bit 5   FCB (primary) or DFC (secondary, data flow control)
+#   bit 4   FCV (primary) or reserved (secondary)
+#   bits 3-0 DLL function code:
+#     Primary:   0=ResetLinkStates  1=ResetUserProcess  2=TestLinkStates
+#                3=UserData  4=UnconfirmedUserData  9=RequestLinkStatus
+#     Secondary: 0=ACK  1=NACK  11=LinkStatus  15=NotSupported
+#
+# DLL length field counts payload bytes in the remainder of the frame
+# excluding CRC bytes. Data payload bytes are grouped into 16-byte blocks
+# each followed by a 2-byte CRC-16/DNP; only the header CRC is decoded here.
+
 Object<main> DNP3
-    required uint16 start = 0x0564
-    required uint8  length = 5
-    required uint8  control = 0x44
-    required uint16 dst = 0
-    required uint16 src = 0
-    required uint16 crc = 0
+    abbrev "dnp3"
+    col "DNP3"
+
+    # ── Data Link Layer Header (10 bytes) ─────────────────────────────────────────
+    required uint8     start_lo = 0x05    "Start Byte 0 (0x05)"
+    required uint8     start_hi = 0x64    "Start Byte 1 (0x64)"
+    required uint8     length             "DLL Length"
+    required uint8     control            "DLL Control"
+        bits control dir     7 1  "DIR"
+            0 = Outstation
+            1 = Master
+        bits control prm     6 1  "PRM"
+            0 = Secondary
+            1 = Primary
+        bits control fcb_dfc 5 1  "FCB/DFC"
+        bits control fcv     4 1  "FCV"
+        bits control dl_func 0 4  "DLL Function Code"
+            # Primary station (PRM=1) function codes
+            0  = ResetLinkStates
+            1  = ResetUserProcess
+            2  = TestLinkStates
+            3  = UserData
+            4  = UnconfirmedUserData
+            9  = RequestLinkStatus
+            # Secondary station (PRM=0): value 0=ACK, 1=NACK share codes 0 and 1
+            11 = LinkStatus
+            15 = NotSupported
+    required le_uint16 destination        "Destination Address"
+    required le_uint16 source             "Source Address"
+    required uint16    header_crc         "Header CRC"
+
+    # ── Transport Layer (1 byte, present when DLL carries user data) ──────────────
+    required uint8 transport              "Transport Header"
+        bits transport tfir 7 1  "FIR (First Fragment)"
+        bits transport tfin 6 1  "FIN (Final Fragment)"
+        bits transport tseq 0 6  "Transport Sequence"
+
+    # ── Application Layer (present when DLL carries user data) ───────────────────
+    required uint8 app_control            "AL Control"
+        bits app_control afir 7 1  "FIR (First Fragment)"
+        bits app_control afin 6 1  "FIN (Final Fragment)"
+        bits app_control acon 5 1  "CON (Confirmation Required)"
+        bits app_control auns 4 1  "UNS (Unsolicited)"
+        bits app_control aseq 0 4  "AL Sequence"
+    required uint8 function_code          "AL Function Code"
+        0x00 = Confirm
+        0x01 = Read
+        0x02 = Write
+        0x03 = Select
+        0x04 = Operate
+        0x05 = DirectOperate
+        0x06 = DirectOperateNR
+        0x07 = FreezeReplace
+        0x13 = ColdRestart
+        0x14 = WarmRestart
+        0x17 = InitializeApplication
+        0x1A = DisableUnsolicited
+        0x1B = EnableUnsolicited
+        0x1E = AssignClass
+        0x20 = DelayMeasurement
+        0x81 = Response
+        0x82 = UnsolicitedResponse
+    payload objects "Objects"
+
+    info "[%s] %u→%u %s" dir, source, destination, function_code
+
+
+# ── Content detection (primary, port-independent) ─────────────────────────────
+# Magic bytes 0x05 0x64 are the fixed DLL start sequence; reliable for detection
+# even on non-standard ports (e.g. tunnelled SCADA or alternate TCP ports).
+rule tcp.content "\x05\x64" => DNP3
+rule udp.content "\x05\x64" => DNP3
+
+# ── Port bindings (secondary hints) ──────────────────────────────────────────
+rule tcp.port == 20000 => DNP3
+rule udp.port == 20000 => DNP3
+
+
+# ── Coloring rules ────────────────────────────────────────────────────────────
+# Cold Restart / Warm Restart — potentially disruptive to field devices;
+# seeing these unexpectedly is a SCADA security/reliability concern.
+color dnp3.function_code == 0x13 || dnp3.function_code == 0x14 => white red
+
+# Select / Operate / Direct Operate / Direct Operate No Response —
+# control commands that actuate field equipment.
+color dnp3.function_code == 0x03 || dnp3.function_code == 0x04 || dnp3.function_code == 0x05 || dnp3.function_code == 0x06 => black lightyellow
+
+# Enable / Disable Unsolicited — configuration commands changing reporting behaviour.
+color dnp3.function_code == 0x1A || dnp3.function_code == 0x1B => black lightyellow
+
+# Solicited Response — standard outstation reply to a master request.
+color dnp3.function_code == 0x81 => black lightgreen
+
+# Unsolicited Response — outstation pushing data to master without a poll.
+color dnp3.function_code == 0x82 => white darkblue
+
+# Catch-all — Read, Write, Confirm, Assign Class and other management traffic.
+color dnp3 => white darkgray
+
+
+# ── Wireshark-compatible field aliases ────────────────────────────────────────
+# These map Wireshark's dnp3 dissector field paths to the names defined above
+# so saved display filters imported from Wireshark continue to work.
+alias dnp3.ctl.dir  => dnp3.dir
+alias dnp3.ctl.prm  => dnp3.prm
+alias dnp3.al.func  => dnp3.function_code
+alias dnp3.src      => dnp3.source
+alias dnp3.dst      => dnp3.destination
+alias dnp3.len      => dnp3.length

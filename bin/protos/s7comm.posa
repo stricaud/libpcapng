@@ -1,0 +1,148 @@
+# s7comm.posa — Siemens S7 Communication Protocol
+# Encapsulation stack: RFC 1006 TPKT -> ISO 8073 COTP -> S7comm
+#
+# Deployed on Siemens SIMATIC PLCs: S7-300, S7-400, S7-1200, S7-1500.
+# Primary ICS/SCADA protocol for Siemens factory automation and process control.
+#
+# Layer structure:
+#   TPKT (RFC 1006)  : 4-byte transport header (version=3, length field)
+#   COTP (ISO 8073)  : ISO class-0 transport; PDU types 0xE0 CR, 0xD0 CC, 0xF0 DT
+#   S7comm           : Siemens proprietary request/response protocol (magic 0x32)
+#
+# S7comm message types:
+#   0x01 = Job Request   (PLC read/write/control commands from HMI or SCADA)
+#   0x02 = Ack           (intermediate acknowledge)
+#   0x03 = Ack-Data      (response carrying data back to the requester)
+#   0x07 = Userdata      (diagnostics, block-list, SZL reads, time sync)
+#
+# Common function codes (parameters[0] of the S7 payload):
+#   0x04 Read Variable, 0x05 Write Variable
+#   0x1A Request Download, 0x1B Download Block, 0x1C Download Ended
+#   0x1D Start Upload, 0x1E Upload, 0x1F End Upload
+#   0x28 PLC Control, 0x29 PLC Stop
+#
+# Detection:
+#   Primary:  TPKT version byte 0x03 at offset 0 (covers all ISO-TSAP traffic)
+#             COTP DT Data unit 0x02 0xF0 0x80 at offset 4 (S7comm DT frames only)
+#   Secondary: TCP port 102 (ISO-TSAP standard port)
+
+Object<main> S7comm
+    abbrev "s7comm"
+    col "S7COMM"
+
+    # ── TPKT Header (RFC 1006) — 4 bytes ─────────────────────────────────────
+    # version is always 3.  reserved is always 0.
+    # tpkt_length covers the entire PDU including this 4-byte header.
+    required uint8  version       "TPKT Version"
+    required uint8  tpkt_reserved "TPKT Reserved"
+    required uint16 tpkt_length   "TPKT Length"
+
+    # ── COTP Header (ISO 8073 / RFC 905) ─────────────────────────────────────
+    # cotp_length = header byte count minus 1 (a value of 2 means 3 header bytes).
+    # pdu_type selects the COTP PDU class; only DT Data (0xF0) carries S7comm.
+    required uint8  cotp_length  "COTP Header Length"
+    required uint8  pdu_type     "COTP PDU Type"
+        0xe0 = "CR Connection Request"
+        0xd0 = "CC Connection Confirm"
+        0xf0 = "DT Data"
+
+    # last_data_unit byte: bit 7 = end-of-transmission flag, bits 6-0 = seq number.
+    # For S7comm DT frames this byte is always 0x80 (last unit, seq 0).
+    required uint8  last_data_unit "Last Data Unit Byte"
+    bits last_data_unit last_unit  7 1 "Last Data Unit (EOT)"
+    bits last_data_unit eot_seq    0 7 "EOT Sequence Number"
+
+    # ── S7comm Payload — present only when COTP PDU Type = DT Data (0xF0) ───
+    # The S7 protocol_id magic byte 0x32 is always the first byte of the payload.
+    # message_type selects the direction and class of the PDU.
+    # seq_num correlates Job Requests with their Ack-Data responses.
+    # data_length = byte count of the parameter block that starts at offset +10.
+    # error_length = byte count of the data block that follows the parameter block.
+    # function_code = parameters[0]; determines the operation being requested.
+    when pdu_type == 0xf0:
+        required uint8  protocol_id   "S7 Protocol ID"
+        required uint8  message_type  "Message Type"
+            0x01 = "Job Request"
+            0x02 = "Ack"
+            0x03 = "Ack-Data"
+            0x07 = "Userdata"
+        required uint16 s7_reserved   "Reserved"
+        required uint16 seq_num       "Sequence Number"
+        required uint16 data_length   "Parameter Length"
+        required uint16 error_length  "Data Length"
+        required uint8  function_code "Function Code"
+            0x04 = "Read Variable"
+            0x05 = "Write Variable"
+            0x1a = "Request Download"
+            0x1b = "Download Block"
+            0x1c = "Download Ended"
+            0x1d = "Start Upload"
+            0x1e = "Upload"
+            0x1f = "End Upload"
+            0x28 = "PLC Control"
+            0x29 = "PLC Stop"
+        payload s7_data "S7 Payload"
+    else:
+        payload cotp_data "COTP Data"
+
+    info "%s  %s  %s  seq=%u" pdu_type, message_type, function_code, seq_num
+
+
+# ── Content Detection Rules (primary — port-independent) ──────────────────────
+# Listed before port rules; content rules fire first on any TCP stream.
+#
+# Rule 1: TPKT version byte 0x03 followed by reserved byte 0x00.
+#         Unique to RFC 1006 TPKT framing; covers all ISO-TSAP traffic on any port.
+rule tcp.content "\x03\x00" => S7comm
+
+# Rule 2: COTP DT Data PDU at offset 4 within a TPKT frame.
+#         Bytes: cotp_length=0x02, pdu_type=0xF0, last_data_unit=0x80 (EOT, seq 0).
+#         Precisely identifies S7comm data frames; avoids matching CR/CC frames only.
+rule tcp.content@4 "\x02\xf0\x80" => S7comm
+
+# ── Port Rule (secondary — fallback hint) ─────────────────────────────────────
+# TCP 102 is the IANA-assigned port for ISO-TSAP; listed after content rules.
+rule tcp.port == 102 => S7comm
+
+
+# ── Coloring Rules ────────────────────────────────────────────────────────────
+# Most specific (highest operational priority) first.
+
+# PLC Stop — critical: halts the PLC; highest severity, white on red
+color s7comm.function_code == 0x29 => white red
+
+# PLC Control — high severity: start/stop sequences, mode changes
+color s7comm.function_code == 0x28 => black orange
+
+# Write Variable — data modification; yellow signals writes (caution)
+color s7comm.function_code == 0x05 => black lightyellow
+
+# Read Variable — most common operation; blue for reads (informational)
+color s7comm.function_code == 0x04 => black lightblue
+
+# Upload operations (reading PLC program blocks from PLC to master)
+color s7comm.function_code == 0x1d => black lightblue
+color s7comm.function_code == 0x1e => black lightblue
+color s7comm.function_code == 0x1f => black lightblue
+
+# Download operations (writing PLC program blocks from master to PLC)
+color s7comm.function_code == 0x1a => black lightyellow
+color s7comm.function_code == 0x1b => black lightyellow
+color s7comm.function_code == 0x1c => black lightyellow
+
+# COTP connection setup — green: session establishment
+color s7comm.pdu_type == 0xe0 => black lightgreen
+color s7comm.pdu_type == 0xd0 => black lightgreen
+
+# Protocol catch-all — dark blue: any S7comm frame not matched above
+color s7comm => white darkblue
+
+
+# ── Wireshark-Compatible Aliases ──────────────────────────────────────────────
+# Map Wireshark s7comm dissector field names to POSA abbrevs so that existing
+# display filters and coloring rules continue to work without modification.
+
+alias s7comm.pdu_type     => s7comm.pdu_type
+alias s7comm.message_type => s7comm.message_type
+alias s7comm.function     => s7comm.function_code
+alias s7comm.seq_num      => s7comm.seq_num

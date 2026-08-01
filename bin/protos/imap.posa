@@ -1,0 +1,211 @@
+# imap.posa — Internet Message Access Protocol (RFC 3501)
+#
+# IMAP is a line-based text protocol for remote mailbox access.
+# Each PDU is one CR LF-terminated line.  Three line shapes share the wire:
+#
+#   *  KEYWORD data CRLF   untagged server response — status, data, or greeting
+#   +  text CRLF           server continuation request (literal / auth data needed)
+#   TAG COMMAND args CRLF  tagged client command or tagged server status (OK/NO/BAD)
+#
+# For untagged messages the first token after * is either a keyword (OK, BYE,
+# CAPABILITY, FLAGS, SEARCH, LIST, NAMESPACE, …) or a decimal sequence number
+# (EXISTS, RECENT, EXPUNGE, FETCH use  "* n KEYWORD data"  on the wire).
+# In the second form the `keyword` field captures the sequence number, and the
+# actual keyword plus its attributes appear in `data`; content-based color rules
+# below handle that case independently of the field value.
+#
+# Runs on TCP 143 (plain IMAP) and TCP 993 (IMAPS — TLS-wrapped).  IMAPS packets
+# are opaque to content rules; port 993 is the secondary hint that keeps the
+# stream labelled.  Plain IMAP on non-standard ports is detected via the content
+# rules first.
+
+Object<main> IMAP
+    abbrev "imap"
+    col "IMAP"
+
+    # The first whitespace-delimited token identifies the line type.
+    # Tagged lines have a variable-length client-chosen tag ("A001", "1", etc.)
+    # so there is no fixed prefix to dispatch on; the when/else chain below
+    # handles all three variants after reading this shared token.
+    required string tag until " " "Tag"
+
+    when tag == "*":
+        # Untagged server response: "* KEYWORD data\r\n"
+        # When a decimal sequence number precedes the keyword (EXISTS, RECENT,
+        # EXPUNGE, FETCH), `keyword` holds the number and `data` holds the rest.
+        required string keyword until " \r" "Keyword / Seq"
+            "OK"         = "OK"
+            "NO"         = "NO"
+            "BAD"        = "BAD"
+            "BYE"        = "BYE"
+            "PREAUTH"    = "PREAUTH"
+            "CAPABILITY" = "CAPABILITY"
+            "FLAGS"      = "FLAGS"
+            "LIST"       = "LIST"
+            "LSUB"       = "LSUB"
+            "SEARCH"     = "SEARCH"
+            "STATUS"     = "STATUS"
+            "NAMESPACE"  = "NAMESPACE"
+            "QUOTA"      = "QUOTA"
+            "QUOTAROOT"  = "QUOTAROOT"
+            "ACL"        = "ACL"
+            "MYRIGHTS"   = "MYRIGHTS"
+            "LISTRIGHTS" = "LISTRIGHTS"
+            "SORT"       = "SORT"
+            "THREAD"     = "THREAD"
+        required string data until "\r\n" "Response Data"
+    else:
+        when tag == "+":
+            # Server continuation request: "+ text\r\n"
+            # Server is waiting for a client literal or the next AUTHENTICATE exchange.
+            required string continuation until "\r\n" "Continuation Text"
+        else:
+            # Tagged line: "A001 COMMAND-OR-STATUS args\r\n"
+            # The `until " \r"` delimiter set lets the field terminate at a space
+            # (command with arguments) or at CR (command with no arguments, e.g. NOOP).
+            required string command until " \r" "Command"
+                # Server tagged status responses
+                "OK"           = "OK"
+                "NO"           = "NO"
+                "BAD"          = "BAD"
+                # Client commands — RFC 3501 §6
+                "CAPABILITY"   = "CAPABILITY"
+                "NOOP"         = "NOOP"
+                "LOGOUT"       = "LOGOUT"
+                "AUTHENTICATE" = "AUTHENTICATE"
+                "LOGIN"        = "LOGIN"
+                "STARTTLS"     = "STARTTLS"
+                "SELECT"       = "SELECT"
+                "EXAMINE"      = "EXAMINE"
+                "CREATE"       = "CREATE"
+                "DELETE"       = "DELETE"
+                "RENAME"       = "RENAME"
+                "SUBSCRIBE"    = "SUBSCRIBE"
+                "UNSUBSCRIBE"  = "UNSUBSCRIBE"
+                "LIST"         = "LIST"
+                "LSUB"         = "LSUB"
+                "STATUS"       = "STATUS"
+                "APPEND"       = "APPEND"
+                "CHECK"        = "CHECK"
+                "CLOSE"        = "CLOSE"
+                "EXPUNGE"      = "EXPUNGE"
+                "SEARCH"       = "SEARCH"
+                "FETCH"        = "FETCH"
+                "STORE"        = "STORE"
+                "COPY"         = "COPY"
+                "UID"          = "UID"
+                # Extensions
+                "IDLE"         = "IDLE"
+                "DONE"         = "DONE"
+                "NAMESPACE"    = "NAMESPACE"
+                "SETACL"       = "SETACL"
+                "DELETEACL"    = "DELETEACL"
+                "GETACL"       = "GETACL"
+                "MYRIGHTS"     = "MYRIGHTS"
+                "SETQUOTA"     = "SETQUOTA"
+                "GETQUOTA"     = "GETQUOTA"
+                "GETQUOTAROOT" = "GETQUOTAROOT"
+                "SORT"         = "SORT"
+                "THREAD"       = "THREAD"
+                "MOVE"         = "MOVE"
+                "COMPRESS"     = "COMPRESS"
+                "ENABLE"       = "ENABLE"
+                "UNSELECT"     = "UNSELECT"
+            required string arguments until "\r\n" "Arguments"
+
+    # info: missing fields collapse — each branch produces a tidy summary:
+    #   untagged   "* OK [CAPABILITY IMAP4rev1] Dovecot ready"
+    #   seq-prefix "* 3 FETCH (FLAGS (\Seen))"
+    #   tagged cmd "A001 LOGIN user@example.com secret"
+    #   tagged ok  "A001 OK [CAPABILITY IMAP4rev1] Logged in"
+    #   continu    "+ go ahead"
+    info "%s %s %s %s %s %s" tag, keyword, command, data, arguments, continuation
+
+
+# ── Content detection (primary — fires on any port) ───────────────────────────
+# "* OK" and "* BYE" cover the server greeting and sign-off; "* PREAUTH" covers
+# pre-authenticated server greetings.  "+ " catches AUTHENTICATE exchanges.
+# "A001 " is the most common tagged-command prefix seen in the wild.
+
+rule tcp.content "* OK"      => IMAP
+rule tcp.content "* BYE"     => IMAP
+rule tcp.content "* NO"      => IMAP
+rule tcp.content "* BAD"     => IMAP
+rule tcp.content "* PREAUTH" => IMAP
+rule tcp.content "+ "        => IMAP
+rule tcp.content "A001 "     => IMAP
+
+# ── Port bindings (secondary — used when content rules did not match) ─────────
+# TCP 143 — plain IMAP.  TCP 993 — IMAPS (TLS-wrapped, content opaque).
+
+rule tcp.port == 143 => IMAP
+rule tcp.port == 993 => IMAP
+
+# ── Coloring rules (most-specific first) ──────────────────────────────────────
+
+# FETCH and mailbox-data responses — green (desired mail data arriving)
+color imap.keyword == "FETCH"     => black lightgreen
+color imap.keyword == "SEARCH"    => black lightgreen
+color imap.keyword == "FLAGS"     => black lightgreen
+color imap.keyword == "STATUS"    => black lightgreen
+color imap.keyword == "LIST"      => black lightgreen
+color imap.keyword == "LSUB"      => black lightgreen
+color imap.keyword == "NAMESPACE" => black lightgreen
+color imap.keyword == "SORT"      => black lightgreen
+color imap.keyword == "THREAD"    => black lightgreen
+
+# Sequence-number-prefixed messages (* n KEYWORD): use content matching because
+# imap.keyword holds the number rather than the response word in these cases.
+color tcp.content " FETCH ("      => black lightgreen
+color tcp.content " EXISTS\r\n"   => black lightgreen
+color tcp.content " RECENT\r\n"   => black lightgreen
+color tcp.content " EXPUNGE\r\n"  => black lightgray
+
+# Tagged OK and server greeting / PREAUTH — dark blue (session established)
+color imap.command == "OK"        => white darkblue
+color imap.keyword == "OK"        => white darkblue
+color imap.keyword == "PREAUTH"   => white darkblue
+
+# Error and disconnect responses — white on red (alert)
+color imap.command == "NO"        => white red
+color imap.command == "BAD"       => white red
+color imap.keyword == "NO"        => white red
+color imap.keyword == "BAD"       => white red
+color imap.keyword == "BYE"       => white red
+
+# Authentication and security-sensitive client commands — yellow
+color imap.command == "LOGIN"      => black lightyellow
+color imap.command == "AUTHENTICATE" => black lightyellow
+color imap.command == "STARTTLS"   => black lightyellow
+
+# Server continuation (waiting for literal data or auth step) — yellow
+color imap.tag == "+"              => black lightyellow
+
+# CAPABILITY advertisement — light blue (informational)
+color imap.keyword == "CAPABILITY" => black lightblue
+
+# Catch-all: any IMAP frame not matched above
+color imap                         => white darkblue
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Map Wireshark IMAP dissector field names to the corresponding POSA fields so
+# that display filters written for Wireshark continue to work unchanged.
+
+alias imap.tag             => imap.tag
+alias imap.command         => imap.command
+alias imap.response        => imap.keyword
+alias imap.capability      => imap.data
+alias imap.request.command => imap.command
+alias imap.request.tag     => imap.tag
+alias imap.response.tag    => imap.tag
+alias imap.response.status => imap.command
+alias imap.response.code   => imap.data
+alias imap.flags           => imap.data
+alias imap.search.results  => imap.data
+
+# Convenience macro aliases for common filter expressions.
+alias imap.is_request      => imap.command
+alias imap.is_response     => imap.keyword
+alias imap.error           => imap.command == "NO" || imap.command == "BAD" || imap.keyword == "NO" || imap.keyword == "BAD"
+alias imap.auth            => imap.command == "LOGIN" || imap.command == "AUTHENTICATE"
+alias imap.encrypted       => imap.command == "STARTTLS" || imap.keyword == "PREAUTH"

@@ -1,0 +1,108 @@
+# xmpp.posa — Extensible Messaging and Presence Protocol (RFC 6120, RFC 7590)
+#
+# Covers three transport configurations:
+#   TCP 5222 — XMPP client-to-server (C2S), plain or STARTTLS
+#   TCP 5269 — XMPP server-to-server (S2S) federation
+#   TCP 5280 — BOSH HTTP-binding (XEP-0206), plain HTTP
+#   TCP 5281 — BOSH HTTP-binding (XEP-0206), over HTTPS / TLS
+#
+# XMPP is a streaming XML protocol.  Each TCP segment may carry one or more
+# complete XML stanzas, or a fragment of one.  This dissector makes a best-effort
+# pass over the leading element of each segment:
+#
+#   "stanza"  reads the opening element name up to the first space, giving the
+#             stanza type indicator: <?xml, <stream:stream, <iq, <message, etc.
+#
+#   "attrs"   reads everything from that space up to the closing ">", capturing
+#             all XML attributes on one line.
+#
+#   "body"    holds the rest of the payload (further stanzas, TLS data, etc.)
+#             as an opaque blob for higher-level reassembly.
+#
+# Self-closing tags with no attribute space (e.g. <presence/>) and closing tags
+# (</stream:stream>) will not split cleanly at the space boundary; the full tag
+# text lands in "stanza" and "attrs" may be empty.  Content rules still identify
+# those segments as XMPP and the catch-all color rule applies.
+#
+# Stream opening (client to server):
+#   <?xml version='1.0'?>
+#   <stream:stream xmlns:stream='http://etherx.jabber.org/streams'
+#                  xmlns='jabber:client' to='example.com' version='1.0'>
+#
+# Common stanzas inside the stream:
+#   <iq type="get|set|result|error" from="…" to="…" id="…">   info/query
+#   <message type="chat|groupchat|error" from="…" to="…">      instant messages
+#   <presence type="available|unavailable|subscribe|…">         availability
+
+Object<main> XMPP
+    abbrev "xmpp"
+    col "XMPP"
+
+    # Element tag name — the stanza type indicator.
+    # Typical values: <?xml  <stream:stream  <iq  <message  <presence
+    # Closing tags:   </stream:stream>  (no space; full tag lands here)
+    required string stanza until " "   "Stanza"
+
+    # Remaining XML attributes up to the closing ">" of the opening element.
+    # Example:  type="get" from="user@example.com" to="example.com" id="aabbcc">
+    required string attrs  until ">"   "Attributes"
+
+    # Rest of the TCP segment — subsequent stanzas, stream body, or TLS data.
+    payload body                       "Stream Body"
+
+    info "%s %s" stanza, attrs
+
+# ── Content-based detection (PRIMARY — protocol recognised on any TCP port) ───
+# Ordered from most specific (stream-level) to stanza-level indicators.
+rule tcp.content "<?xml"          => XMPP
+rule tcp.content "<stream:stream" => XMPP
+rule tcp.content "<iq "           => XMPP
+rule tcp.content "<message "      => XMPP
+rule tcp.content "<presence"      => XMPP
+
+# ── Port-based rules (SECONDARY — fallback when stream start is not captured) ─
+rule tcp.port == 5222 => XMPP   # RFC 6120 — XMPP client-to-server
+rule tcp.port == 5269 => XMPP   # RFC 7590 — XMPP server-to-server federation
+rule tcp.port == 5280 => XMPP   # XEP-0206 — BOSH, plain HTTP
+rule tcp.port == 5281 => XMPP   # XEP-0206 — BOSH, HTTPS / TLS
+
+# ── Coloring rules (most specific first) ──────────────────────────────────────
+
+# Stream-level errors — white on red (highest priority)
+color xmpp.stanza == "<stream:error"       => white red
+
+# Stanza-level error attribute (iq/message/presence with type="error")
+color tcp.content "type=\"error\""         => white red
+
+# Presence stanzas — availability and subscription state — white on dark blue
+color xmpp.stanza == "<presence"           => white darkblue
+
+# Message stanzas — instant messages and groupchat — black on light green
+color xmpp.stanza == "<message"            => black lightgreen
+
+# IQ stanzas — info/query (get / set / result) — black on light yellow
+color xmpp.stanza == "<iq"                 => black lightyellow
+
+# Stream-level and negotiation frames — light gray (session management)
+color xmpp.stanza == "<stream:stream"      => black lightgray
+color xmpp.stanza == "<stream:features"    => black lightgray
+color xmpp.stanza == "<?xml"              => black lightgray
+
+# Catch-all — roster pushes, auth steps, and any unclassified XMPP frame
+color xmpp                                 => white darkgray
+
+# ── Wireshark-compatible aliases ───────────────────────────────────────────────
+# Maps Wireshark XMPP and legacy jabber.* display filter field names to the
+# POSA fields emitted by this dissector.  jabber.* names are used by Wireshark's
+# built-in XMPP dissector; xmpp.* aliases reflect modern filter conventions.
+# Note: xmpp.type / xmpp.from / xmpp.to are embedded within the attrs string
+# and cannot be individually extracted without a full XML attribute parser.
+alias xmpp.stanza       => xmpp.stanza   # opening element tag name
+alias xmpp.type         => xmpp.attrs    # type="…" attribute (within attrs)
+alias xmpp.from         => xmpp.attrs    # from="…" attribute (within attrs)
+alias xmpp.to           => xmpp.attrs    # to="…"   attribute (within attrs)
+alias jabber.tag        => xmpp.stanza   # legacy Wireshark jabber.* namespace
+alias jabber.attrs      => xmpp.attrs
+alias jabber.type       => xmpp.attrs
+alias jabber.from       => xmpp.attrs
+alias jabber.to         => xmpp.attrs

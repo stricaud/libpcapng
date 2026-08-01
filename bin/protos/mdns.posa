@@ -1,0 +1,330 @@
+# mdns.posa — Multicast DNS (RFC 6762) and DNS-SD (RFC 6763)
+#
+# mDNS carries the standard DNS wire format (RFC 1035) on UDP port 5353,
+# sent to the multicast group 224.0.0.251 (IPv4) or FF02::FB (IPv6).
+# DNS-SD (RFC 6763) layers service discovery on top of mDNS using PTR, SRV,
+# and TXT records under the .local. pseudo-domain.
+#
+# Wire-format differences from unicast DNS:
+#
+#   id == 0x0000       Transaction ID is always zero in queries (and usually
+#                      zero in responses too — unlike unicast DNS).
+#   QU bit            Bit 15 of QCLASS in questions requests a unicast reply;
+#                     useful on networks where multicast is expensive or lossy.
+#   Cache-flush bit   Bit 15 of RRCLASS in answers asks receivers to flush
+#                     their cached records for that name/type/class tuple.
+#   AA always set     In responses, Authoritative Answer is always 1.
+#
+# DNS-SD well-known types (under _<service>._<proto>.local.):
+#   PTR   Service browse: maps service type to instance name
+#   SRV   Service resolve: instance name → host + port
+#   TXT   Service metadata: key=value pairs
+#   A     Address record for the resolved host
+#   AAAA  IPv6 address record
+#
+# Field detection strategy:
+#   Content rules capture the fixed bytes in the mDNS header that distinguish
+#   this protocol from arbitrary UDP. Port 5353 is added last as a fallback.
+#
+# Pieces of POSA used here:
+#
+#   dnsname              label-encoded name with 0xC0 compression pointers
+#   required TYPE name mask 0x7fff
+#                        mask out the top bit before storing the value
+#   bits srcfield n sh w extract a bitfield from an already-parsed field
+#   scope rdlength       bound rdata parsing to rdlength bytes (unknown types
+#                        still leave the walk in the right place)
+#   when type == N:      parse rdata according to the record type
+#   repeat count as item one subtree per record, count from a header field
+#   repeat until end as  loop until the enclosing scope is exhausted
+#   label "..." f, …     title each repeated subtree from its fields
+#   include Object       inline another object's fields into this one
+
+# ── mDNS Resource Record ─────────────────────────────────────────────────────
+# Defined before the main object so the three record sections can `include` it.
+# The cache-flush bit (bit 15 of RRCLASS) is extracted separately; the stored
+# class value is masked to 15 bits so comparisons against IN = 1 always work.
+
+Object<main> MDNS_RR
+    abbrev "mdns"
+
+    required dnsname name "Name"
+    required uint16 type "Type"
+        A     = 1
+        NS    = 2
+        CNAME = 5
+        SOA   = 6
+        PTR   = 12
+        HINFO = 13
+        MX    = 15
+        TXT   = 16
+        AAAA  = 28
+        SRV   = 33
+        OPT   = 41
+        NSEC  = 47
+        HTTPS = 65
+        ANY   = 255
+    required uint16 class mask 0x7fff "Class"
+        IN  = 1
+        CH  = 3
+        ANY = 255
+    # Cache-flush: set by a responder to signal that all peer caches for this
+    # <name, type, class> tuple should be flushed before the new record is stored.
+    bits class flush 15 1 "Cache flush"
+        No flush = 0
+        Flush    = 1
+    required uint32 ttl "Time to live"
+    required uint16 rdlength "Data length"
+
+    scope rdlength
+        when type == 1:
+            required ip4 rdata "Address"
+        when type == 28:
+            required ip6 rdata "Address"
+        when type == 12:
+            # PTR: DNS-SD uses these to enumerate service instances.
+            # e.g. _http._tcp.local. PTR mydevice._http._tcp.local.
+            required dnsname rdata "Domain name"
+        when type == 5:
+            required dnsname rdata "CNAME"
+        when type == 2:
+            required dnsname rdata "Name server"
+        when type == 15:
+            required uint16 preference "Preference"
+            required dnsname rdata "Mail exchange"
+        when type == 33:
+            # SRV: resolves a service instance to host + port.
+            # priority / weight guide client selection among multiple instances.
+            required uint16 priority "Priority"
+            required uint16 weight "Weight"
+            required uint16 port "Port"
+            required dnsname rdata "Target"
+        when type == 6:
+            required dnsname rdata "Primary name server"
+            required dnsname rname "Responsible mailbox"
+            required uint32 serial "Serial"
+            required uint32 refresh "Refresh"
+            required uint32 retry "Retry"
+            required uint32 expire "Expire"
+            required uint32 minimum "Minimum TTL"
+        when type == 16:
+            # TXT: DNS-SD metadata — length-prefixed key=value strings with no
+            # count, so we loop until the rdata scope is exhausted.
+            repeat until end as txt
+                label "%s" rdata
+                required uint8 txtlen "Length"
+                required str[txtlen] rdata "Text"
+        when type == 41:
+            # OPT: EDNS0 options pseudo-RR; treat as opaque.
+            required payload rdata "Options"
+        when type == 47:
+            required dnsname rdata "Next domain name"
+        when type == 65:
+            # HTTPS / SVCB: treat rdata as raw bytes until a full parser exists.
+            required payload rdata "HTTPS parameters"
+
+# ── mDNS message ─────────────────────────────────────────────────────────────
+
+Object<main> mDNS
+    abbrev "mdns"
+    col "mDNS"
+
+    # Header — identical to DNS.  In mDNS queries the id is always 0x0000;
+    # a non-zero id signals a legacy unicast DNS query tunnelled over port 5353.
+    required uint16 id "Transaction ID"
+    required uint16 flags "Flags"
+        bits flags qr      15 1 "Response"
+            Query    = 0
+            Response = 1
+        bits flags opcode  11 4 "Opcode"
+            QUERY  = 0
+            STATUS = 2
+            NOTIFY = 4
+            UPDATE = 5
+        bits flags aa      10 1 "Authoritative"
+            Non-authoritative = 0
+            Authoritative     = 1
+        bits flags tc       9 1 "Truncated"
+            Not truncated = 0
+            Truncated     = 1
+        bits flags rd       8 1 "Recursion desired"
+        bits flags ra       7 1 "Recursion available"
+        bits flags z        6 1 "Reserved"
+        bits flags ad       5 1 "Answer authenticated"
+        bits flags cd       4 1 "Non-authenticated data OK"
+        bits flags rcode    0 4 "Reply code"
+            NoError  = 0
+            FormErr  = 1
+            ServFail = 2
+            NXDomain = 3
+            NotImp   = 4
+            Refused  = 5
+    required uint16 questions  "Questions"
+    required uint16 answers    "Answer RRs"
+    required uint16 authority  "Authority RRs"
+    required uint16 additional "Additional RRs"
+
+    # ── Questions ─────────────────────────────────────────────────────────────
+    # Each question carries a name, a type, and a class.  The QU bit (bit 15 of
+    # QCLASS) requests a unicast reply; it is separated from the class value by
+    # masking.  DNS-SD queries typically ask for PTR records of the form
+    # _<service>._tcp.local. or _<service>._udp.local.
+    repeat questions as query "Queries"
+        label "%s: type %s, class %s" qname, qtype, qclass
+        required dnsname qname "Name"
+        required uint16 qtype "Type"
+            A     = 1
+            NS    = 2
+            CNAME = 5
+            SOA   = 6
+            PTR   = 12
+            HINFO = 13
+            MX    = 15
+            TXT   = 16
+            AAAA  = 28
+            SRV   = 33
+            OPT   = 41
+            NSEC  = 47
+            HTTPS = 65
+            ANY   = 255
+        required uint16 qclass mask 0x7fff "Class"
+            IN   = 1
+            CH   = 3
+            NONE = 254
+            ANY  = 255
+        # QU bit: if set the sender prefers a unicast reply (reduces multicast
+        # traffic when the answer is already in a peer's cache).
+        bits qclass qu 15 1 "QU (unicast response preferred)"
+            Multicast = 0
+            Unicast   = 1
+
+    # ── Answers ───────────────────────────────────────────────────────────────
+    # DNS-SD responses include PTR → SRV + TXT → A/AAAA, often in a single
+    # packet.  Each record is parsed via the shared MDNS_RR object.
+    repeat answers as answer "Answers"
+        label "%s: type %s, class %s, %s" name, type, class, rdata
+        include MDNS_RR
+
+    # ── Authority section ─────────────────────────────────────────────────────
+    repeat authority as authority_rr "Authoritative nameservers"
+        label "%s: type %s, class %s, %s" name, type, class, rdata
+        include MDNS_RR
+
+    # ── Additional records ────────────────────────────────────────────────────
+    # DNS-SD frequently piggybacks the SRV, TXT, and A records in the additional
+    # section alongside a PTR response, enabling one-shot service resolution.
+    repeat additional as additional_rr "Additional records"
+        label "%s: type %s, class %s, %s" name, type, class, rdata
+        include MDNS_RR
+
+    # Info column: show direction, the query type+name (from the questions
+    # section), and the answer type+data (from the answers section).  Fields from
+    # repeat blocks expand to the last value seen; absent fields expand to nothing
+    # so gaps close automatically, keeping the column readable.
+    info "%s %s %s %s %s" qr, qtype, qname, type, rdata
+
+# ── Content rules (primary — fire before port rules) ─────────────────────────
+# mDNS queries always start with a zero transaction ID (bytes 0-1 = 0x0000).
+# Pairing this with port 5353 gives high confidence with low overhead, but the
+# content rule alone is listed first so non-standard-port mDNS is still caught.
+#
+# The second rule looks four bytes deeper: zero flags (0x0000 = standard query)
+# plus a one-question count (0x0001) starting at offset 2 — a pattern that is
+# extremely common in mDNS probes and is vanishingly rare on other protocols.
+#
+# The third rule targets offset 4 only (question count = 1) as a lighter fallback.
+#
+# mDNS responses set the QR + AA bits (bytes 2-3 ≈ 0x8400); the fourth rule
+# catches those packets so the mDNS decoder is preferred over a plain DNS decode
+# on port 5353.
+
+rule udp.content "\x00\x00"            => mDNS
+rule udp.content@2 "\x00\x00\x00\x01" => mDNS
+rule udp.content@4 "\x00\x01"         => mDNS
+rule udp.content@2 "\x84\x00"         => mDNS
+
+# ── Port rule (secondary — fallback when content rules do not match) ──────────
+rule udp.port == 5353 => mDNS
+
+# ── Coloring rules (most specific first) ─────────────────────────────────────
+# Error responses: RCODE non-zero — always shown in alert palette.
+color mdns.rcode > 0  => yellow red
+
+# PTR records: DNS-SD service browsing (query or answer).  Yellow matches the
+# "request / browse" convention — the client is asking what is out there.
+color mdns.type == 12 => black lightyellow
+
+# SRV records: service instance resolution — the definitive answer that delivers
+# a hostname and port.  Green matches the "response" convention.
+color mdns.type == 33 => black lightgreen
+
+# A / AAAA records: address resolution, the final step of DNS-SD.  Blue signals
+# network-layer information distinct from the service-discovery layer above.
+color mdns.type == 1  => black lightblue
+color mdns.type == 28 => black lightblue
+
+# TXT records: application metadata (key=value pairs).  Gray de-emphasises these
+# relative to the name/address records that matter more for diagnosis.
+color mdns.type == 16 => black lightgray
+
+# Catch-all: any mDNS frame not matched by a type rule above.
+color mdns            => white darkblue
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Wireshark dissects mDNS through its DNS dissector, so its field names all live
+# under the "dns" namespace.  The aliases below let display filters written for
+# Wireshark continue to work without modification.
+
+# Query fields
+alias dns.qry.name      => mdns.qname
+alias dns.qry.type      => mdns.qtype
+alias dns.qry.class     => mdns.qclass
+
+# Answer / response fields
+alias dns.resp.name     => mdns.name
+alias dns.a             => mdns.rdata
+alias dns.aaaa          => mdns.rdata
+alias dns.cname         => mdns.rdata
+alias dns.ptr.domain_name => mdns.rdata
+alias dns.ns            => mdns.rdata
+
+# SRV-specific sub-fields
+alias dns.srv.target    => mdns.rdata
+alias dns.srv.port      => mdns.port
+alias dns.srv.priority  => mdns.priority
+alias dns.srv.weight    => mdns.weight
+
+# TXT records
+alias dns.txt           => mdns.rdata
+
+# Record metadata
+alias dns.resp.type     => mdns.type
+alias dns.resp.ttl      => mdns.ttl
+alias dns.resp.len      => mdns.rdlength
+alias dns.resp.class    => mdns.class
+
+# Flags
+alias dns.flags.response  => mdns.qr
+alias dns.flags.opcode    => mdns.opcode
+alias dns.flags.aa        => mdns.aa
+alias dns.flags.tc        => mdns.tc
+alias dns.flags.rd        => mdns.rd
+alias dns.flags.ra        => mdns.ra
+alias dns.flags.rcode     => mdns.rcode
+
+# mDNS-specific
+alias dns.qry.qu          => mdns.qu
+alias mdns.qry.name       => mdns.qname
+alias mdns.resp.name      => mdns.name
+alias mdns.srv.target     => mdns.rdata
+alias mdns.txt            => mdns.rdata
+alias mdns.ptr.domain_name => mdns.rdata
+
+# Section counts
+alias dns.count.queries   => mdns.questions
+alias dns.count.answers   => mdns.answers
+alias dns.count.auth_rr   => mdns.authority
+alias dns.count.add_rr    => mdns.additional
+
+# Macro alias: filter for any mDNS service-discovery traffic
+alias mdns.dnssd          => mdns.type == 12 || mdns.type == 33 || mdns.type == 16

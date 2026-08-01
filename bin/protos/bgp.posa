@@ -1,16 +1,126 @@
-# BGP header (RFC 4271)
-# TCP port 179. Fixed 19-byte header; marker is always 16 x 0xFF.
-# KEEPALIVE has no body (length=19). OPEN/UPDATE/NOTIFICATION carry variable-length body.
+# BGP — Border Gateway Protocol (RFC 4271)
+# Carried over TCP port 179. Every message starts with a 19-byte fixed header:
+# a 16-byte all-0xFF marker (framing/auth), a 2-byte big-endian total length,
+# and a 1-byte message type. The all-ones marker makes BGP uniquely detectable
+# on any port without relying on well-known port 179.
+#
+# Message types:
+#   1 OPEN          — session establishment: AS, router-ID, hold-timer, capabilities
+#   2 UPDATE        — route advertisement and/or withdrawal
+#   3 NOTIFICATION  — error report; session always closed after sending
+#   4 KEEPALIVE     — empty-body heartbeat (total length exactly 19)
+#   5 ROUTE_REFRESH — re-advertisement request for an AFI/SAFI (RFC 2918)
+
 Object<main> BGP
-    required bytes<16> marker
-    required uint16    length = 19
-    required uint8     type = 4
+    abbrev "bgp"
+    col "BGP"
+
+    # ── Fixed 19-byte message header ──────────────────────────────────────────
+    required bytes<16> marker "Marker"
+    required uint16    length "Length"
+    required uint8     type   "Type"
         OPEN          = 1
         UPDATE        = 2
         NOTIFICATION  = 3
         KEEPALIVE     = 4
         ROUTE_REFRESH = 5
 
-# Content signature — BGP opens with a 16-byte all-ones marker at offset 0,
-# so it is recognisable on any port, not just 179.
+    # ── OPEN body (type == 1) ─────────────────────────────────────────────────
+    # Carries the speaker's BGP version (always 4), its 2-byte AS number
+    # (or 23456 AS_TRANS when a 4-byte AS is signalled via capability),
+    # the hold-time in seconds (0 or >= 3), and the BGP identifier (router-ID).
+    # Optional parameters (capability TLVs) follow as a length-prefixed block.
+    when type == 1:
+        required uint8  version          "Version"
+        required uint16 my_as            "My AS"
+        required uint16 hold_time        "Hold Time"
+        required ip4    bgp_id           "BGP Identifier"
+        required uint8  opt_param_length "Optional Parameters Length"
+        required payload opt_params      "Optional Parameters"
+
+    # ── UPDATE body (type == 2) ───────────────────────────────────────────────
+    # Withdrawn routes come first as a length-prefixed list of IP prefixes.
+    # Path attributes follow in their own length-prefixed block (type-flags-len-value).
+    # Any remaining bytes after the path attribute block are NLRI prefixes
+    # being advertised for the implicit IPv4 unicast AFI/SAFI.
+    when type == 2:
+        required uint16                        withdrawn_routes_length "Withdrawn Routes Length"
+        required bytes[withdrawn_routes_length] withdrawn              "Withdrawn Routes"
+        required uint16                        path_attr_length        "Path Attributes Length"
+        required bytes[path_attr_length]        path_attrs             "Path Attributes"
+        required payload nlri                                          "NLRI"
+
+    # ── NOTIFICATION body (type == 3) ─────────────────────────────────────────
+    # Error code identifies the category; error subcode refines it.
+    # The optional data field carries diagnostic context (e.g. the offending header).
+    when type == 3:
+        required uint8  error_code    "Error Code"
+            MESSAGE_HEADER_ERROR = 1
+            OPEN_MESSAGE_ERROR   = 2
+            UPDATE_MESSAGE_ERROR = 3
+            HOLD_TIMER_EXPIRED   = 4
+            FSM_ERROR            = 5
+            CEASE                = 6
+        required uint8  error_subcode "Error Subcode"
+        required payload data         "Data"
+
+    # ── KEEPALIVE body (type == 4) — empty ───────────────────────────────────
+    # No fields after the header. Total message length is always 19 bytes.
+
+    # ── ROUTE-REFRESH body (type == 5, RFC 2918) ──────────────────────────────
+    # Requests the peer to re-advertise all routes for the specified AFI/SAFI.
+    when type == 5:
+        required uint16 afi  "Address Family Identifier"
+            IPv4 = 1
+            IPv6 = 2
+        required uint8  res  "Reserved"
+        required uint8  safi "Subsequent AFI"
+            UNICAST   = 1
+            MULTICAST = 2
+            MPLS      = 4
+
+    # ── Info column ───────────────────────────────────────────────────────────
+    # type always expands (%s shows enum name). Conditional fields that are
+    # absent for a given message type expand to nothing; gaps close automatically.
+    info "%s AS=%u BGP-ID=%s Err=%u/%u" type, my_as, bgp_id, error_code, error_subcode
+
+
+# ── Detection rules ───────────────────────────────────────────────────────────
+# Content rule first: the 16-byte all-0xFF marker is unique to BGP and allows
+# detection on non-standard ports (route reflectors, multi-hop, lab setups).
 rule tcp.content "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" => BGP
+# Standard BGP port (RFC 4271 §1). Listed after content rule per convention.
+rule tcp.port == 179 => BGP
+
+
+# ── Coloring rules ────────────────────────────────────────────────────────────
+# OPEN — session setup / capability negotiation (yellow: bidirectional handshake)
+color bgp.type == 1 => black lightyellow
+
+# UPDATE — route advertisement or withdrawal (green: reachability data plane)
+color bgp.type == 2 => black lightgreen
+
+# NOTIFICATION — protocol error; session teardown imminent (red: alert)
+color bgp.type == 3 => white red
+
+# KEEPALIVE — periodic heartbeat, no routing content (gray: management traffic)
+color bgp.type == 4 => black lightgray
+
+# ROUTE-REFRESH — capability exchange / re-advertisement request (blue: control)
+color bgp.type == 5 => white darkblue
+
+# Catch-all — any BGP frame not matched by a type-specific rule above
+color bgp => black lightgray
+
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+alias bgp.type                       => bgp.type
+alias bgp.open.version               => bgp.version
+alias bgp.open.as                    => bgp.my_as
+alias bgp.open.holdtime              => bgp.hold_time
+alias bgp.open.identifier            => bgp.bgp_id
+alias bgp.open.opt_param_len         => bgp.opt_param_length
+alias bgp.update.withdrawn_length    => bgp.withdrawn_routes_length
+alias bgp.update.path_attr.length    => bgp.path_attr_length
+alias bgp.notification.error_code    => bgp.error_code
+alias bgp.notification.error_subcode => bgp.error_subcode

@@ -1,0 +1,183 @@
+# ssdp.posa — Simple Service Discovery Protocol (UPnP, IETF draft / RFC 2616-style)
+#
+# SSDP is a text protocol modelled on HTTP, carried over UDP (almost always)
+# and occasionally over TCP.  Three message shapes share the wire:
+#
+#   SSDP_RESPONSE — unicast reply to an M-SEARCH; starts with "HTTP/1.1 200 OK\r\n".
+#                   Dispatched by the group on the four-byte "HTTP" magic (0x48545450),
+#                   then seek 0 rewinds so the full status line is read as text.
+#
+#   SSDP_SEARCH   — client discovery broadcast; starts with "M-SEARCH * HTTP/1.1\r\n".
+#                   Dispatched by `starts "M-SEARCH "`.
+#
+#   SSDP_NOTIFY   — device advertisement; starts with "NOTIFY * HTTP/1.1\r\n".
+#                   Carries NTS: ssdp:alive (device up) or ssdp:byebye (device down).
+#                   Dispatched by `starts "NOTIFY "`.
+#
+# Key headers (MAN, ST, NT, NTS, LOCATION, USN, SERVER, …) are declared as named
+# string fields BEFORE the catch-all repeat block; the text-protocol-aware runtime
+# extracts them by matching the declared label against "Header-Name: value\r\n" lines.
+# Remaining or unrecognised headers accumulate in the generic repeat.
+#
+# Standard transport: UDP port 1900, multicast group 239.255.255.250.
+# Content rules fire first so SSDP on non-standard ports is still recognised.
+
+Object<GROUP> SSDP
+
+# ── HTTP/1.1 200 OK: unicast reply to M-SEARCH ───────────────────────────────
+#
+# Device responds directly to the querying host; contains the same headers as
+# ssdp:alive but is a unicast HTTP response rather than a multicast NOTIFY.
+
+Object<SSDP> SSDP_RESPONSE
+    abbrev "ssdp"
+    col "SSDP"
+
+    # The group dispatcher reads the first four bytes to distinguish a response
+    # ("HTTP") from the request types above.  0x48545450 = big-endian "HTTP".
+    # seek 0 rewinds so the full status line is re-read as human-readable text.
+    required uint32 magic = 0x48545450 hex "Magic"
+    seek 0
+
+    required string version     until " "    "Version"
+    required string status_code until " "    "Status-Code"
+    required string reason      until "\r\n" "Reason-Phrase"
+
+    # Key response headers — extracted by label-name matching before the repeat.
+    string cache_control  until "\r\n" "CACHE-CONTROL"
+    string date           until "\r\n" "DATE"
+    string location       until "\r\n" "LOCATION"
+    string server         until "\r\n" "SERVER"
+    string search_target  until "\r\n" "ST"
+    string usn            until "\r\n" "USN"
+    string ext            until "\r\n" "EXT"
+
+    # Remaining / unrecognised headers — one entry per line until the blank line.
+    repeat until "\r\n" as header "All Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+    required string blank until "\r\n" "End of Headers"
+
+    required payload body "Message Body"
+
+    info "%s %s  ST: %s" status_code, reason, search_target
+
+# ── M-SEARCH: client broadcasts a discovery request ──────────────────────────
+#
+# Sent to the multicast group 239.255.255.250:1900; all devices on the local
+# link receive it and respond if the ST header matches their type or USN.
+
+Object<SSDP> SSDP_SEARCH
+    abbrev "ssdp"
+    col "SSDP"
+
+    # Trailing space prevents a false match on "M-SEARCH" appearing inside a body
+    # or a URI path of an unrelated protocol.
+    starts "M-SEARCH "
+
+    required string method         until " "    "Method"
+    required string request_target until " "    "Request-Target"
+    required string version        until "\r\n" "Version"
+
+    # Key M-SEARCH headers — extracted by label-name matching before the repeat.
+    string host          until "\r\n" "HOST"
+    string man           until "\r\n" "MAN"
+    string mx            until "\r\n" "MX"
+    string search_target until "\r\n" "ST"
+
+    # Remaining / unrecognised headers — one entry per line until the blank line.
+    repeat until "\r\n" as header "All Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+    required string blank until "\r\n" "End of Headers"
+
+    required payload body "Message Body"
+
+    info "M-SEARCH  ST: %s" search_target
+
+# ── NOTIFY: device announces presence or departure ────────────────────────────
+#
+# Sent to the multicast group; NTS header distinguishes alive from byebye.
+# ssdp:alive — device is up and advertising its services.
+# ssdp:byebye — device is shutting down; listeners should remove its entries.
+
+Object<SSDP> SSDP_NOTIFY
+    abbrev "ssdp"
+    col "SSDP"
+
+    # Trailing space prevents a false match on "NOTIFY" inside a SIP NOTIFY body
+    # or any other mid-stream text that happens to start with the word.
+    starts "NOTIFY "
+
+    required string method         until " "    "Method"
+    required string request_target until " "    "Request-Target"
+    required string version        until "\r\n" "Version"
+
+    # Key NOTIFY headers — extracted by label-name matching before the repeat.
+    string host              until "\r\n" "HOST"
+    string cache_control     until "\r\n" "CACHE-CONTROL"
+    string location          until "\r\n" "LOCATION"
+    string notification_type until "\r\n" "NT"
+    string nts               until "\r\n" "NTS"
+    string server            until "\r\n" "SERVER"
+    string usn               until "\r\n" "USN"
+
+    # Remaining / unrecognised headers — one entry per line until the blank line.
+    repeat until "\r\n" as header "All Headers"
+        label "%s" line
+        required string line until "\r\n" "Header"
+    required string blank until "\r\n" "End of Headers"
+
+    required payload body "Message Body"
+
+    info "NOTIFY  NTS: %s  NT: %s" nts, notification_type
+
+# ── Content detection (primary — catches SSDP on any port) ───────────────────
+# UDP rules cover the multicast channel; the TCP rule catches tunnelled or
+# proxied M-SEARCH traffic on non-standard ports.  Content rules always fire
+# before port rules so the protocol is recognised even on ephemeral ports.
+
+rule udp.content "M-SEARCH * HTTP" => SSDP
+rule udp.content "NOTIFY * HTTP"   => SSDP
+rule udp.content "HTTP/1.1 200 OK" => SSDP
+rule tcp.content "M-SEARCH * HTTP" => SSDP
+
+# ── Port binding (secondary — hint when content rules did not match) ──────────
+rule udp.port == 1900 => SSDP
+
+# ── Coloring rules (most specific first; first match wins) ────────────────────
+
+# ssdp:byebye — device leaving the network; alert palette signals the event.
+color ssdp.nts == "ssdp:byebye" => white red
+
+# ssdp:alive — device announcing presence; green signals a healthy advertisement.
+color ssdp.nts == "ssdp:alive" => black lightgreen
+
+# M-SEARCH discovery requests — yellow to signal client-originated direction.
+color ssdp.method == "M-SEARCH" => black lightyellow
+
+# 200 OK unicast responses — blue for informational server replies.
+color ssdp.status_code == "200" => black lightblue
+
+# Catch-all: any SSDP frame not matched above (unrecognised NTS, etc.).
+color ssdp => white darkblue
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Map short header-name forms and Wireshark field-naming conventions to the
+# descriptive POSA field names so that existing display filters continue to work.
+
+alias ssdp.st            => ssdp.search_target
+alias ssdp.nt            => ssdp.notification_type
+alias ssdp.location      => ssdp.location
+alias ssdp.nts           => ssdp.nts
+alias ssdp.usn           => ssdp.usn
+alias ssdp.server        => ssdp.server
+alias ssdp.man           => ssdp.man
+alias ssdp.mx            => ssdp.mx
+alias ssdp.cache.control => ssdp.cache_control
+
+# Convenience macro aliases for common filter expressions.
+alias ssdp.is_search  => ssdp.method == "M-SEARCH"
+alias ssdp.is_notify  => ssdp.method == "NOTIFY"
+alias ssdp.is_alive   => ssdp.nts == "ssdp:alive"
+alias ssdp.is_byebye  => ssdp.nts == "ssdp:byebye"

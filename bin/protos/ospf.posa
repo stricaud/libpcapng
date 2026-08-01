@@ -1,20 +1,354 @@
-# OSPF header (RFC 2328 / RFC 5340 for OSPFv3)
-# Carried directly over IP protocol 89.
-# authentication field meaning depends on autype.
+# ospf.posa — Open Shortest Path First (RFC 2328 OSPFv2, RFC 5340 OSPFv3)
+#
+# OSPF is carried directly over IP as protocol 89 — there is no TCP or UDP
+# wrapping. Packets are sent to two well-known multicast groups:
+#   224.0.0.5  AllSPFRouters  — all OSPF-speaking routers on the segment
+#   224.0.0.6  AllDRouters    — only the Designated Router and Backup DR
+#
+# Common header layout (bytes 0-13, identical in both versions):
+#   [0]     version        1 byte  — 2=OSPFv2, 3=OSPFv3
+#   [1]     type           1 byte  — 1=Hello 2=DBD 3=LSR 4=LSU 5=LSACK
+#   [2-3]   packet_length  2 bytes — total length of this OSPF packet
+#   [4-7]   router_id      4 bytes — originating router (dotted-quad form)
+#   [8-11]  area_id        4 bytes — OSPF area (0.0.0.0 = backbone)
+#   [12-13] checksum       2 bytes — standard IP checksum over the OSPF packet
+#
+# Bytes 14-23 diverge by version:
+#   OSPFv2: au_type(2) + authentication(8)  — 10 bytes
+#   OSPFv3: instance_id(1) + reserved(1)    —  2 bytes; IPsec handles security
+#
+# Content detection uses the first two bytes: version (0x02 or 0x03) followed
+# immediately by the packet type (0x01-0x05). This combination is unique enough
+# to identify OSPF without relying on the IP protocol field, enabling detection
+# in tunnels or captures where the IP layer is unavailable.
+#
+# LSA common header (20 bytes, appears in DBD summaries, LSU bodies, LSACK):
+#   OSPFv2: age(2) + options(1) + type(1) + ls_id(4) + adv_router(4) + seq(4) + cksum(2) + len(2)
+#   OSPFv3: age(2) + type(2)              + ls_id(4) + adv_router(4) + seq(4) + cksum(2) + len(2)
+#   LSU uses `scope lsa_length - 20` to bound each LSA body so that the repeat
+#   cursor advances correctly regardless of LSA type.
+
 Object<main> OSPF
-    required uint8  version = 2
-    required uint8  type = 1
-        HELLO  = 1
-        DBD    = 2
-        LSR    = 3
-        LSU    = 4
-        LSACK  = 5
-    required uint16 packet_len = 0
-    required ip4    router_id = 0.0.0.0
-    required ip4    area_id = 0.0.0.0
-    required uint16 checksum = 0
-    required uint16 autype = 0
-        NO_AUTH       = 0
-        SIMPLE        = 1
-        CRYPTOGRAPHIC = 2
-    required uint64 authentication = 0
+    abbrev "ospf"
+    col "OSPF"
+
+    # ── Common header (bytes 0-13) ─────────────────────────────────────────
+    required uint8 version "Version"
+        2 = "OSPFv2"
+        3 = "OSPFv3"
+
+    required uint8 type "Packet Type"
+        1 = "Hello"
+        2 = "Database Description"
+        3 = "Link State Request"
+        4 = "Link State Update"
+        5 = "LS Acknowledgment"
+
+    required uint16 packet_length "Packet Length"
+    required ip4    router_id     "Router ID"
+    required ip4    area_id       "Area ID"
+    required uint16 checksum      "Checksum"
+
+    # ── Bytes 14-23: version-specific ─────────────────────────────────────
+    when version == 2:
+        required uint16   au_type        "Auth Type"
+            0 = "No Authentication"
+            1 = "Simple Password"
+            2 = "Cryptographic (MD5)"
+        required bytes<8> authentication "Authentication Data"
+
+    when version == 3:
+        required uint8 instance_id "Instance ID"
+        required uint8 v3_reserved "Reserved"
+        # OSPFv3 relies on IPsec (AH/ESP) for authentication and encryption;
+        # there is no per-packet authentication field in the OSPF header.
+
+    # ── Type 1: Hello — neighbour discovery and keepalive ─────────────────
+    # OSPFv2 and OSPFv3 Hello packets differ after the common header.
+    # OSPFv2 leads with the subnet mask of the outgoing interface.
+    # OSPFv3 leads with the outgoing interface ID and has a 3-byte options
+    # field; hello and dead intervals are 16-bit (not 32-bit as in OSPFv2).
+    when type == 1:
+        when version == 2:
+            required ip4    network_mask    "Network Mask"
+            required uint16 hello_interval  "Hello Interval (s)"
+            required uint8  options         "Options"
+                bits options e_bit  1 1 "E: External Routing Capability"
+                bits options mc_bit 2 1 "MC: Multicast Capability"
+                bits options np_bit 3 1 "N/P: NSSA Capability"
+                bits options ea_bit 4 1 "EA: External Attributes LSA"
+                bits options dc_bit 5 1 "DC: Demand Circuits"
+                bits options o_bit  6 1 "O: Opaque LSA Support"
+            required uint8  router_priority   "Router Priority"
+            required uint32 dead_interval     "Dead Interval (s)"
+            required ip4    designated_router "Designated Router"
+            required ip4    backup_dr         "Backup Designated Router"
+            repeat until end as neighbor "Neighbours"
+                label "%s" neighbor_addr
+                required ip4 neighbor_addr "Neighbour Address"
+
+        when version == 3:
+            required uint32 hello_interface_id "Interface ID"
+            required uint8  router_priority    "Router Priority"
+            required uint24 v3_options         "Options"
+                bits v3_options v3_v6_bit 0 1 "V6: IPv6 Forwarding"
+                bits v3_options v3_e_bit  1 1 "E: External Routing Capability"
+                bits v3_options v3_mc_bit 2 1 "MC: Multicast Capability"
+                bits v3_options v3_np_bit 3 1 "N/P: NSSA Capability"
+                bits v3_options v3_dc_bit 5 1 "DC: Demand Circuits"
+                bits v3_options v3_r_bit  6 1 "R: Router Active"
+            required uint16 hello_interval    "Hello Interval (s)"
+            required uint16 dead_interval     "Dead Interval (s)"
+            required ip4    designated_router "Designated Router ID"
+            required ip4    backup_dr         "Backup Designated Router ID"
+            repeat until end as neighbor "Neighbours"
+                label "%s" neighbor_addr
+                required ip4 neighbor_addr "Neighbour Router ID"
+
+    # ── Type 2: Database Description (DBD) — topology exchange ────────────
+    # Each DBD carries zero or more 20-byte LSA headers (no bodies) that let
+    # the receiver determine which LSAs it needs to request.
+    # OSPFv2 layout: MTU(2) + Options(1) + Flags(1) + Sequence(4) + LSA headers
+    # OSPFv3 layout: Reserved(1) + Options(3) + MTU(2) + Reserved(1) + Flags(1) + Sequence(4) + LSA headers
+    when type == 2:
+        when version == 2:
+            required uint16 dbd_mtu      "Interface MTU"
+            required uint8  dbd_options  "Options"
+            required uint8  dbd_flags    "DBD Flags"
+                bits dbd_flags dbd_i  0 1 "I: Initial (first DBD in exchange)"
+                bits dbd_flags dbd_m  1 1 "M: More DBDs to follow"
+                bits dbd_flags dbd_ms 2 1 "MS: This router is Master"
+            required uint32 dbd_sequence "DD Sequence Number"
+            repeat until end as dbd_lsa "LSA Headers"
+                label "%s" dbd_lsa_id
+                required uint16 dbd_lsa_age        "LS Age"
+                required uint8  dbd_lsa_options    "LS Options"
+                required uint8  dbd_lsa_type       "LS Type"
+                    1  = "Router-LSA"
+                    2  = "Network-LSA"
+                    3  = "Summary-LSA (IP network)"
+                    4  = "Summary-LSA (ASBR)"
+                    5  = "AS-External-LSA"
+                    7  = "NSSA-AS-External-LSA"
+                    9  = "Opaque-LSA (link-local scope)"
+                    10 = "Opaque-LSA (area scope)"
+                    11 = "Opaque-LSA (AS scope)"
+                required ip4    dbd_lsa_id         "Link State ID"
+                required ip4    dbd_lsa_adv_router "Advertising Router"
+                required uint32 dbd_lsa_seq        "LS Sequence Number"
+                required uint16 dbd_lsa_checksum   "LS Checksum"
+                required uint16 dbd_lsa_length     "LS Length"
+
+        when version == 3:
+            required uint8  v3_dbd_reserved  "Reserved"
+            required uint24 v3_dbd_options   "Options"
+            required uint16 dbd_mtu          "Interface MTU"
+            required uint8  v3_dbd_reserved2 "Reserved"
+            required uint8  dbd_flags        "DBD Flags"
+                bits dbd_flags dbd_i  0 1 "I: Initial (first DBD in exchange)"
+                bits dbd_flags dbd_m  1 1 "M: More DBDs to follow"
+                bits dbd_flags dbd_ms 2 1 "MS: This router is Master"
+            required uint32 dbd_sequence "DD Sequence Number"
+            repeat until end as dbd_lsa "LSA Headers"
+                label "%s" dbd_lsa_id
+                required uint16 dbd_lsa_age        "LS Age"
+                required uint16 dbd_lsa_type       "LS Type"
+                    0x2001 = "Router-LSA"
+                    0x2002 = "Network-LSA"
+                    0x2003 = "Inter-Area-Prefix-LSA"
+                    0x2004 = "Inter-Area-Router-LSA"
+                    0x4005 = "AS-External-LSA"
+                    0x2007 = "NSSA-LSA"
+                    0x0008 = "Link-LSA"
+                    0x2009 = "Intra-Area-Prefix-LSA"
+                required ip4    dbd_lsa_id         "Link State ID"
+                required ip4    dbd_lsa_adv_router "Advertising Router"
+                required uint32 dbd_lsa_seq        "LS Sequence Number"
+                required uint16 dbd_lsa_checksum   "LS Checksum"
+                required uint16 dbd_lsa_length     "LS Length"
+
+    # ── Type 3: Link State Request — soliciting LSAs from a neighbour ──────
+    # Each 12-byte entry identifies one LSA the sender wants to receive.
+    # OSPFv2 encodes the type as a bare uint32; OSPFv3 uses reserved(16) +
+    # type(16) for the same total width, so the uint32 field works for both.
+    when type == 3:
+        repeat until end as lsr "Link State Requests"
+            label "%s" lsr_id
+            required uint32 lsr_type       "LS Type"
+            required ip4    lsr_id         "Link State ID"
+            required ip4    lsr_adv_router "Advertising Router"
+
+    # ── Type 4: Link State Update — distributing LSAs ──────────────────────
+    # A single LSU packet can carry multiple complete LSAs. Each LSA begins
+    # with a 20-byte common header containing the lsa_length field, which
+    # covers both header and body. `scope lsu_lsa_length - 20` bounds the
+    # body payload so the repeat cursor advances by exactly lsu_lsa_length
+    # bytes per iteration regardless of LSA type.
+    when type == 4:
+        required uint32 num_lsas "Number of LSAs"
+        repeat num_lsas as lsu_lsa "LSAs"
+            label "%s" lsu_lsa_id
+            required uint16 lsu_lsa_age "LS Age"
+            when version == 2:
+                required uint8 lsu_lsa_options "LS Options"
+                required uint8 lsu_lsa_type    "LS Type"
+                    1  = "Router-LSA"
+                    2  = "Network-LSA"
+                    3  = "Summary-LSA (IP network)"
+                    4  = "Summary-LSA (ASBR)"
+                    5  = "AS-External-LSA"
+                    7  = "NSSA-AS-External-LSA"
+                    9  = "Opaque-LSA (link-local scope)"
+                    10 = "Opaque-LSA (area scope)"
+                    11 = "Opaque-LSA (AS scope)"
+            when version == 3:
+                required uint16 lsu_lsa_type "LS Type"
+                    0x2001 = "Router-LSA"
+                    0x2002 = "Network-LSA"
+                    0x2003 = "Inter-Area-Prefix-LSA"
+                    0x2004 = "Inter-Area-Router-LSA"
+                    0x4005 = "AS-External-LSA"
+                    0x2007 = "NSSA-LSA"
+                    0x0008 = "Link-LSA"
+                    0x2009 = "Intra-Area-Prefix-LSA"
+            required ip4    lsu_lsa_id         "Link State ID"
+            required ip4    lsu_lsa_adv_router "Advertising Router"
+            required uint32 lsu_lsa_seq        "LS Sequence Number"
+            required uint16 lsu_lsa_checksum   "LS Checksum"
+            required uint16 lsu_lsa_length     "LS Length"
+            scope lsu_lsa_length - 20
+                required payload lsu_lsa_body "LSA Body"
+
+    # ── Type 5: LS Acknowledgment — confirming receipt of LSAs ────────────
+    # An LSACK carries one or more bare 20-byte LSA common headers with no
+    # body. The layout matches the DBD LSA header entries exactly.
+    # OSPFv2: age(2) + options(1) + type(1) + id(4) + adv(4) + seq(4) + cksum(2) + len(2)
+    # OSPFv3: age(2) + type(2)              + id(4) + adv(4) + seq(4) + cksum(2) + len(2)
+    when type == 5:
+        repeat until end as lsack "Acknowledged LSAs"
+            label "%s" lsack_lsa_id
+            required uint16 lsack_lsa_age "LS Age"
+            when version == 2:
+                required uint8 lsack_lsa_options "LS Options"
+                required uint8 lsack_lsa_type    "LS Type"
+                    1  = "Router-LSA"
+                    2  = "Network-LSA"
+                    3  = "Summary-LSA (IP network)"
+                    4  = "Summary-LSA (ASBR)"
+                    5  = "AS-External-LSA"
+                    7  = "NSSA-AS-External-LSA"
+                    9  = "Opaque-LSA (link-local scope)"
+                    10 = "Opaque-LSA (area scope)"
+                    11 = "Opaque-LSA (AS scope)"
+            when version == 3:
+                required uint16 lsack_lsa_type "LS Type"
+                    0x2001 = "Router-LSA"
+                    0x2002 = "Network-LSA"
+                    0x2003 = "Inter-Area-Prefix-LSA"
+                    0x2004 = "Inter-Area-Router-LSA"
+                    0x4005 = "AS-External-LSA"
+                    0x2007 = "NSSA-LSA"
+                    0x0008 = "Link-LSA"
+                    0x2009 = "Intra-Area-Prefix-LSA"
+            required ip4    lsack_lsa_id         "Link State ID"
+            required ip4    lsack_lsa_adv_router "Advertising Router"
+            required uint32 lsack_lsa_seq        "LS Sequence Number"
+            required uint16 lsack_lsa_checksum   "LS Checksum"
+            required uint16 lsack_lsa_length     "LS Length"
+
+    info "%s  Router=%s  Area=%s" type, router_id, area_id
+
+
+# ── Content detection (primary — works independent of the IP layer) ───────────
+# The first two bytes of every OSPF packet are the version (0x02 or 0x03) and
+# the packet type (0x01-0x05). This combination does not appear in unrelated
+# traffic and allows OSPF to be recognised inside tunnels or raw captures.
+#
+# OSPFv2 (version byte 0x02):
+rule content "\x02\x01" => OSPF
+rule content "\x02\x02" => OSPF
+rule content "\x02\x03" => OSPF
+rule content "\x02\x04" => OSPF
+rule content "\x02\x05" => OSPF
+# OSPFv3 (version byte 0x03):
+rule content "\x03\x01" => OSPF
+rule content "\x03\x02" => OSPF
+rule content "\x03\x03" => OSPF
+rule content "\x03\x04" => OSPF
+rule content "\x03\x05" => OSPF
+
+# ── Protocol binding (secondary — canonical IP protocol number) ───────────────
+# Note: ip.proto == 89 is also declared in 00-builtin-rules.posa for the
+# built-in C dissector; keeping it here makes this .posa file self-contained.
+rule ip.proto == 89 => OSPF
+
+
+# ── Coloring rules ────────────────────────────────────────────────────────────
+# Hello packets: neighbour discovery and DR/BDR election keepalives — green
+color ospf.type == 1 => black lightgreen
+
+# Database Description: topology synchronisation exchange — yellow
+color ospf.type == 2 => black lightyellow
+
+# Link State Request and Link State Update: active topology distribution — blue
+color ospf.type == 3 || ospf.type == 4 => white darkblue
+
+# LS Acknowledgment: routine low-value ack traffic — gray
+color ospf.type == 5 => black lightgray
+
+# Unrecognised version byte (not 2 or 3): probable corruption or future version
+color ospf.version != 2 && ospf.version != 3 => white red
+
+# Protocol catch-all — any OSPF packet not matched by the rules above
+color ospf => white darkgray
+
+
+# ── Wireshark-compatible field aliases ────────────────────────────────────────
+# Wireshark's ospf dissector surfaces fields under paths that differ from the
+# names used here. These aliases allow existing display-filter profiles,
+# coloring rules, and io-stats expressions to keep working without modification.
+
+# Common header
+alias ospf.ospf_version                   => ospf.version
+alias ospf.msg.type                       => ospf.type
+alias ospf.packet_length                  => ospf.packet_length
+alias ospf.srcrouter                      => ospf.router_id
+alias ospf.area_id                        => ospf.area_id
+alias ospf.checksum                       => ospf.checksum
+alias ospf.auth.type                      => ospf.au_type
+
+# Hello — OSPFv2
+alias ospf.hello.network_mask             => ospf.network_mask
+alias ospf.hello.hello_interval           => ospf.hello_interval
+alias ospf.hello.options                  => ospf.options
+alias ospf.hello.router_priority          => ospf.router_priority
+alias ospf.hello.dead_interval            => ospf.dead_interval
+alias ospf.hello.designated_router        => ospf.designated_router
+alias ospf.hello.backup_designated_router => ospf.backup_dr
+alias ospf.hello.active_neighbor          => ospf.neighbor_addr
+
+# Hello — OSPFv3
+alias ospf.v3.hello.interface_id          => ospf.hello_interface_id
+alias ospf.v3.instance_id                 => ospf.instance_id
+
+# Database Description
+alias ospf.dbd.interface_mtu              => ospf.dbd_mtu
+alias ospf.dbd.db_desc_options            => ospf.dbd_options
+alias ospf.dbd.db_desc_flags              => ospf.dbd_flags
+alias ospf.dbd.db_desc_sequence           => ospf.dbd_sequence
+
+# LSA headers (aliases reference the LSU field names as the canonical set;
+# DBD and LSACK use the same header layout under different field-name prefixes)
+alias ospf.lsa.age                        => ospf.lsu_lsa_age
+alias ospf.lsa.type                       => ospf.lsu_lsa_type
+alias ospf.lsa.options                    => ospf.lsu_lsa_options
+alias ospf.lsa.id                         => ospf.lsu_lsa_id
+alias ospf.lsa.advertising_router         => ospf.lsu_lsa_adv_router
+alias ospf.lsa.seqnum                     => ospf.lsu_lsa_seq
+alias ospf.lsa.chksum                     => ospf.lsu_lsa_checksum
+alias ospf.lsa.length                     => ospf.lsu_lsa_length
+
+# LSR
+alias ospf.v2.lsr.ls_type                 => ospf.lsr_type
+alias ospf.v2.lsr.ls_id                   => ospf.lsr_id
+alias ospf.v2.lsr.adv_router              => ospf.lsr_adv_router

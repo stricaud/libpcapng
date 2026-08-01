@@ -1,22 +1,298 @@
-# MQTT fixed header (OASIS MQTT v3.1.1 / v5.0)
-# TCP port 1883 (plain) or 8883 (TLS). remaining_len uses variable-length encoding
-# in the wire format but is stored here as a single byte for the common case (< 128 bytes).
-# type_flags upper nibble = packet type; lower nibble = flags (QoS, retain, dup).
+# mqtt.posa — Message Queuing Telemetry Transport (OASIS MQTT 3.1.1 / 5.0)
+# Reference: https://docs.oasis-open.org/mqtt/mqtt/v5.0/
+#            https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/
+#
+# MQTT is a lightweight publish/subscribe protocol designed for constrained
+# devices and low-bandwidth, high-latency networks (IoT, M2M).  Every frame
+# starts with a 1-byte fixed header whose high nibble selects the message type
+# and low nibble carries per-type flags (DUP, QoS, RETAIN).  A variable-length
+# remaining-length field (1–4 bytes, bit 7 = continuation) follows.
+#
+# Message types decoded here:
+#   1  CONNECT     — client requests a session with the broker
+#   2  CONNACK     — broker responds with a return code (0 = accepted)
+#   3  PUBLISH     — either party delivers an application message
+#   4  PUBACK      — QoS 1 delivery acknowledgement
+#   5  PUBREC      — QoS 2 phase 1 acknowledgement
+#   6  PUBREL      — QoS 2 phase 2 release
+#   7  PUBCOMP     — QoS 2 phase 3 completion
+#   8  SUBSCRIBE   — client requests one or more topic subscriptions
+#   9  SUBACK      — broker grants (or refuses) subscriptions
+#   10 UNSUBSCRIBE — client removes topic subscriptions
+#   11 UNSUBACK    — broker confirms unsubscription
+#   12 PINGREQ     — keepalive probe (client → broker)
+#   13 PINGRESP    — keepalive reply (broker → client)
+#   14 DISCONNECT  — clean session teardown
+#
+# Detection: CONNECT (0x10) is the mandatory first packet on every new MQTT TCP
+# connection; CONNACK (0x20) is always the broker's first reply.  These two bytes
+# together cover both directions without relying on port numbers.  Additional
+# content rules anchor SUBSCRIBE (0x82 — spec-mandated reserved bits), the most
+# common PUBLISH byte (0x30), and the zero-payload keepalive pair (0xC0/0xD0).
+#
+# Transport: TCP/1883 (plaintext), TCP/8883 (TLS — port rule only; content rules
+# fire only on the unencrypted path).
+
 Object<main> MQTT
-    required uint8  type_flags = 0x10
-        CONNECT     = 0x10
-        CONNACK     = 0x20
-        PUBLISH     = 0x30
-        PUBACK      = 0x40
-        PUBREC      = 0x50
-        PUBREL      = 0x62
-        PUBCOMP     = 0x70
-        SUBSCRIBE   = 0x82
-        SUBACK      = 0x90
-        UNSUBSCRIBE = 0xA2
-        UNSUBACK    = 0xB0
-        PINGREQ     = 0xC0
-        PINGRESP    = 0xD0
-        DISCONNECT  = 0xE0
-        AUTH        = 0xF0
-    required uint8  remaining_len = 0
+    abbrev "mqtt"
+    col "MQTT"
+
+    # ── Fixed Header — byte 0 ─────────────────────────────────────────────────
+    required uint8 type_flags "Fixed Header"
+
+    bits type_flags msg_type 4 4 "Message Type"
+        RESERVED    = 0
+        CONNECT     = 1
+        CONNACK     = 2
+        PUBLISH     = 3
+        PUBACK      = 4
+        PUBREC      = 5
+        PUBREL      = 6
+        PUBCOMP     = 7
+        SUBSCRIBE   = 8
+        SUBACK      = 9
+        UNSUBSCRIBE = 10
+        UNSUBACK    = 11
+        PINGREQ     = 12
+        PINGRESP    = 13
+        DISCONNECT  = 14
+
+    bits type_flags dup    3 1 "DUP Flag"
+        Not Duplicate = 0
+        Duplicate     = 1
+
+    bits type_flags qos    1 2 "QoS Level"
+        At Most Once  = 0
+        At Least Once = 1
+        Exactly Once  = 2
+
+    bits type_flags retain 0 1 "RETAIN"
+        Do Not Retain = 0
+        Retain        = 1
+
+    # Remaining Length: MQTT uses variable-length encoding (bit 7 = more bytes
+    # follow; max 4 bytes encodes up to 268,435,455 bytes).  The single-byte
+    # form covers payloads up to 127 bytes, which is the common case for IoT.
+    # Multi-byte remaining-length packets are not further decoded beyond this byte.
+    required uint8 remaining_length "Remaining Length"
+
+    # All variable-header and payload fields are bounded to remaining_length bytes.
+    scope remaining_length
+
+    # ── CONNECT ───────────────────────────────────────────────────────────────
+    # Mandatory first packet from the client to the broker.  The variable header
+    # carries the protocol name (UTF-8 length-prefixed string), version byte,
+    # connect flags, and keepalive interval.  The payload begins with the
+    # mandatory UTF-8 Client ID; Will topic/message, username, and password
+    # follow conditionally on the connect_flags bits (not decoded here).
+    when msg_type == 1:
+        required uint16 proto_name_len "Protocol Name Length"
+        required str[proto_name_len] proto_name "Protocol Name"
+        required uint8 protocol_level "Protocol Level"
+            MQTT 3.1   = 3
+            MQTT 3.1.1 = 4
+            MQTT 5.0   = 5
+        required uint8 connect_flags "Connect Flags"
+        bits connect_flags username_flag 7 1 "User Name Flag"
+        bits connect_flags password_flag 6 1 "Password Flag"
+        bits connect_flags will_retain   5 1 "Will RETAIN"
+        bits connect_flags will_qos      3 2 "Will QoS"
+        bits connect_flags will_flag     2 1 "Will Flag"
+        bits connect_flags clean_session 1 1 "Clean Session"
+        required uint16 keep_alive "Keep Alive (seconds)"
+        # Payload — Client ID is mandatory; conditional fields are not decoded here
+        required uint16 client_id_len "Client ID Length"
+        required str[client_id_len] client_id "Client ID"
+
+    # ── CONNACK ───────────────────────────────────────────────────────────────
+    # Broker's response to CONNECT.  A non-zero return code means the broker
+    # refused the connection; the spec requires the TCP session to be closed
+    # by the broker after sending a non-zero CONNACK.
+    when msg_type == 2:
+        required uint8 connack_flags "Connect Acknowledge Flags"
+        bits connack_flags session_present 0 1 "Session Present"
+        required uint8 return_code "Connect Return Code"
+            Accepted              = 0
+            Unacceptable Protocol = 1
+            Identifier Rejected   = 2
+            Server Unavailable    = 3
+            Bad Credentials       = 4
+            Not Authorized        = 5
+
+    # ── PUBLISH ───────────────────────────────────────────────────────────────
+    # Carries one application message between client and broker (bidirectional).
+    # The Topic Name is always present.  QoS > 0 messages include a Packet
+    # Identifier in the variable header to correlate acknowledgements.
+    when msg_type == 3:
+        required uint16 topic_len "Topic Name Length"
+        required str[topic_len] topic "Topic Name"
+        when qos == 1:
+            required uint16 packet_id "Packet Identifier"
+        when qos == 2:
+            required uint16 packet_id "Packet Identifier"
+        payload message_data "Message Payload"
+
+    # ── QoS acknowledgement flow ──────────────────────────────────────────────
+    # PUBACK  (4): QoS 1 — broker or client confirms delivery
+    # PUBREC  (5): QoS 2 phase 1 — receiver confirms receipt
+    # PUBREL  (6): QoS 2 phase 2 — sender releases the message
+    # PUBCOMP (7): QoS 2 phase 3 — receiver confirms completion
+    when msg_type == 4:
+        required uint16 packet_id "Packet Identifier"
+
+    when msg_type == 5:
+        required uint16 packet_id "Packet Identifier"
+
+    when msg_type == 6:
+        required uint16 packet_id "Packet Identifier"
+
+    when msg_type == 7:
+        required uint16 packet_id "Packet Identifier"
+
+    # ── SUBSCRIBE ─────────────────────────────────────────────────────────────
+    # Client requests one or more topic filter subscriptions.  The reserved
+    # bits in the fixed header are defined as 0b0010 by the specification,
+    # making the first byte always 0x82 — a reliable content-detection anchor.
+    when msg_type == 8:
+        required uint16 packet_id "Packet Identifier"
+        repeat until end as topic_filter "Topic Filter List"
+            required uint16 filter_len "Topic Filter Length"
+            required str[filter_len] filter_topic "Topic Filter"
+            required uint8 requested_qos "Requested QoS"
+                QoS 0 = 0
+                QoS 1 = 1
+                QoS 2 = 2
+
+    # ── SUBACK ────────────────────────────────────────────────────────────────
+    # Broker acknowledges a SUBSCRIBE, one return code per requested topic filter.
+    # 0x80 (128) means the broker refused that particular filter.
+    when msg_type == 9:
+        required uint16 packet_id "Packet Identifier"
+        repeat until end as granted_qos "Granted QoS List"
+            required uint8 sub_return_code "Return Code"
+                Granted QoS 0 = 0
+                Granted QoS 1 = 1
+                Granted QoS 2 = 2
+                Failure       = 128
+
+    # ── UNSUBSCRIBE ───────────────────────────────────────────────────────────
+    # Client removes one or more topic filter subscriptions.  Reserved bits
+    # are 0b0010 (same as SUBSCRIBE), making the first byte always 0xA2.
+    when msg_type == 10:
+        required uint16 packet_id "Packet Identifier"
+        repeat until end as unsub_filter "Topic Filter List"
+            required uint16 unsub_len "Topic Filter Length"
+            required str[unsub_len] unsub_topic "Topic Filter"
+
+    # ── UNSUBACK ──────────────────────────────────────────────────────────────
+    when msg_type == 11:
+        required uint16 packet_id "Packet Identifier"
+
+    # PINGREQ  (12): no variable header or payload; exactly 2 bytes: 0xC0 0x00
+    # PINGRESP (13): no variable header or payload; exactly 2 bytes: 0xD0 0x00
+    # DISCONNECT (14): no variable header or payload in MQTT 3.x
+    #                  (MQTT 5.0 adds a reason code and properties — not decoded here)
+
+    else:
+        payload msg_body "Message Body"
+
+    info "%s %s%s" msg_type, topic, client_id
+
+
+# ── Content Detection Rules (primary — port-independent) ──────────────────────
+#
+# CONNECT (0x10): mandatory first byte of every new MQTT TCP session.
+# The type=1 / flags=0 combination is unique to MQTT CONNECT; no other protocol
+# uses this byte as its first octet in the same context.
+rule tcp.content "\x10" => MQTT
+
+# CONNACK (0x20): broker's mandatory first reply; covers the server→client
+# direction so both halves of a TCP stream are anchored.
+rule tcp.content "\x20" => MQTT
+
+# PUBLISH QoS-0 no-DUP no-RETAIN (0x30): the most common IoT telemetry pattern.
+# Sensors publishing periodic readings almost universally use QoS 0.
+rule tcp.content "\x30" => MQTT
+
+# SUBSCRIBE (0x82): spec-mandated reserved bits make this value unambiguous.
+rule tcp.content "\x82" => MQTT
+
+# PINGREQ / PINGRESP: fixed 2-byte packets; first byte is unambiguous per type.
+rule tcp.content "\xc0" => MQTT
+rule tcp.content "\xd0" => MQTT
+
+# DISCONNECT (0xE0): clean session teardown, distinct from any other protocol.
+rule tcp.content "\xe0" => MQTT
+
+# ── Port Rules (secondary hints) ──────────────────────────────────────────────
+# Listed after content rules; content detection fires first on non-standard ports.
+# TCP/8883 carries MQTT over TLS: content rules cannot see inside TLS, so the
+# port rule is the only trigger for the encrypted path.
+rule tcp.port == 1883 => MQTT
+rule tcp.port == 8883 => MQTT
+
+
+# ── Coloring Rules ────────────────────────────────────────────────────────────
+# Most-specific rules first; first match wins.
+
+# Connection refused — red: authentication failure or protocol mismatch
+color mqtt.msg_type == 2 && mqtt.return_code > 0 => white red
+
+# Connection setup — yellow: security-relevant, session initiation
+color mqtt.msg_type == 1 => black lightyellow
+
+# Successful connection acknowledgement — green: broker confirmed the session
+color mqtt.msg_type == 2 => black lightgreen
+
+# Application data — green: PUBLISH and the full QoS acknowledgement flow
+color mqtt.msg_type == 3 => black lightgreen
+color mqtt.msg_type == 4 => black lightgreen
+color mqtt.msg_type == 5 => black lightgreen
+color mqtt.msg_type == 6 => black lightgreen
+color mqtt.msg_type == 7 => black lightgreen
+
+# Subscription requests — yellow: client-initiated control plane changes
+color mqtt.msg_type == 8  => black lightyellow
+color mqtt.msg_type == 10 => black lightyellow
+
+# Subscription acknowledgements — green: broker confirmations
+color mqtt.msg_type == 9  => black lightgreen
+color mqtt.msg_type == 11 => black lightgreen
+
+# Keepalives — gray: background traffic, not application data
+color mqtt.msg_type == 12 => black lightgray
+color mqtt.msg_type == 13 => black lightgray
+
+# Disconnect — dark blue: session teardown (channel closing)
+color mqtt.msg_type == 14 => white darkblue
+
+# Protocol catch-all — dark green: any MQTT frame not matched above
+color mqtt => white darkgreen
+
+
+# ── Wireshark-Compatible Aliases ──────────────────────────────────────────────
+# Map Wireshark's mqtt dissector field names to POSA abbrevs so existing display
+# filters continue to work unchanged against captures analysed with this decoder.
+
+alias mqtt.msgtype        => mqtt.msg_type
+alias mqtt.hdrflags       => mqtt.type_flags
+alias mqtt.dupflag        => mqtt.dup
+alias mqtt.qos            => mqtt.qos
+alias mqtt.retain         => mqtt.retain
+alias mqtt.len            => mqtt.remaining_length
+alias mqtt.proto_name     => mqtt.proto_name
+alias mqtt.ver            => mqtt.protocol_level
+alias mqtt.conflags       => mqtt.connect_flags
+alias mqtt.cleansess      => mqtt.clean_session
+alias mqtt.willflag       => mqtt.will_flag
+alias mqtt.willqos        => mqtt.will_qos
+alias mqtt.willretain     => mqtt.will_retain
+alias mqtt.usernameflag   => mqtt.username_flag
+alias mqtt.passwordflag   => mqtt.password_flag
+alias mqtt.kalive         => mqtt.keep_alive
+alias mqtt.clientid       => mqtt.client_id
+alias mqtt.connack        => mqtt.return_code
+alias mqtt.connreturncode => mqtt.return_code
+alias mqtt.sessPresent    => mqtt.session_present
+alias mqtt.topic          => mqtt.topic
+alias mqtt.msgid          => mqtt.packet_id

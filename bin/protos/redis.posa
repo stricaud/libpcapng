@@ -1,0 +1,176 @@
+# redis.posa — Redis RESP Protocol (REdis Serialization Protocol)
+# Covers RESP2 (RFC-style, original) and RESP3 (introduced in Redis 6).
+# Spec: https://redis.io/docs/reference/protocol-spec/
+#
+# Wire shape: each message begins with a single ASCII type byte, then either
+# an inline value terminated by \r\n, or a length/count followed by \r\n and
+# the payload bytes.  RESP is inherently line-oriented, so fields are read as
+# strings until the \r\n delimiter rather than length-prefixed integers.
+#
+# What this decoder exposes:
+#   resp.type_byte  — the leading type character (+ - : $ * _ , # ( ~ | > %)
+#   resp.value      — inline text for scalar types (Simple String, Error,
+#                     Integer, Double, Boolean, Big Number, Null marker)
+#   resp.count      — element count for container types (Array, Set, Map,
+#                     Push, Attribute)
+#   resp.length     — declared byte length for Bulk String
+#   resp.data       — raw payload following the header line(s)
+#
+# The nested elements of Array / Set / Map / Push are surfaced as resp.data
+# (payload) because RESP nesting requires recursive parsing; a second pass on
+# that payload with the same decoder reveals the child frames.
+
+Object<main> REDIS
+    abbrev "resp"
+    col "REDIS"
+
+    # One ASCII byte selects the message type.  Enum labels appear in the
+    # Type column and in the %s expansion of the info line below.
+    required uint8 type_byte "Type"
+        0x2B = Simple String
+        0x2D = Error
+        0x3A = Integer
+        0x24 = Bulk String
+        0x2A = Array
+        0x5F = Null
+        0x2C = Double
+        0x23 = Boolean
+        0x28 = Big Number
+        0x7E = Set
+        0x7C = Attribute
+        0x3E = Push
+        0x25 = Map
+
+    # ── RESP2 scalar types ────────────────────────────────────────────────────
+
+    # +<text>\r\n  — server confirms success or sends a status word (e.g. "OK")
+    when type_byte == 0x2B:
+        required string value until "\r\n" "Simple String"
+
+    # -<message>\r\n  — server signals an error ("ERR unknown command …")
+    when type_byte == 0x2D:
+        required string value until "\r\n" "Error Message"
+
+    # :<number>\r\n  — server returns a signed 64-bit integer as decimal text
+    when type_byte == 0x3A:
+        required string value until "\r\n" "Integer"
+
+    # $<bytecount>\r\n<data>\r\n  — a binary-safe byte string
+    # The declared byte count is read here; the data follows as a payload so
+    # that binary content (images, serialised objects) is not mis-parsed.
+    when type_byte == 0x24:
+        required string length until "\r\n" "Bulk Length"
+        required payload data "Bulk Data"
+
+    # *<count>\r\n  followed by <count> RESP elements (most client commands)
+    when type_byte == 0x2A:
+        required string count until "\r\n" "Element Count"
+        required payload data "Array Elements"
+
+    # ── RESP3 types (Redis 6+) ────────────────────────────────────────────────
+
+    # _\r\n  — typed null (replaces the $-1 / *-1 null sentinels of RESP2)
+    when type_byte == 0x5F:
+        required string value until "\r\n" "Null Marker"
+
+    # ,<double>\r\n  — IEEE 754 double as decimal text, or "inf" / "-inf"
+    when type_byte == 0x2C:
+        required string value until "\r\n" "Double"
+
+    # #<t|f>\r\n  — boolean: literal 't' or 'f'
+    when type_byte == 0x23:
+        required string value until "\r\n" "Boolean"
+
+    # (<digits>\r\n  — arbitrary-precision signed integer as decimal text
+    when type_byte == 0x28:
+        required string value until "\r\n" "Big Number"
+
+    # ~<count>\r\n  — unordered set of <count> RESP3 elements
+    when type_byte == 0x7E:
+        required string count until "\r\n" "Set Size"
+        required payload data "Set Elements"
+
+    # |<count>\r\n  — attribute / metadata map of <count> key-value pairs
+    when type_byte == 0x7C:
+        required string count until "\r\n" "Attribute Count"
+        required payload data "Attribute Data"
+
+    # ><count>\r\n  — server-initiated push (Pub/Sub, keyspace notifications)
+    when type_byte == 0x3E:
+        required string count until "\r\n" "Push Count"
+        required payload data "Push Data"
+
+    # %<count>\r\n  — map of <count> key-value pairs (RESP3 equivalent of Hash)
+    when type_byte == 0x25:
+        required string count until "\r\n" "Map Size"
+        required payload data "Map Entries"
+
+    else:
+        required payload data "Data"
+
+    # Info column: type enum label, then whichever of value / count / length is
+    # present for this message.  Missing fields collapse to nothing automatically
+    # so the three trailing %s slots produce at most one visible token.
+    info "%s %s%s%s" type_byte, value, count, length
+
+# ── Detection rules ───────────────────────────────────────────────────────────
+# Content rules are checked first (port-independent) so the protocol is
+# recognised on any port, including Redis Cluster bus ports and TLS proxies.
+# The leading-byte signatures are unambiguous because RESP uses only printable
+# ASCII type bytes that do not start other common protocols.
+
+rule tcp.content "*" => REDIS
+rule tcp.content "+" => REDIS
+rule tcp.content "$" => REDIS
+rule tcp.content ":" => REDIS
+rule tcp.content "-" => REDIS
+rule tcp.content "_" => REDIS
+rule tcp.content "%" => REDIS
+
+# Port rule is a secondary hint — active only when content rules do not match.
+rule tcp.port == 6379 => REDIS
+
+# ── Coloring rules ────────────────────────────────────────────────────────────
+# Most specific first; the catch-all at the end paints anything the engine
+# identified as REDIS but that did not match a more targeted filter above it.
+
+# Error replies stand out with the classic error palette.
+color resp.type_byte == 0x2D => white red
+
+# Push messages (Pub/Sub, keyspace events) share the "tunneled/async" palette.
+color resp.type_byte == 0x3E => white darkblue
+
+# Successful scalar responses — green to match Wireshark's HTTP-200 convention.
+color resp.type_byte == 0x2B => black lightgreen
+color resp.type_byte == 0x3A => black lightgreen
+color resp.type_byte == 0x2C => black lightgreen
+color resp.type_byte == 0x23 => black lightgreen
+color resp.type_byte == 0x28 => black lightgreen
+
+# Client commands and bulk data — yellow to signal request/send direction.
+color resp.type_byte == 0x2A => black lightyellow
+color resp.type_byte == 0x24 => black lightyellow
+color resp.type_byte == 0x7E => black lightyellow
+color resp.type_byte == 0x25 => black lightyellow
+color resp.type_byte == 0x7C => black lightyellow
+
+# Null and unknown — neutral gray.
+color resp.type_byte == 0x5F => black lightgray
+
+# Catch-all: any Redis frame not coloured above.
+color resp => white darkgray
+
+# ── Wireshark-compatible aliases ──────────────────────────────────────────────
+# Map the field names a Wireshark dissector would emit so that display filters
+# written for Wireshark's redis dissector continue to work here.
+
+alias redis.type   => resp.type_byte
+alias redis.data   => resp.data
+alias redis.value  => resp.value
+alias redis.count  => resp.count
+alias redis.length => resp.length
+
+# Convenience macro aliases for common filter expressions.
+alias redis.error   => resp.type_byte == 0x2D
+alias redis.command => resp.type_byte == 0x2A
+alias redis.ok      => resp.type_byte == 0x2B
