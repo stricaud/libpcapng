@@ -79,6 +79,18 @@ typedef struct {
 } content_bind_t;
 static content_bind_t g_cbinds[MAX_CONTENT_BINDS]; static int g_ncbinds;
 
+/* IPv4 CIDR bindings: `rule ip4.src/dst/addr in A.B.C.D/N => Proto`
+   Addresses and masks are stored in host byte order for easy arithmetic.
+   match_src/match_dst control which addresses are checked (addr sets both). */
+#define MAX_IP4_CIDR_BINDS 64
+typedef struct {
+  uint32_t addr;                            /* network address (host byte order) */
+  uint32_t mask;                            /* prefix mask (host byte order) */
+  int match_src, match_dst;                 /* which direction(s) to match */
+  char proto[PCAPNG_POSA_NAME_MAX]; int used;
+} ip4cidr_bind_t;
+static ip4cidr_bind_t g_ip4cidrs[MAX_IP4_CIDR_BINDS]; static int g_nip4cidrs;
+
 /* Aliases: `alias <name> => <rhs>` lets a .posa declare filter/column shortcuts.
    Two shapes, told apart by the right-hand side:
      • field synonym — RHS is a bare field, or a list of them:
@@ -99,6 +111,23 @@ typedef struct {
   int  is_macro, used;
 } alias_t;
 static alias_t g_aliases[MAX_ALIASES]; static int g_naliases;
+
+/* Named lookup tables declared with `Lookup NAME` in a .posa file.
+   Fields reference them via `lookup NAME` to get value-to-label resolution from
+   a table that can hold up to PCAPNG_POSA_LOOKUP_MAX_ENUMS entries (vs the 32
+   inline enum limit on a field). */
+static pcapng_posa_lookup_t *g_lookups[PCAPNG_POSA_MAX_LOOKUPS];
+static int                   g_nlookups;
+
+int pcapng_posa_lookup_count(void) { return g_nlookups; }
+const pcapng_posa_lookup_t *pcapng_posa_find_lookup(const char *name)
+{
+  int i;
+  if (!name || !*name) return NULL;
+  for (i = 0; i < g_nlookups; i++)
+    if (g_lookups[i] && !strcmp(g_lookups[i]->name, name)) return g_lookups[i];
+  return NULL;
+}
 
 static void parse_delim(const char *tok, char *out, int *nout);  /* fwd */
 
@@ -133,7 +162,9 @@ void pcapng_posa_clear(void)
     free(g_protos[i]); g_protos[i] = NULL;
   }
   g_nprotos = 0; g_nbinds = 0; g_ncolors = 0; g_nipbinds = 0; g_nethbinds = 0; g_ncbinds = 0;
-  g_naliases = 0;
+  g_naliases = 0; g_nip4cidrs = 0;
+  { int i; for (i = 0; i < g_nlookups; i++) { free(g_lookups[i]); g_lookups[i] = NULL; } }
+  g_nlookups = 0;
 }
 
 int pcapng_posa_color_count(void) { return g_ncolors; }
@@ -238,6 +269,44 @@ const char *pcapng_posa_bound_content(int ipproto, const uint8_t *data, int len)
   return NULL;
 }
 
+/* Add an IPv4 CIDR binding and implement the public lookup. */
+static void ip4cidr_add(uint32_t addr, uint32_t mask, int msrc, int mdst, const char *proto)
+{
+  if (g_nip4cidrs >= MAX_IP4_CIDR_BINDS) return;
+  g_ip4cidrs[g_nip4cidrs].addr      = addr;
+  g_ip4cidrs[g_nip4cidrs].mask      = mask;
+  g_ip4cidrs[g_nip4cidrs].match_src = msrc;
+  g_ip4cidrs[g_nip4cidrs].match_dst = mdst;
+  snprintf(g_ip4cidrs[g_nip4cidrs].proto, sizeof g_ip4cidrs[g_nip4cidrs].proto, "%s", proto);
+  g_ip4cidrs[g_nip4cidrs].used = 1;
+  g_nip4cidrs++;
+}
+/* Parse a dotted-quad CIDR "A.B.C.D/N" into host-byte-order addr+mask.
+   Returns 1 on success, 0 on parse failure. */
+static int parse_cidr4(const char *s, uint32_t *addr_out, uint32_t *mask_out)
+{
+  unsigned a, b, c, d, pfx;
+  if (sscanf(s, "%u.%u.%u.%u/%u", &a, &b, &c, &d, &pfx) != 5) return 0;
+  if (a > 255 || b > 255 || c > 255 || d > 255 || pfx > 32) return 0;
+  *addr_out = (a << 24) | (b << 16) | (c << 8) | d;
+  *mask_out = pfx ? (~0u << (32 - pfx)) : 0u;
+  return 1;
+}
+const char *pcapng_posa_bound_ip4cidr(const uint8_t *src, const uint8_t *dst)
+{
+  int i;
+  uint32_t s4 = 0, d4 = 0;
+  if (src) s4 = ((uint32_t)src[0]<<24)|((uint32_t)src[1]<<16)|((uint32_t)src[2]<<8)|src[3];
+  if (dst) d4 = ((uint32_t)dst[0]<<24)|((uint32_t)dst[1]<<16)|((uint32_t)dst[2]<<8)|dst[3];
+  for (i = 0; i < g_nip4cidrs; i++) {
+    const ip4cidr_bind_t *b = &g_ip4cidrs[i];
+    if (!b->used) continue;
+    if (b->match_src && src && (s4 & b->mask) == (b->addr & b->mask)) return b->proto;
+    if (b->match_dst && dst && (d4 & b->mask) == (b->addr & b->mask)) return b->proto;
+  }
+  return NULL;
+}
+
 /* ── pcapng_field_t builders (subtree construction) ──────────────────────── */
 static pcapng_field_t *pf_add(pcapng_field_t *parent, const char *abbrev, pcapng_ftype_t vt)
 {
@@ -331,7 +400,7 @@ static int is_kw(const char *t)
 {
   static const char *kw[] = { "required","optional","when","scope","repeat","label","bits",
                               "layer","include","seek","info","col","abbrev","rule","color",
-                              "protocol","Object","end", NULL };
+                              "protocol","Object","end","kvblock","Lookup","lookup", NULL };
   int i;
   if (!strncmp(t, "Object<", 7)) return 1;
   for (i = 0; kw[i]; i++) if (!strcmp(t, kw[i])) return 1;
@@ -374,6 +443,22 @@ static void parse_rule(const char *rest)
         char sig[PCAPNG_POSA_DELIM_MAX]; int n = 0;
         parse_delim(q, sig, &n);
         content_add(ipproto, offset, (const uint8_t *)sig, n, proto);
+      }
+      return;
+    }
+  }
+
+  /* IPv4 CIDR binding: rule ip4.addr/src/dst in A.B.C.D/N => Proto */
+  { char tobj[16] = "", tfield[16] = "", cidr[32] = "";
+    if (sscanf(rest, "%15[a-z0-9].%15[a-z] in %31s", tobj, tfield, cidr) == 3 &&
+        !strcmp(tobj, "ip4")) {
+      uint32_t addr = 0, mask = 0;
+      arrow = strstr(rest, "=>");
+      if (parse_cidr4(cidr, &addr, &mask) && arrow &&
+          sscanf(arrow + 2, " %63s", proto) == 1) {
+        int msrc = (!strcmp(tfield, "src") || !strcmp(tfield, "addr")) ? 1 : 0;
+        int mdst = (!strcmp(tfield, "dst") || !strcmp(tfield, "addr")) ? 1 : 0;
+        ip4cidr_add(addr, mask, msrc, mdst, proto);
       }
       return;
     }
@@ -546,6 +631,16 @@ static int args_after_quote(const char *s, char args[][PCAPNG_POSA_NAME_MAX], in
   return na;
 }
 
+static pcapng_posa_cmp_t parse_op(const char *op)
+{
+  if      (!strcmp(op, "==")) return PCAPNG_POSA_CMP_EQ;
+  else if (!strcmp(op, "!=")) return PCAPNG_POSA_CMP_NE;
+  else if (!strcmp(op, "<"))  return PCAPNG_POSA_CMP_LT;
+  else if (!strcmp(op, ">"))  return PCAPNG_POSA_CMP_GT;
+  else if (!strcmp(op, ">=")) return PCAPNG_POSA_CMP_GE;
+  else if (!strcmp(op, "<=")) return PCAPNG_POSA_CMP_LE;
+  return PCAPNG_POSA_CMP_NONE;
+}
 static void guard_from_toks(char **toks, int start, int nt, pcapng_posa_guard_t *g)
 {
   int i = start;
@@ -554,22 +649,34 @@ static void guard_from_toks(char **toks, int start, int nt, pcapng_posa_guard_t 
   snprintf(g->lhs, sizeof g->lhs, "%s", toks[i]); i++;
   if (i < nt && !strcmp(toks[i], "&")) { i++; if (i < nt) { g->mask = parse_num(toks[i]); i++; } }
   if (i < nt) {
-    const char *op = toks[i]; i++;
-    if      (!strcmp(op, "==")) g->op = PCAPNG_POSA_CMP_EQ;
-    else if (!strcmp(op, "!=")) g->op = PCAPNG_POSA_CMP_NE;
-    else if (!strcmp(op, "<"))  g->op = PCAPNG_POSA_CMP_LT;
-    else if (!strcmp(op, ">"))  g->op = PCAPNG_POSA_CMP_GT;
-    else if (!strcmp(op, ">=")) g->op = PCAPNG_POSA_CMP_GE;
-    else if (!strcmp(op, "<=")) g->op = PCAPNG_POSA_CMP_LE;
-    else { g->op = PCAPNG_POSA_CMP_NE; g->rhs = 0; return; }
-    if (i < nt) g->rhs = parse_num(toks[i]);
-  } else { g->op = PCAPNG_POSA_CMP_NE; g->rhs = 0; }   /* bare "when field:" → truthy */
+    pcapng_posa_cmp_t op = parse_op(toks[i]);
+    if (op == PCAPNG_POSA_CMP_NONE) { g->op = PCAPNG_POSA_CMP_NE; g->rhs = 0; return; }
+    g->op = op; i++;
+    if (i < nt) { g->rhs = parse_num(toks[i]); i++; }
+  } else { g->op = PCAPNG_POSA_CMP_NE; g->rhs = 0; return; }  /* bare "when field:" → truthy */
+  /* optional second condition: `and`/`or` + condition */
+  if (i < nt && (!strcmp(toks[i], "and") || !strcmp(toks[i], "or"))) {
+    g->logic2 = !strcmp(toks[i], "or") ? 1 : 0;
+    i++;
+    if (i < nt) { snprintf(g->lhs2, sizeof g->lhs2, "%s", toks[i]); i++; }
+    if (i < nt && !strcmp(toks[i], "&")) { i++; if (i < nt) { g->mask2 = parse_num(toks[i]); i++; } }
+    if (i < nt) {
+      pcapng_posa_cmp_t op2 = parse_op(toks[i]);
+      if (op2 != PCAPNG_POSA_CMP_NONE) {
+        g->op2 = op2; i++;
+        if (i < nt) g->rhs2 = parse_num(toks[i]);
+      } else if (g->lhs2[0]) {
+        g->op2 = PCAPNG_POSA_CMP_NE; g->rhs2 = 0;   /* bare "and field" → truthy */
+      }
+    }
+  }
 }
 
 static int parse_src(const char *src, char *errbuf, size_t errlen)
 {
   const char *line = src;
   pcapng_posa_proto_t *cur = NULL;
+  pcapng_posa_lookup_t *cur_lookup = NULL;    /* set when inside a Lookup block */
   pcapng_posa_fld_t *lastfld = NULL;
   int added = 0, lineno = 0;
   int blk_indent[32], nblk = 0;               /* open scope/when block indents */
@@ -662,6 +769,28 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     nt = tokenize(buf, toks, 32);
     if (nt == 0) continue;
 
+    /* Lookup NAME — declare a named value-to-label table at file scope.
+       Enum entries ("key" = "Label" or Name = 0xNN) follow indented below it. */
+    if (!strcmp(toks[0], "Lookup") && nt >= 2) {
+      pcapng_posa_lookup_t *lk = NULL;
+      int k;
+      cur = NULL; cur_lookup = NULL; lastfld = NULL;
+      for (k = 0; k < g_nlookups; k++)             /* reuse existing table by name */
+        if (g_lookups[k] && !strcmp(g_lookups[k]->name, toks[1])) { lk = g_lookups[k]; break; }
+      if (!lk) {
+        if (g_nlookups >= PCAPNG_POSA_MAX_LOOKUPS) {
+          if (errbuf) snprintf(errbuf, errlen, "line %d: too many Lookup tables", lineno);
+          return -1;
+        }
+        lk = calloc(1, sizeof *lk);
+        if (!lk) { if (errbuf) snprintf(errbuf, errlen, "out of memory"); return -1; }
+        snprintf(lk->name, sizeof lk->name, "%s", toks[1]);
+        g_lookups[g_nlookups++] = lk;
+      }
+      cur_lookup = lk;
+      continue;
+    }
+
     if (!strncmp(toks[0], "Object<", 7) || !strcmp(toks[0], "protocol") || !strcmp(toks[0], "Object")) {
       char parent[PCAPNG_POSA_NAME_MAX] = "main";
       const char *name = NULL;
@@ -669,7 +798,7 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
          last line is inside a scope/when/repeat must still end balanced, or
          `include` would splice its dangling blocks into its host */
       while (cur && nblk > 0) { add_fld(cur, PCAPNG_POSA_END); nblk--; }
-      nblk = 0; lastfld = NULL;
+      nblk = 0; lastfld = NULL; cur_lookup = NULL;
       if (!strcmp(toks[0], "protocol")) { name = nt > 1 ? toks[1] : NULL; parent[0] = '\0'; }
       else {
         char *gt = strchr(toks[0], '>'); const char *pp = toks[0] + 7;
@@ -698,23 +827,50 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
       added++;
       continue;
     }
-    if (!strcmp(toks[0], "end")) { cur = NULL; nblk = 0; lastfld = NULL; continue; }
-    if (!cur) continue;
+    if (!strcmp(toks[0], "end")) { cur = NULL; cur_lookup = NULL; nblk = 0; lastfld = NULL; continue; }
+    if (!cur && !cur_lookup) continue;
 
-    /* enum line: NAME = value (attaches to the most recent value field). The
-       name is display text and may contain spaces — "Membership Query = 0x11" —
-       so it is taken from the raw line rather than from a single token. */
-    if (lastfld && !is_kw(toks[0]) && strchr(raw, '=')) {
+    /* enum line: NAME = value  (or  "key" = "Label"  for string-keyed entries).
+       Attaches to the most recent value field (when inside an Object), or appends
+       to the current Lookup table (when inside a Lookup block). */
+    if ((lastfld || cur_lookup) && !is_kw(toks[0]) && strchr(raw, '=')) {
       const char *eq = strchr(raw, '=');
       int L = (int)(eq - raw);
       while (L > 0 && (raw[L - 1] == ' ' || raw[L - 1] == '\t')) L--;
-      if (L > 0 && lastfld->nenums < PCAPNG_POSA_MAX_ENUMS) {
-        pcapng_posa_enum_t *e = &lastfld->enums[lastfld->nenums++];
-        snprintf(e->name, sizeof e->name, "%.*s", L, raw);
-        e->val = parse_num(eq + 1);
+      if (L > 0) {
+        pcapng_posa_enum_t *e = NULL;
+        if (lastfld && lastfld->nenums < PCAPNG_POSA_MAX_ENUMS)
+          e = &lastfld->enums[lastfld->nenums++];
+        else if (!lastfld && cur_lookup && cur_lookup->nenums < PCAPNG_POSA_LOOKUP_MAX_ENUMS)
+          e = &cur_lookup->enums[cur_lookup->nenums++];
+        if (e) {
+          if (raw[0] == '"') {
+            /* string-keyed enum: "key" = "Display Name" */
+            const char *q1 = raw + 1, *q2 = strchr(q1, '"');
+            int klen = q2 ? (int)(q2 - q1) : L - 1;
+            snprintf(e->key, sizeof e->key, "%.*s", klen, q1);
+            const char *rhs = eq + 1;
+            while (*rhs == ' ' || *rhs == '\t') rhs++;
+            if (*rhs == '"') {
+              const char *v1 = rhs + 1, *v2 = strchr(v1, '"');
+              int vlen = v2 ? (int)(v2 - v1) : (int)strlen(v1);
+              snprintf(e->name, sizeof e->name, "%.*s", vlen, v1);
+            } else {
+              snprintf(e->name, sizeof e->name, "%.*s", L - (int)(q1 - raw), q1);
+            }
+            e->val = 0;
+          } else {
+            /* numeric enum: Display Name = 0xNN */
+            snprintf(e->name, sizeof e->name, "%.*s", L, raw);
+            e->val = parse_num(eq + 1);
+          }
+        }
       }
       continue;
     }
+
+    /* structural lines below are only valid inside a protocol Object, not a Lookup */
+    if (!cur) continue;
 
     /* everything below is a structural line — close deeper blocks first */
     structural = 1;
@@ -838,9 +994,50 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     }
 
     /* field line:
-       [required|optional] <type> <name> [until "delim"] [mask N] [= default] ["Label"] */
+       [required|optional] <type> <name> [until "delim"] [mask N] [= default] ["Label"]
+       kvblock <name> [sep "<sep>"] ["Label"] — MIME-style Key: Value\r\n header block */
     ti = 0;
     if (!strcmp(toks[0], "required") || !strcmp(toks[0], "optional")) ti = 1;
+
+    if (ti < nt && !strcmp(toks[ti], "kvblock") && ti + 1 < nt) {
+      pcapng_posa_fld_t *f = add_fld(cur, PCAPNG_POSA_KVBLOCK);
+      if (f) {
+        snprintf(f->name, sizeof f->name, "%s", toks[ti + 1]);
+        /* defaults: sep ": ", end sentinel "\r\n\r\n" */
+        memcpy(f->delim, "\r\n\r\n", 4); f->ndelim = 4;
+        memcpy(f->sub, ": ", 3);
+        /* optional sep "..." override — search the raw line because the separator
+           may contain spaces that the tokenizer would split (e.g. sep ": ") */
+        { const char *p = raw;
+          while ((p = strstr(p, "sep")) != NULL) {
+            if ((p == raw || p[-1] == ' ' || p[-1] == '\t') &&
+                (p[3] == ' ' || p[3] == '\t' || p[3] == '"')) {
+              const char *q = strchr(p + 3, '"');
+              if (q) {
+                char tmp[PCAPNG_POSA_DELIM_MAX]; int n = 0;
+                parse_delim(q, tmp, &n);
+                if (n > 0 && n < (int)sizeof f->sub) { memcpy(f->sub, tmp, n); f->sub[n] = '\0'; }
+              }
+              break;
+            }
+            p += 3;
+          }
+        }
+        /* label: the last quoted string on the line */
+        { const char *p = raw, *lq1 = NULL, *lq2 = NULL;
+          while (*p) {
+            const char *q1 = strchr(p, '"'), *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+            if (!q1 || !q2) break;
+            lq1 = q1; lq2 = q2; p = q2 + 1;
+          }
+          if (lq1 && lq2)
+            snprintf(f->disp, sizeof f->disp, "%.*s", (int)(lq2 - lq1 - 1), lq1 + 1);
+        }
+      }
+      lastfld = NULL;
+      continue;
+    }
+
     if (ti < nt && (is_type_tok(toks[ti]) || !strcmp(toks[ti], "string"))) {
       pcapng_posa_fld_t *f = add_fld(cur, PCAPNG_POSA_U8);
       if (!f) continue;
@@ -859,6 +1056,8 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
       { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "mask") && k + 1 < nt) {
           f->mask = parse_num(toks[k + 1]); break; } }
       { int k; for (k = ti + 1; k < nt; k++) if (!strcmp(toks[k], "hex")) { f->hex = 1; break; } }
+      { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "lookup") && k + 1 < nt) {
+          snprintf(f->lookup_name, sizeof f->lookup_name, "%s", toks[k + 1]); break; } }
       /* the label is the quoted string — but on a `string … until "\r\n"` line the
          first quoted string is the delimiter, so the label is the one after it */
       { const char *q = raw;
@@ -913,7 +1112,32 @@ int pcapng_posa_load_dir(const char *dir)
 
 /* ── interpreter ─────────────────────────────────────────────────────────── */
 static const char *enum_name(const pcapng_posa_fld_t *f, uint64_t v)
-{ int i; for (i = 0; i < f->nenums; i++) if (f->enums[i].val == v) return f->enums[i].name; return NULL; }
+{
+  int i;
+  for (i = 0; i < f->nenums; i++)
+    if (!f->enums[i].key[0] && f->enums[i].val == v) return f->enums[i].name;
+  if (f->lookup_name[0]) {
+    const pcapng_posa_lookup_t *lk = pcapng_posa_find_lookup(f->lookup_name);
+    if (lk)
+      for (i = 0; i < lk->nenums; i++)
+        if (!lk->enums[i].key[0] && lk->enums[i].val == v) return lk->enums[i].name;
+  }
+  return NULL;
+}
+
+static const char *enum_name_str(const pcapng_posa_fld_t *f, const char *text)
+{
+  int i;
+  for (i = 0; i < f->nenums; i++)
+    if (f->enums[i].key[0] && strcmp(f->enums[i].key, text) == 0) return f->enums[i].name;
+  if (f->lookup_name[0]) {
+    const pcapng_posa_lookup_t *lk = pcapng_posa_find_lookup(f->lookup_name);
+    if (lk)
+      for (i = 0; i < lk->nenums; i++)
+        if (lk->enums[i].key[0] && strcmp(lk->enums[i].key, text) == 0) return lk->enums[i].name;
+  }
+  return NULL;
+}
 
 static int fld_fixed_size(const pcapng_posa_fld_t *f)
 {
@@ -961,22 +1185,32 @@ static void seen_add(seen_t *seen, int *nseen, const char *name, uint64_t val, u
 static const seen_t *seen_get(const seen_t *seen, int nseen, const char *name)
 { int i; for (i = nseen - 1; i >= 0; i--) if (!strcmp(seen[i].name, name)) return &seen[i]; return NULL; }
 
-static int guard_ok(const pcapng_posa_guard_t *g, const seen_t *seen, int nseen, int off, int lim)
+static int guard_eval1(pcapng_posa_cmp_t op, uint64_t lv, uint64_t mask, uint64_t rhs)
 {
-  uint64_t lv = 0;
-  if (g->op == PCAPNG_POSA_CMP_NONE) return 1;
-  if (!strcmp(g->lhs, "remaining"))    lv = (uint64_t)(lim - off);
-  else { const seen_t *s = seen_get(seen, nseen, g->lhs); if (s) lv = s->val; }
-  if (g->mask) lv &= g->mask;
-  switch (g->op) {
-  case PCAPNG_POSA_CMP_EQ: return lv == g->rhs;
-  case PCAPNG_POSA_CMP_NE: return lv != g->rhs;
-  case PCAPNG_POSA_CMP_LT: return lv <  g->rhs;
-  case PCAPNG_POSA_CMP_GT: return lv >  g->rhs;
-  case PCAPNG_POSA_CMP_GE: return lv >= g->rhs;
-  case PCAPNG_POSA_CMP_LE: return lv <= g->rhs;
+  if (mask) lv &= mask;
+  switch (op) {
+  case PCAPNG_POSA_CMP_EQ: return lv == rhs;
+  case PCAPNG_POSA_CMP_NE: return lv != rhs;
+  case PCAPNG_POSA_CMP_LT: return lv <  rhs;
+  case PCAPNG_POSA_CMP_GT: return lv >  rhs;
+  case PCAPNG_POSA_CMP_GE: return lv >= rhs;
+  case PCAPNG_POSA_CMP_LE: return lv <= rhs;
   default: return 1;
   }
+}
+static uint64_t guard_lv(const char *name, const seen_t *seen, int nseen, int off, int lim)
+{
+  if (!strcmp(name, "remaining")) return (uint64_t)(lim - off);
+  { const seen_t *s = seen_get(seen, nseen, name); return s ? s->val : 0; }
+}
+static int guard_ok(const pcapng_posa_guard_t *g, const seen_t *seen, int nseen, int off, int lim)
+{
+  int r1, r2;
+  if (g->op == PCAPNG_POSA_CMP_NONE) return 1;
+  r1 = guard_eval1(g->op, guard_lv(g->lhs, seen, nseen, off, lim), g->mask, g->rhs);
+  if (g->op2 == PCAPNG_POSA_CMP_NONE) return r1;
+  r2 = guard_eval1(g->op2, guard_lv(g->lhs2, seen, nseen, off, lim), g->mask2, g->rhs2);
+  return g->logic2 ? (r1 || r2) : (r1 && r2);
 }
 
 /* Expand `"fmt" arg, arg` against the parsed fields. %s = display text, %u/%d =
@@ -1298,7 +1532,9 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
         tmp[n] = '\0';
         for (k = 0; k < sz && k < 8; k++) num = (num << 8) | data[off + k];
         cf = pf_add(cur, ab, PCAPNG_FT_STR); pf_str(cf, tmp);
-        pf_label(cf, "%s: %s", fld_disp(f), tmp);
+        { const char *en = enum_name_str(f, tmp);
+          if (en) pf_label(cf, "%s: %s (%s)", fld_disp(f), en, tmp);
+          else    pf_label(cf, "%s: %s", fld_disp(f), tmp); }
         seen_add(seen, &nseen, f->name, num, num, off, off + sz, tmp); break; }
       default: break;
       }
@@ -1321,7 +1557,9 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       tmp[n] = '\0';
       if (off < lim && data[off] == '\0') off++;
       cf = pf_add(cur, ab, PCAPNG_FT_STR); pf_str(cf, tmp);
-      pf_label(cf, "%s: %s", fld_disp(f), tmp);
+      { const char *en = enum_name_str(f, tmp);
+        if (en) pf_label(cf, "%s: %s (%s)", fld_disp(f), en, tmp);
+        else    pf_label(cf, "%s: %s", fld_disp(f), tmp); }
       pf_range(cf, abs_off + start, off - start);
       seen_add(seen, &nseen, f->name, (uint64_t)n, (uint64_t)n, start, off, tmp);
     } else if (f->type == PCAPNG_POSA_STR_DELIM) {
@@ -1333,7 +1571,9 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       memcpy(tmp, data + start, (size_t)n); tmp[n] = '\0';
       if (d >= 0) off = d + f->ndelim;
       cf = pf_add(cur, ab, PCAPNG_FT_STR); pf_str(cf, tmp);
-      pf_label(cf, "%s: %s", fld_disp(f), tmp);
+      { const char *en = enum_name_str(f, tmp);
+        if (en) pf_label(cf, "%s: %s (%s)", fld_disp(f), en, tmp);
+        else    pf_label(cf, "%s: %s", fld_disp(f), tmp); }
       pf_range(cf, abs_off + start, off - start);
       seen_add(seen, &nseen, f->name, (uint64_t)n, (uint64_t)n, start, off, tmp);
     } else if (f->type == PCAPNG_POSA_UTF16) {
@@ -1379,6 +1619,54 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       }
       pf_range(cf, abs_off + off, n);
       off += n;
+    } else if (f->type == PCAPNG_POSA_KVBLOCK) {
+      const char *sep = f->sub[0] ? f->sub : ": ";
+      int seplen = (int)strlen(sep);
+      int end_pos = (f->ndelim > 0) ? find_delim(data, off, lim, f->delim, f->ndelim) : -1;
+      int block_end = (end_pos >= 0) ? end_pos + f->ndelim : lim;
+      int pos = off;
+      /* parent node covers the entire header block */
+      cf = pf_add(cur, ab, PCAPNG_FT_NONE);
+      pf_label(cf, "%s", fld_disp(f));
+      pf_range(cf, abs_off + off, block_end - off);
+      while (pos < block_end) {
+        int line_end = -1, lsz = 2, k;
+        for (k = pos; k < block_end - 1; k++)
+          if (data[k] == '\r' && data[k+1] == '\n') { line_end = k; lsz = 2; break; }
+        if (line_end < 0) {
+          for (k = pos; k < block_end; k++)
+            if (data[k] == '\n') { line_end = k; lsz = 1; break; }
+        }
+        if (line_end < 0) break;
+        if (line_end == pos) { pos += lsz; break; }  /* blank line */
+        int sep_pos = -1;
+        for (k = pos; k <= line_end - seplen; k++)
+          if (memcmp(data + k, sep, (size_t)seplen) == 0) { sep_pos = k; break; }
+        if (sep_pos < 0) { pos = line_end + lsz; continue; }
+        int key_len = sep_pos - pos;
+        int val_len = line_end - (sep_pos + seplen);
+        if (key_len <= 0 || key_len >= PCAPNG_POSA_NAME_MAX) { pos = line_end + lsz; continue; }
+        char key_norm[PCAPNG_POSA_NAME_MAX], key_orig[PCAPNG_POSA_NAME_MAX], val_buf[256];
+        int kn = key_len < PCAPNG_POSA_NAME_MAX - 1 ? key_len : PCAPNG_POSA_NAME_MAX - 2;
+        memcpy(key_orig, data + pos, kn); key_orig[kn] = '\0';
+        for (k = 0; k < kn; k++) {
+          unsigned char c = (unsigned char)data[pos + k];
+          key_norm[k] = (c == '-' || c == ' ') ? '_' : (char)tolower(c);
+        }
+        key_norm[kn] = '\0';
+        if (val_len < 0) val_len = 0;
+        int vl = val_len < (int)sizeof val_buf - 1 ? val_len : (int)sizeof val_buf - 2;
+        memcpy(val_buf, data + sep_pos + seplen, (size_t)vl); val_buf[vl] = '\0';
+        char child_ab[PCAPNG_FIELD_ABBREV_MAX];
+        snprintf(child_ab, sizeof child_ab, "%s.%s", ab, key_norm);
+        { pcapng_field_t *cfc = pf_add(cf, child_ab, PCAPNG_FT_STR);
+          pf_str(cfc, val_buf);
+          pf_label(cfc, "%s: %s", key_orig, val_buf);
+          pf_range(cfc, abs_off + pos, line_end + lsz - pos); }
+        seen_add(seen, &nseen, key_norm, 0, 0, pos, line_end + lsz, val_buf);
+        pos = line_end + lsz;
+      }
+      off = block_end;
     } else if (f->type == PCAPNG_POSA_PAYLOAD) {
       int n = lim - off; if (n < 0) n = 0;
       cf = pf_add(cur, ab, PCAPNG_FT_BYTES); pf_bytes(cf, data + off, n);

@@ -1,0 +1,225 @@
+# IEC 60870-5-104 (IEC-104) — Telecontrol Equipment and Systems
+# TCP companion standard to IEC 60870-5-101 for SCADA / EMS power-system telecontrol.
+# Reference: IEC 60870-5-104:2006 (Edition 2)
+# TCP Port: 2404
+#
+# Every APDU begins with a fixed start byte 0x68 followed by the APDU length,
+# then a 4-byte control field whose first byte selects the frame format:
+#
+#   ctrl0 bits 1-0 = 00 or 10  →  I-format: information transfer, carries ASDU
+#   ctrl0 bits 1-0 = 01        →  S-format: supervisory, RSN acknowledgement only
+#   ctrl0 bits 1-0 = 11        →  U-format: unnumbered (STARTDT / STOPDT / TESTFR)
+#
+# I-format send sequence number (SSN): bits 7-1 of ctrl0 give SSN[6:0],
+#   ctrl1 gives SSN[14:7]; combined 15-bit value = ssn_lo | (ssn_hi << 7).
+# Receive sequence number (RSN) for I and S: ctrl2[7:1] and ctrl3[7:0] as 15 bits.
+#
+# ASDU structure (I-format only, starts at byte offset 6):
+#   type_id   — data type identifier (1=SPS, 13=MvFl, 45=SC, 100=IC, ...)
+#   sq_num    — bit7: SQ flag; bits 6-0: number of information objects
+#   cause     — LE uint16: bits 5-0 COT, bit6 P/N, bit7 T, bits 15-8 originator
+#   common_addr — LE uint16: ASDU common address (station address)
+#   objects   — variable-length information object payload
+
+Object<main> IEC104
+    abbrev "iec104"
+    col "IEC-104"
+
+    required uint8 start_byte = 0x68 "Start (0x68)"
+    required uint8 apdu_length       "APDU Length"
+
+    # ── Control field byte 0 — determines frame format ──────────────────────────
+    required uint8 ctrl0             "Control Byte 0"
+    bits ctrl0 format_type 0 2       "Format"
+        0 = "I-format"
+        1 = "S-format"
+        2 = "I-format"
+        3 = "U-format"
+
+    # ── U-format: unnumbered control functions ───────────────────────────────────
+    # ctrl0 = UType | 0x03; ctrl1..ctrl3 are always 0x00.
+    # UType occupies bits 7-2; the two LSBs are the 0b11 format indicator.
+    when format_type == 3:
+        bits ctrl0 utype 2 6 "U-Function"
+            1  = "STARTDT act"
+            2  = "STARTDT con"
+            4  = "STOPDT act"
+            8  = "STOPDT con"
+            16 = "TESTFR act"
+            32 = "TESTFR con"
+        required uint8 ctrl1 "Control Byte 1"
+        required uint8 ctrl2 "Control Byte 2"
+        required uint8 ctrl3 "Control Byte 3"
+
+    # ── S-format: supervisory frame — receive-sequence acknowledgement only ──────
+    # ctrl0 = 0x01, ctrl1 = 0x00; ctrl2+ctrl3 carry the 15-bit RSN.
+    when format_type == 1:
+        required uint8 ctrl1           "Control Byte 1"
+        required le_uint16 rsn_word    "RSN Word"
+        bits rsn_word recv_seq 1 15    "Receive Sequence Number"
+
+    # ── I-format: information transfer — carries an ASDU ────────────────────────
+    # SSN = ssn_lo | (ssn_hi << 7) gives the 15-bit send sequence number.
+    # RSN is encoded identically to S-format in ctrl2+ctrl3.
+    else:
+        bits ctrl0 ssn_lo 1 7          "SSN Low (bits 0-6)"
+        required uint8 ssn_hi          "SSN High (bits 7-14)"
+        required le_uint16 rsn_word    "RSN Word"
+        bits rsn_word recv_seq 1 15    "Receive Sequence Number"
+
+        # ── ASDU: Application Service Data Unit ──────────────────────────────────
+        required uint8 type_id         "Type ID"
+            1   = "Single-Point Information (SPS)"
+            3   = "Double-Point Information (DPS)"
+            5   = "Step Position Information"
+            7   = "Bitstring of 32 Bits"
+            9   = "Measured Value, Normalized"
+            11  = "Measured Value, Scaled"
+            13  = "Measured Value, Float"
+            15  = "Integrated Totals"
+            20  = "Packed Single-Point with SCD"
+            21  = "Normalized Value without Quality"
+            30  = "Single-Point Info with Time"
+            31  = "Double-Point Info with Time"
+            34  = "Step Position with Time"
+            35  = "Bitstring of 32 Bits with Time"
+            36  = "Measured Value, Float with Time"
+            37  = "Integrated Totals with Time"
+            45  = "Single Command (SC)"
+            46  = "Double Command (DC)"
+            47  = "Regulating Step Command"
+            48  = "Set-Point, Normalized"
+            49  = "Set-Point, Scaled"
+            50  = "Set-Point, Float"
+            51  = "Bitstring 32-bit Command"
+            58  = "Single Command with Time"
+            59  = "Double Command with Time"
+            60  = "Regulating Step Command with Time"
+            61  = "Set-Point, Normalized with Time"
+            62  = "Set-Point, Scaled with Time"
+            63  = "Set-Point, Float with Time"
+            70  = "End of Initialization"
+            100 = "Interrogation Command"
+            101 = "Counter Interrogation Command"
+            102 = "Read Command"
+            103 = "Clock Synchronization"
+            104 = "Test Command"
+            105 = "Reset Process Command"
+            106 = "Delay Acquisition Command"
+            107 = "Test Command with Time"
+            110 = "Parameter, Normalized"
+            111 = "Parameter, Scaled"
+            112 = "Parameter, Float"
+            113 = "Parameter Activation"
+            120 = "File Ready"
+            121 = "Section Ready"
+            122 = "Call Directory / Select File"
+            123 = "Last Section / Segment"
+            124 = "Ack File / Section"
+            125 = "Segment"
+            126 = "Directory"
+
+        required uint8 sq_num          "Structure Qualifier"
+        bits sq_num sq_flag 7 1        "SQ"
+            0 = "Discrete Objects"
+            1 = "Sequential Elements"
+        bits sq_num num_objects 0 7    "Number of Objects"
+
+        # cause: LE uint16 — bits 5-0 = COT, bit6 = P/N, bit7 = T, bits 15-8 = OA
+        required le_uint16 cause       "Cause of Transmission"
+        bits cause cot_code 0 6        "COT Code"
+            1  = "Periodic/Cyclic"
+            2  = "Background Scan"
+            3  = "Spontaneous"
+            4  = "Initialized"
+            5  = "Interrogation"
+            6  = "Activation"
+            7  = "Activation Confirmation"
+            8  = "Deactivation"
+            9  = "Deactivation Confirmation"
+            10 = "Activation Termination"
+            11 = "Return Info (Remote)"
+            12 = "Return Info (Local)"
+            13 = "File Transfer"
+            20 = "Interrogated (Global)"
+            21 = "Interrogated, Group 1"
+            22 = "Interrogated, Group 2"
+            23 = "Interrogated, Group 3"
+            24 = "Interrogated, Group 4"
+            25 = "Interrogated, Group 5"
+            26 = "Interrogated, Group 6"
+            27 = "Interrogated, Group 7"
+            28 = "Interrogated, Group 8"
+            29 = "Interrogated, Group 9"
+            30 = "Interrogated, Group 10"
+            31 = "Interrogated, Group 11"
+            32 = "Interrogated, Group 12"
+            33 = "Interrogated, Group 13"
+            34 = "Interrogated, Group 14"
+            35 = "Interrogated, Group 15"
+            36 = "Interrogated, Group 16"
+            37 = "Counter Request (General)"
+            38 = "Counter, Group 1"
+            39 = "Counter, Group 2"
+            40 = "Counter, Group 3"
+            41 = "Counter, Group 4"
+            44 = "Unknown Type ID"
+            45 = "Unknown COT"
+            46 = "Unknown ASDU Address"
+            47 = "Unknown IOA"
+        bits cause pn_flag 6 1         "P/N"
+            0 = "Positive"
+            1 = "Negative"
+        bits cause test_flag 7 1       "Test"
+            0 = "Live"
+            1 = "Test"
+        bits cause orig_addr 8 8       "Originator Address"
+
+        required le_uint16 common_addr "ASDU Common Address"
+
+        payload objects                "Information Objects"
+
+    info "IEC-104 %s %s COT=%s Addr=%u" utype, type_id, cot_code, common_addr
+
+
+# ── Content Detection Rules (primary — port-independent) ──────────────────────
+# 0x68 is the fixed IEC 60870-5 start byte; reliable on non-standard ports
+# (e.g. tunnelled SCADA links or alternate TCP ports in substation networks).
+# Listed before the port rule so content detection fires first.
+rule tcp.content "\x68" => IEC104
+
+# ── Port Rule (secondary — standard IANA assignment) ──────────────────────────
+rule tcp.port == 2404 => IEC104
+
+
+# ── Coloring Rules ─────────────────────────────────────────────────────────────
+# Most-specific rules first; first match wins.
+
+# STARTDT / STOPDT — data transfer session control; operationally significant
+color iec104.utype == 1 || iec104.utype == 2 || iec104.utype == 4 || iec104.utype == 8 => black yellow
+
+# TESTFR — keepalive probes; low-priority background traffic
+color iec104.utype == 16 || iec104.utype == 32 => white darkgray
+
+# Command type-IDs: SC, DC, SC+T, DC+T — actuating field devices; highest concern
+color iec104.type_id == 45 || iec104.type_id == 46 || iec104.type_id == 58 || iec104.type_id == 59 => white red
+
+# Status information: single-point, double-point, and time-tagged variants
+color iec104.type_id == 1 || iec104.type_id == 3 || iec104.type_id == 30 || iec104.type_id == 31 => black lightgreen
+
+# Measurement values: normalized, scaled, float — analog telemetry
+color iec104.type_id == 9 || iec104.type_id == 11 || iec104.type_id == 13 || iec104.type_id == 36 => white darkblue
+
+# Protocol catch-all — interrogation, clock sync, counter, file transfer, S-frames
+color iec104 => black lightgray
+
+
+# ── Wireshark-Compatible Aliases ───────────────────────────────────────────────
+# Map Wireshark's iec104 dissector field paths to POSA names so that existing
+# display filters and coloring rules continue to work without modification.
+
+# iec104.type_id is already the canonical name — no remapping required
+# The Wireshark "cot" field covers the full 2-byte cause word; map to our field
+alias iec104.cot        => iec104.cause
+# Wireshark uses "asdu_addr" for the common address field
+alias iec104.asdu_addr  => iec104.common_addr

@@ -105,8 +105,8 @@ typedef struct {
 
 /* ---- Lexer ---- */
 
-typedef enum { T_WORD, T_STR, T_LP, T_RP, T_AND, T_OR, T_NOT,
-               T_EQ, T_NE, T_GT, T_LT, T_GE, T_LE, T_EOF } ttype_t;
+typedef enum { T_WORD, T_STR, T_LP, T_RP, T_LC, T_RC, T_AND, T_OR, T_NOT,
+               T_EQ, T_NE, T_GT, T_LT, T_GE, T_LE, T_IN, T_EOF } ttype_t;
 
 typedef struct { ttype_t t; char s[160]; } tok_t;
 typedef struct { const char *p; tok_t cur; char err[200]; } lex_t;
@@ -123,6 +123,8 @@ static void lex_next(lex_t *L)
     switch (*p) {
     case '(': L->cur.t = T_LP;  L->p = p + 1; return;
     case ')': L->cur.t = T_RP;  L->p = p + 1; return;
+    case '{': L->cur.t = T_LC;  L->p = p + 1; return;
+    case '}': L->cur.t = T_RC;  L->p = p + 1; return;
     case '&': if (p[1]=='&') { L->cur.t = T_AND; L->p = p+2; return; } break;
     case '|': if (p[1]=='|') { L->cur.t = T_OR;  L->p = p+2; return; } break;
     case '=': if (p[1]=='=') { L->cur.t = T_EQ;  L->p = p+2; return; } break;
@@ -159,6 +161,7 @@ static void lex_next(lex_t *L)
         if (!strcmp(L->cur.s, "ge"))      { L->cur.t = T_GE;  return; }
         if (!strcmp(L->cur.s, "le"))      { L->cur.t = T_LE;  return; }
         if (!strcmp(L->cur.s, "contains")){ L->cur.t = T_EQ; snprintf(L->cur.s, sizeof L->cur.s, "contains"); return; }
+        if (!strcmp(L->cur.s, "in"))      { L->cur.t = T_IN; return; }
         L->cur.t = T_WORD; return;
     }
     snprintf(L->err, sizeof L->err, "unexpected character '%c'", *p);
@@ -207,11 +210,37 @@ static fnode_t *parse_primary(lex_t *L)
         /* existence test if no operator follows */
         ttype_t ot = L->cur.t;
         if (ot != T_EQ && ot != T_NE && ot != T_GT && ot != T_LT &&
-            ot != T_GE && ot != T_LE) {
+            ot != T_GE && ot != T_LE && ot != T_IN) {
             fnode_t *n = fnode_new(N_EXISTS);
             if (!n) return NULL;
             snprintf(n->field, sizeof n->field, "%s", field);
             return n;
+        }
+
+        /* `field in { val1 val2 ... }` or `field in val` — expands to OR chain */
+        if (ot == T_IN) {
+            lex_next(L);   /* consume "in" */
+            int use_braces = (L->cur.t == T_LC);
+            if (use_braces) lex_next(L);  /* consume '{' */
+            fnode_t *root = NULL;
+            while (L->cur.t == T_WORD || L->cur.t == T_STR) {
+                fnode_t *cmp = fnode_new(N_CMP);
+                if (!cmp) { fnode_free(root); return NULL; }
+                snprintf(cmp->field, sizeof cmp->field, "%s", field);
+                cmp->op = OP_EQ;
+                snprintf(cmp->value, sizeof cmp->value, "%s", L->cur.s);
+                lex_next(L);
+                if (!root) { root = cmp; }
+                else {
+                    fnode_t *or = fnode_new(N_OR);
+                    if (!or) { fnode_free(root); fnode_free(cmp); return NULL; }
+                    or->a = root; or->b = cmp; root = or;
+                }
+                if (!use_braces) break;   /* single-value form: stop after first */
+            }
+            if (use_braces && L->cur.t == T_RC) lex_next(L);  /* consume '}' */
+            if (!root) { snprintf(L->err, sizeof L->err, "empty 'in' set"); return NULL; }
+            return root;
         }
 
         op_t op;

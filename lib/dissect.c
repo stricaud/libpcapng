@@ -789,6 +789,11 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     { const char *cn = pcapng_posa_bound_content(6, pl, pll);
       if (cn && dispatch_named(c, cn, pl, pll, root)) { flow_record(fkey, cn); return; } }
 
+    /* IP CIDR rule: `rule ip4.addr/src/dst in A.B.C.D/N => Proto` */
+    { const char *nm = pcapng_posa_bound_ip4cidr(c->l3v6 ? NULL : c->l3src,
+                                                  c->l3v6 ? NULL : c->l3dst);
+      if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }
+
     /* then the port rule (posa); remember what the flow resolved to so its later
        (unrecognisable) packets can inherit it via the sticky lookup below */
     { const char *nm = pcapng_posa_bound_port(6, dp);
@@ -860,6 +865,9 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
 
     { const char *cn = pcapng_posa_bound_content(17, pl, pll);   /* content wins over port */
       if (cn && dispatch_named(c, cn, pl, pll, root)) { flow_record(fkey, cn); return; } }
+    { const char *nm = pcapng_posa_bound_ip4cidr(c->l3v6 ? NULL : c->l3src,
+                                                   c->l3v6 ? NULL : c->l3dst);
+      if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }
     { const char *nm = pcapng_posa_bound_port(17, dp);
       if (!nm) nm = pcapng_posa_bound_port(17, sp);
       if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }

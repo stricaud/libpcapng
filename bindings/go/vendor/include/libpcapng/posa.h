@@ -63,9 +63,16 @@ typedef enum {
   PCAPNG_POSA_SEEK,          /* seek <offsetfield|number> — jump to an offset carried
                                 by the protocol itself (SMB2 places its blobs
                                 by offset-from-header, not in field order)    */
-  PCAPNG_POSA_ELSE           /* else: — the arm taken when the `when` above it
+  PCAPNG_POSA_ELSE,          /* else: — the arm taken when the `when` above it
                                 at the same indent was not (DHCP: decode the
                                 options we know, show the rest as bytes)      */
+  PCAPNG_POSA_KVBLOCK        /* kvblock <name> [sep "..."] ["Label"]
+                                Parse a MIME-style "Key: Value\r\n" header block
+                                into named child fields. sub[] holds the separator
+                                (default ": "); delim/ndelim hold the end sentinel
+                                (default "\r\n\r\n"). Each header becomes a child
+                                field at <proto>.<name>.<normalized_key>, enabling
+                                display filters like sip.headers.content_type.   */
 } pcapng_posa_ftype_t;
 
 #define PCAPNG_POSA_NAME_MAX   64
@@ -75,9 +82,29 @@ typedef enum {
 #define PCAPNG_POSA_LABEL_MAX  96
 #define PCAPNG_POSA_MAX_LARGS   6
 
-typedef struct { char name[PCAPNG_POSA_NAME_MAX]; uint64_t val; } pcapng_posa_enum_t;
+typedef struct {
+  char     name[PCAPNG_POSA_NAME_MAX]; /* display label: "OK", "Ringing", … */
+  uint64_t val;                         /* numeric key (uint fields)          */
+  char     key[PCAPNG_POSA_NAME_MAX];  /* string key — set when LHS is "…"   */
+} pcapng_posa_enum_t;
 
-/* A conditional guard: parse the field only when <field> <op> [mask] value. */
+/* Lookup table: a named collection of string or numeric enum entries, declared
+ * with `Lookup NAME` and referenced from any field with `lookup NAME`.
+ * Decouples large value-to-label tables (SIP status codes, SMTP reply codes,
+ * HTTP methods, …) from the field that uses them, enabling sharing and keeping
+ * protocol objects clean. */
+#define PCAPNG_POSA_LOOKUP_MAX_ENUMS 128
+#define PCAPNG_POSA_MAX_LOOKUPS       64
+typedef struct {
+  char               name[PCAPNG_POSA_NAME_MAX];
+  pcapng_posa_enum_t enums[PCAPNG_POSA_LOOKUP_MAX_ENUMS];
+  int                nenums;
+} pcapng_posa_lookup_t;
+
+/* A conditional guard: parse the field only when <field> [& mask] <op> value.
+   Supports compound conditions joined by `and`/`or`:
+     when command == 5 and response == 0:
+     when flags & 0x01 == 0 or flags & 0x02 == 0x02: */
 typedef enum { PCAPNG_POSA_CMP_NONE = 0, PCAPNG_POSA_CMP_EQ, PCAPNG_POSA_CMP_NE,
                PCAPNG_POSA_CMP_LT, PCAPNG_POSA_CMP_GT, PCAPNG_POSA_CMP_GE,
                PCAPNG_POSA_CMP_LE } pcapng_posa_cmp_t;
@@ -86,6 +113,12 @@ typedef struct {
   char     lhs[PCAPNG_POSA_NAME_MAX];   /* field name, or "remaining" */
   uint64_t mask;                        /* 0 = no mask */
   uint64_t rhs;
+  /* optional second condition: `when A and B:` or `when A or B:` */
+  pcapng_posa_cmp_t op2;
+  char     lhs2[PCAPNG_POSA_NAME_MAX];
+  uint64_t mask2;
+  uint64_t rhs2;
+  int      logic2;                      /* 0 = AND (default), 1 = OR */
 } pcapng_posa_guard_t;
 
 typedef struct {
@@ -115,6 +148,9 @@ typedef struct {
   int                 until_end;
   char                largs[PCAPNG_POSA_MAX_LARGS][PCAPNG_POSA_NAME_MAX];
   int                 nlargs;
+  /* `lookup NAME` — reference to a named Lookup table for value-to-label
+     resolution; "" means use inline enums only. */
+  char                lookup_name[PCAPNG_POSA_NAME_MAX];
 } pcapng_posa_fld_t;
 
 typedef struct {
@@ -151,6 +187,9 @@ void pcapng_posa_clear(void);
 int  pcapng_posa_count(void);
 const pcapng_posa_proto_t *pcapng_posa_at(int index);
 const pcapng_posa_proto_t *pcapng_posa_find(const char *name);
+
+int pcapng_posa_lookup_count(void);
+const pcapng_posa_lookup_t *pcapng_posa_find_lookup(const char *name);
 /* Resolve a name to a concrete protocol, or — if it names an Object<parent>
    group — the sub-protocol whose first field matches `data`. NULL if neither. */
 const pcapng_posa_proto_t *pcapng_posa_resolve(const char *name, const uint8_t *data, int len);
@@ -175,6 +214,9 @@ const char *pcapng_posa_bound_ethertype(uint16_t ethertype);
 /* Decoder claimed by a `rule content "…"` signature the payload starts with.
    ip_proto is the transport (6/17); tried after port binding fails. */
 const char *pcapng_posa_bound_content(int ip_proto, const uint8_t *data, int len);
+/* Decoder claimed by a `rule ip4.addr/src/dst in A.B.C.D/N => Proto` CIDR rule.
+   src and dst are 4-byte IPv4 addresses in network byte order (may be NULL). */
+const char *pcapng_posa_bound_ip4cidr(const uint8_t *src, const uint8_t *dst);
 
 /* Expand a field-synonym alias (`alias <name> => <field> …`). Writes up to
    `max` target abbrevs into `out` and returns the count, or 0 if `field` is not

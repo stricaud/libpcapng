@@ -36,17 +36,21 @@ rule udp.port == 69 => TFTP_RRQ
   Without it fields are named after the object.
 * `col "TFTP"` is the Protocol column. `info "…"` is the Info column (§8).
 * `rule` binds it (§9).
-* Indented `NAME = value` lines under a field are its enum labels (§4).
+* Indented `NAME = value` lines under a field are its enum labels (§4). For tables larger than 32 entries declare a `Lookup NAME` and reference it with `lookup NAME` on the field line.
 
 Field lines are:
 
 ```
-[required|optional] <type> <name> [until "<delim>"] [mask N] [hex] [= default] ["Label"]
+[type] <name> [until "<delim>"] [mask N] [hex] [= default] ["Label"]
 ```
 
 `"Label"` is the display text in the tree (`Opcode: RRQ (1)`); without it the
-field's name is used. `required`/`optional` read the same today — both parse the
-field if the bytes are there.
+field's name is used. Fields are required by default — decoding stops when there
+are not enough bytes for a field. Add the `optional` keyword to fields that may
+legitimately be absent; they are silently skipped when bytes run out.
+
+The legacy `required` keyword is accepted and has the same effect as no keyword.
+New files should omit it.
 
 ---
 
@@ -65,6 +69,7 @@ field if the bytes are there.
 | `utf16[lenfield]` | value of `lenfield` | UTF-16LE text (SMB2 file and share names) |
 | `cstring` | until `\0` | NUL-terminated text |
 | `string … until "<delim>"` | until the delimiter | delimited text (HTTP lines) |
+| `kvblock <name> [sep "<sep>"]` | until `\r\n\r\n` | MIME-style header block (see §3) |
 | `dnsname` | one encoded name | DNS labels, following `0xc0` compression pointers |
 | `payload` | all that is left | the rest of the enclosing scope |
 
@@ -161,6 +166,60 @@ repeat questions as query "Queries"
 Records can nest: an IGMPv3 report repeats group records, and each group record
 repeats its source addresses.
 
+### `kvblock` — MIME-style key: value header blocks
+
+Many text protocols share the same header format: lines of `Key: Value\r\n`,
+terminated by a blank line (`\r\n\r\n`). Pre-declaring every possible header name
+is fragile — field order varies, extensions add new names, and the list grows
+without bound.
+
+`kvblock` parses the entire block in one shot, emitting a child field for each
+line it finds:
+
+```posa
+Object<SIP> SIP_RESPONSE
+    abbrev "sip"
+
+    string version     until " "    "SIP-Version"
+    string status_code until " "    "Status-Code"
+    string reason      until "\r\n" "Reason-Phrase"
+
+    kvblock headers "Headers"
+
+    payload body "Message Body"
+
+    info "%s %s [%s]" status_code, reason, call_id
+```
+
+Each `Key: Value\r\n` line becomes a child field:
+- Header `Via: SIP/2.0/UDP 10.0.0.1:5060` → field abbrev `sip.headers.via`, value `SIP/2.0/UDP 10.0.0.1:5060`
+- Header `Content-Type: application/sdp` → `sip.headers.content_type`
+- Header `Call-ID: abc123@host` → `sip.headers.call_id`
+
+Key normalization: lowercase, hyphens and spaces replaced by underscore.
+
+The child fields are also added to the `seen` table under their normalized name,
+so `info` can reference them directly:
+```posa
+info "%s %s [%s]" status_code, reason, call_id
+#                                       ^^^^^^^ from kvblock headers
+```
+
+The block end sentinel defaults to `"\r\n\r\n"` (blank line). A custom
+key-value separator can be supplied with `sep "..."` (default `": "`):
+
+```posa
+kvblock headers sep "= " "Parameters"   # "Key= Value\r\n" format
+```
+
+Wireshark-style aliases connect the kvblock child fields to human-friendly names:
+
+```posa
+alias sip.Via          => sip.headers.via
+alias sip.Content-Type => sip.headers.content_type
+alias sip.Call-ID      => sip.headers.call_id
+```
+
 ### `label "<fmt>" arg, arg`
 
 Titles the record of the `repeat` it sits in, from the fields that record just
@@ -178,17 +237,62 @@ gap it leaves is closed — so one label can serve a record whose shape varies.
 
 ## 4. Enums
 
-Indented `NAME = value` lines under a value field label it. The name is display
+Indented `NAME = value` lines under a numeric field label it. The name is display
 text and **may contain spaces**:
 
 ```posa
-required uint8 type "Type"
+uint8 type "Type"
     Membership Query = 0x11
     IGMPv3 Membership Report = 0x22
 ```
 
 shows as `Type: IGMPv3 Membership Report (34)`, and `%s` in a `label`/`info`
 gives the name rather than the number.
+
+Enum values are normally **numbers** (decimal, hex, or `0b` binary):
+
+```posa
+uint8 type "Type"
+    Membership Query = 0x11
+    IGMPv3 Membership Report = 0x22
+```
+
+For text-protocol fields — SIP status codes, HTTP methods, SMTP replies, any
+field where the wire value is ASCII — use **string-keyed enums**: quote the key
+on the left and the label on the right:
+
+```posa
+string status_code until " " "Status-Code"
+    "200" = "OK"
+    "404" = "Not Found"
+    "503" = "Service Unavailable"
+```
+
+The runtime matches the field's string value against the quoted key and shows
+`Status-Code: OK (200)` in the tree. The raw value `200` is stored in the seen
+table so `info` and `when` comparisons still work with the original wire text.
+
+Identity enums (`"OK" = "OK"` where key and label are identical) are valid but
+pointless — omit them.
+
+The per-field enum array holds up to **32 entries**. When a protocol has more
+(SIP has 46 status codes), declare a **Lookup table** instead:
+
+```posa
+Lookup SipStatusCodes
+    "100" = "Trying"
+    "180" = "Ringing"
+    "200" = "OK"
+    "404" = "Not Found"
+    # … up to 128 entries …
+
+string status_code until " " lookup SipStatusCodes "Status-Code"
+```
+
+`Lookup NAME` declares a named table at file scope (outside any Object). A field
+references it with `lookup NAME` on its field line. The runtime checks the inline
+enums first, then the lookup table. Lookup tables hold up to **128 entries** and
+can be referenced from multiple fields.
 
 ---
 
@@ -353,6 +457,32 @@ payload, not byte 0. STUN's magic cookie is at offset 4:
 rule udp.content@4 "\x21\x12\xa4\x42" => STUN
 rule tcp.content@4 "\xfeSMB"          => NBSS
 ```
+
+### IPv4 CIDR rules — protocol identified by host address
+
+When a protocol has no usable content signature and no fixed port, you can bind
+by the remote host's IP address using CIDR notation:
+
+```posa
+rule ip4.addr in 149.154.160.0/20 => TELEGRAM   # src OR dst in block
+rule ip4.src  in 91.108.4.0/22    => TELEGRAM   # source only
+rule ip4.dst  in 10.0.0.0/8       => INTERNAL   # destination only
+```
+
+Three field variants:
+* `ip4.addr` — matches if **either** the source or destination IP falls inside the block
+* `ip4.src`  — matches on source IP only
+* `ip4.dst`  — matches on destination IP only
+
+Multiple CIDR rules for the same protocol name are OR'd together; the first match
+wins. The same syntax works in display filters:
+
+```
+ip.addr == 149.154.160.0/20
+ip.addr in { 149.154.160.0/20 91.108.4.0/22 91.108.8.0/22 }
+```
+
+IP CIDR rules are checked **after** content rules and **before** port rules.
 
 ### Group member dispatch with `starts`
 
