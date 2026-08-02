@@ -455,7 +455,10 @@ func convPosaProto(cp *C.pcapng_posa_proto_t) *PosaProto {
 		p.InfoArgs = append(p.InfoArgs, cstr(&cp.info_args[i][0]))
 	}
 	for i := 0; i < int(cp.nprefix); i++ {
-		p.Prefixes = append(p.Prefixes, cstr(&cp.prefixes[i][0]))
+		// `starts "\xc0"` may hold NUL bytes: take the recorded length, not the
+		// C string.
+		p.Prefixes = append(p.Prefixes,
+			C.GoStringN(&cp.prefixes[i][0], C.int(cp.prefix_len[i])))
 	}
 	n := int(cp.nflds)
 	p.Fields = make([]PosaField, 0, n)
