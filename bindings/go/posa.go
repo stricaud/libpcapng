@@ -234,7 +234,10 @@ type PosaField struct {
 	Shift    int    // bits: shift
 	Width    int    // bits: width
 	UntilEnd bool   // repeat until end
-	Args     []string
+	// CountBias adjusts a repeat's count: `repeat objects-2 as object` for a
+	// format that counts more records than it stores.
+	CountBias int
+	Args      []string
 }
 
 // Size is the byte width of a fixed-size field (bytes<N>/str<N> included), and
@@ -470,20 +473,21 @@ func convPosaProto(cp *C.pcapng_posa_proto_t) *PosaProto {
 
 func convPosaField(cf *C.pcapng_posa_fld_t) PosaField {
 	f := PosaField{
-		Name:     cstr(&cf.name[0]),
-		Type:     PosaFieldType(cf._type),
-		Default:  uint64(cf.defnum),
-		NBytes:   int(cf.nbytes),
-		LenField: cstr(&cf.lenfield[0]),
-		Sub:      cstr(&cf.sub[0]),
-		ScopeLen: int(cf.scope_len_field),
-		Display:  cstr(&cf.disp[0]),
-		Mask:     uint64(cf.mask),
-		Hex:      cf.hex != 0,
-		Src:      cstr(&cf.src[0]),
-		Shift:    int(cf.shift),
-		Width:    int(cf.width),
-		UntilEnd: cf.until_end != 0,
+		Name:      cstr(&cf.name[0]),
+		Type:      PosaFieldType(cf._type),
+		Default:   uint64(cf.defnum),
+		NBytes:    int(cf.nbytes),
+		LenField:  cstr(&cf.lenfield[0]),
+		Sub:       cstr(&cf.sub[0]),
+		ScopeLen:  int(cf.scope_len_field),
+		Display:   cstr(&cf.disp[0]),
+		Mask:      uint64(cf.mask),
+		Hex:       cf.hex != 0,
+		Src:       cstr(&cf.src[0]),
+		Shift:     int(cf.shift),
+		Width:     int(cf.width),
+		UntilEnd:  cf.until_end != 0,
+		CountBias: int(cf.count_bias),
 		Guard: PosaGuard{
 			Op:   PosaCmp(cf.guard.op),
 			LHS:  cstr(&cf.guard.lhs[0]),

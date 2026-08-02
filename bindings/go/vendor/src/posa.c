@@ -935,7 +935,17 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
           if (nt > 2 && toks[2][0] == '"') { parse_delim(toks[2], f->delim, &f->ndelim); ai = 3; }
           else                             { ai = (nt > 2 && !strcmp(toks[2], "end")) ? 3 : 2; }
         } else {
-          snprintf(f->lenfield, sizeof f->lenfield, "%s", toks[1]);
+          /* `repeat <field>[-N|+N] as <item>` — the adjustment lets a format
+             that counts something other than the records it stores still be
+             walked. */
+          char cnt[PCAPNG_POSA_NAME_MAX]; char *sign;
+          snprintf(cnt, sizeof cnt, "%s", toks[1]);
+          sign = strpbrk(cnt + 1, "+-");
+          if (sign) {
+            f->count_bias = atoi(sign);
+            *sign = '\0';
+          }
+          snprintf(f->lenfield, sizeof f->lenfield, "%s", cnt);
           ai = 2;
         }
         if (ai + 1 < nt && !strcmp(toks[ai], "as"))
@@ -1379,7 +1389,7 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
     }
     if (f->type == PCAPNG_POSA_REPEAT) {
       const seen_t *s = f->until_end ? NULL : seen_get(seen, nseen, f->lenfield);
-      int cnt = f->until_end ? -1 : (s ? (int)s->val : 0);
+      int cnt = f->until_end ? -1 : (s ? (int)s->val + f->count_bias : 0);
       blk_t *b;
       if (nb >= 32 || off >= lim || (!f->until_end && cnt <= 0) ||
           at_delim(f, data, off, lim)) { skip = 1; continue; }
@@ -1552,8 +1562,15 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       pf_range(cf, abs_off + start, off - start);
       seen_add(seen, &nseen, f->name, 0, 0, start, off, nm[0] ? nm : "<Root>");
     } else if (f->type == PCAPNG_POSA_CSTRING) {
+      /* Only the first 255 bytes are kept for display, but the walk must still
+         step over the whole string: a comment field longer than that would
+         otherwise leave the offset inside it, and every field after it — in
+         every record that follows — reads the wrong bytes. */
       int start = off, n = 0; char tmp[256];
-      while (off < lim && data[off] != '\0' && n < (int)sizeof tmp - 1) tmp[n++] = (char)data[off++];
+      while (off < lim && data[off] != '\0') {
+        if (n < (int)sizeof tmp - 1) tmp[n++] = (char)data[off];
+        off++;
+      }
       tmp[n] = '\0';
       if (off < lim && data[off] == '\0') off++;
       cf = pf_add(cur, ab, PCAPNG_FT_STR); pf_str(cf, tmp);
@@ -1561,7 +1578,8 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
         if (en) pf_label(cf, "%s: %s (%s)", fld_disp(f), en, tmp);
         else    pf_label(cf, "%s: %s", fld_disp(f), tmp); }
       pf_range(cf, abs_off + start, off - start);
-      seen_add(seen, &nseen, f->name, (uint64_t)n, (uint64_t)n, start, off, tmp);
+      { uint64_t len = (uint64_t)(off - start > 0 ? off - start - 1 : 0);
+        seen_add(seen, &nseen, f->name, len, len, start, off, tmp); }
     } else if (f->type == PCAPNG_POSA_STR_DELIM) {
       /* consume up to (and past) the delimiter; if the delimiter is absent the
          field is empty (0 bytes) — an "optional" delimited token. */

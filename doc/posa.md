@@ -158,6 +158,8 @@ repeat questions as query "Queries"
 
 * `repeat <countfield>` — a count in the packet (DNS `Questions: 5`, SMB2's
   dialect count, IGMPv3's group-record count).
+* `repeat <countfield>-N` / `repeat <countfield>+N` — a count that needs
+  adjusting before it is used.
 * `repeat until end` — no count anywhere: TLS records, DHCP options, TXT strings.
   It stops at the end of the enclosing `scope` (or of the packet).
 * `repeat until "<delim>"` — stops when the delimiter comes next. An HTTP header
@@ -165,6 +167,27 @@ repeat questions as query "Queries"
 
 Records can nest: an IGMPv3 report repeats group records, and each group record
 repeats its source addresses.
+
+#### `repeat <countfield>±N` — when the count is not the number of records
+
+Some formats count something other than the records they store. A NoteWorthy
+Composer staff says it holds 296 objects and stores 294 of them:
+
+```posa
+le_uint16 object_count "Objects"
+repeat object_count-2 as object "Music"
+    uint8 obj_type
+    …
+```
+
+The adjustment is applied to the field's value, once, when the block opens:
+`-2` walks two fewer records, `+1` one more. It is the difference between a
+walk that ends exactly at the end of the staff and one that runs into whatever
+follows it — and because the next staff's length is only known by walking this
+one, that error does not stay local, it takes the rest of the file with it.
+
+A count that adjusts to zero or less draws nothing, exactly as a zero count
+does.
 
 ### `kvblock` — MIME-style key: value header blocks
 

@@ -146,6 +146,10 @@ typedef struct {
   int                 shift, width;
   /* REPEAT: `until end` instead of a count; LABEL: fmt lives in .disp */
   int                 until_end;
+  /* REPEAT: `repeat <field>-2 as x` — an adjustment applied to the count the
+     field carries. Formats that store "objects + 2" (NoteWorthy Composer does)
+     are otherwise not walkable, since the loop would run past the records. */
+  int                 count_bias;
   char                largs[PCAPNG_POSA_MAX_LARGS][PCAPNG_POSA_NAME_MAX];
   int                 nlargs;
   /* `lookup NAME` — reference to a named Lookup table for value-to-label
