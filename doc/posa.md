@@ -388,6 +388,25 @@ Object<SMB> SMB1
 An HTTP response starts with the magic `HTTP`; a request starts with a method, so
 `HTTP_REQUEST` is the group's `default`.
 
+A file has **one** `Object<main>` — the decoder it is about, the one a rule
+binds and a tool starts from. Everything else it declares is a part of that:
+a record, a shared header, one object of a stream. Those are objects too, but
+they belong to a group rather than to `main`, which is what keeps them out of
+the way of anything listing or dispatching decoders:
+
+```posa
+Object<include> NWC1_FONT          # a part, to be included
+    cstring font_name "Typeface"
+    …
+
+Object<main> NWC1_SCORE            # the entry point — one per file
+    …
+    include NWC1_FONT
+```
+
+The group name is arbitrary and never referenced; `include` finds an object by
+name whatever its parent.
+
 **`include <Object>`** inlines another object's fields *here*, in the current
 scope — unlike `layer` it does not create a sub-protocol, so a `label` can name
 the included fields and a `when` can test them. DNS defines a resource record

@@ -32,36 +32,36 @@ import (
 type PosaFieldType int
 
 const (
-	PosaU8          PosaFieldType = C.PCAPNG_POSA_U8
-	PosaU16         PosaFieldType = C.PCAPNG_POSA_U16
-	PosaU32         PosaFieldType = C.PCAPNG_POSA_U32
-	PosaU64         PosaFieldType = C.PCAPNG_POSA_U64
-	PosaLE16        PosaFieldType = C.PCAPNG_POSA_LE16
-	PosaLE32        PosaFieldType = C.PCAPNG_POSA_LE32
-	PosaLE64        PosaFieldType = C.PCAPNG_POSA_LE64
-	PosaMAC         PosaFieldType = C.PCAPNG_POSA_MAC
-	PosaIP4         PosaFieldType = C.PCAPNG_POSA_IP4
-	PosaCString     PosaFieldType = C.PCAPNG_POSA_CSTRING
-	PosaPayload     PosaFieldType = C.PCAPNG_POSA_PAYLOAD
-	PosaBytesFixed  PosaFieldType = C.PCAPNG_POSA_BYTES_FIXED
-	PosaStrFixed    PosaFieldType = C.PCAPNG_POSA_STR_FIXED
-	PosaBytesRef    PosaFieldType = C.PCAPNG_POSA_BYTES_REF
-	PosaStrDelim    PosaFieldType = C.PCAPNG_POSA_STR_DELIM
-	PosaLayer       PosaFieldType = C.PCAPNG_POSA_LAYER
-	PosaScope       PosaFieldType = C.PCAPNG_POSA_SCOPE
-	PosaWhen        PosaFieldType = C.PCAPNG_POSA_WHEN
-	PosaEnd         PosaFieldType = C.PCAPNG_POSA_END
-	PosaIP6         PosaFieldType = C.PCAPNG_POSA_IP6
-	PosaStrRef      PosaFieldType = C.PCAPNG_POSA_STR_REF
-	PosaDNSName     PosaFieldType = C.PCAPNG_POSA_DNSNAME
-	PosaRepeat      PosaFieldType = C.PCAPNG_POSA_REPEAT
-	PosaBits        PosaFieldType = C.PCAPNG_POSA_BITS
-	PosaLabel       PosaFieldType = C.PCAPNG_POSA_LABEL
-	PosaU24         PosaFieldType = C.PCAPNG_POSA_U24
-	PosaUTF16       PosaFieldType = C.PCAPNG_POSA_UTF16
-	PosaSeek        PosaFieldType = C.PCAPNG_POSA_SEEK
-	PosaElse        PosaFieldType = C.PCAPNG_POSA_ELSE
-	PosaKVBlock     PosaFieldType = C.PCAPNG_POSA_KVBLOCK
+	PosaU8         PosaFieldType = C.PCAPNG_POSA_U8
+	PosaU16        PosaFieldType = C.PCAPNG_POSA_U16
+	PosaU32        PosaFieldType = C.PCAPNG_POSA_U32
+	PosaU64        PosaFieldType = C.PCAPNG_POSA_U64
+	PosaLE16       PosaFieldType = C.PCAPNG_POSA_LE16
+	PosaLE32       PosaFieldType = C.PCAPNG_POSA_LE32
+	PosaLE64       PosaFieldType = C.PCAPNG_POSA_LE64
+	PosaMAC        PosaFieldType = C.PCAPNG_POSA_MAC
+	PosaIP4        PosaFieldType = C.PCAPNG_POSA_IP4
+	PosaCString    PosaFieldType = C.PCAPNG_POSA_CSTRING
+	PosaPayload    PosaFieldType = C.PCAPNG_POSA_PAYLOAD
+	PosaBytesFixed PosaFieldType = C.PCAPNG_POSA_BYTES_FIXED
+	PosaStrFixed   PosaFieldType = C.PCAPNG_POSA_STR_FIXED
+	PosaBytesRef   PosaFieldType = C.PCAPNG_POSA_BYTES_REF
+	PosaStrDelim   PosaFieldType = C.PCAPNG_POSA_STR_DELIM
+	PosaLayer      PosaFieldType = C.PCAPNG_POSA_LAYER
+	PosaScope      PosaFieldType = C.PCAPNG_POSA_SCOPE
+	PosaWhen       PosaFieldType = C.PCAPNG_POSA_WHEN
+	PosaEnd        PosaFieldType = C.PCAPNG_POSA_END
+	PosaIP6        PosaFieldType = C.PCAPNG_POSA_IP6
+	PosaStrRef     PosaFieldType = C.PCAPNG_POSA_STR_REF
+	PosaDNSName    PosaFieldType = C.PCAPNG_POSA_DNSNAME
+	PosaRepeat     PosaFieldType = C.PCAPNG_POSA_REPEAT
+	PosaBits       PosaFieldType = C.PCAPNG_POSA_BITS
+	PosaLabel      PosaFieldType = C.PCAPNG_POSA_LABEL
+	PosaU24        PosaFieldType = C.PCAPNG_POSA_U24
+	PosaUTF16      PosaFieldType = C.PCAPNG_POSA_UTF16
+	PosaSeek       PosaFieldType = C.PCAPNG_POSA_SEEK
+	PosaElse       PosaFieldType = C.PCAPNG_POSA_ELSE
+	PosaKVBlock    PosaFieldType = C.PCAPNG_POSA_KVBLOCK
 )
 
 // String gives the .posa keyword a field type is written with.
