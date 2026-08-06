@@ -148,6 +148,13 @@ static void lex_next(lex_t *L)
         int n = 0;
         while (word_ch((unsigned char)*p) && n < (int)sizeof L->cur.s - 1)
             L->cur.s[n++] = *p++;
+        /* slice suffix: proto[offset] or proto[offset:len] — absorb into token */
+        if (*p == '[') {
+            while (*p && *p != ']' && n < (int)sizeof L->cur.s - 1)
+                L->cur.s[n++] = *p++;
+            if (*p == ']' && n < (int)sizeof L->cur.s - 1)
+                L->cur.s[n++] = *p++;
+        }
         L->cur.s[n] = '\0';
         L->p = p;
         /* keyword promotion */
@@ -419,7 +426,7 @@ static void pkt_ctx_init(pkt_ctx_t *ctx,
 
 #define CAP_MAX_FVALS 4
 
-typedef enum { FV_NONE, FV_UINT, FV_IPV4, FV_IPV6, FV_MAC, FV_STR } fvtype_t;
+typedef enum { FV_NONE, FV_UINT, FV_IPV4, FV_IPV6, FV_MAC, FV_STR, FV_BYTES } fvtype_t;
 
 typedef struct {
     fvtype_t  type;
@@ -429,6 +436,7 @@ typedef struct {
         uint8_t  ipv6[16];
         uint8_t  mac[6];
         char     str[64];
+        struct { uint8_t data[8]; int len; } bytes;  /* slice notation result */
     };
 } fval_t;
 
@@ -437,6 +445,37 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
                           fval_t *out, int maxout,
                           pcapng_field_provider_t provider_fn, void *provider_ctx)
 {
+    /* ── slice notation: proto[offset] or proto[offset:len] ── */
+    {
+        char slice_proto[20];
+        int  slice_off = -1, slice_len = 1;
+        if (sscanf(field, "%19[^[][%d:%d]", slice_proto, &slice_off, &slice_len) >= 2 ||
+            (slice_len = 1, sscanf(field, "%19[^[][%d]", slice_proto, &slice_off) == 2)) {
+            if (slice_off >= 0 && slice_len >= 1 && slice_len <= 8 && maxout >= 1) {
+                const uint8_t *base = NULL;
+                if      (!strcmp(slice_proto, "frame"))               base = ctx->raw;
+                else if (!strcmp(slice_proto, "eth")  && ctx->eth)    base = ctx->eth;
+                else if (!strcmp(slice_proto, "ip")   && ctx->ip4)    base = ctx->ip4;
+                else if (!strcmp(slice_proto, "ip6")  && ctx->ip6)    base = ctx->ip6;
+                else if (!strcmp(slice_proto, "tcp")  && ctx->tcp)    base = ctx->tcp;
+                else if (!strcmp(slice_proto, "udp")  && ctx->udp)    base = ctx->udp;
+                else if (!strcmp(slice_proto, "icmp") && ctx->icmp)   base = ctx->icmp;
+                if (base) {
+                    uint32_t avail = ctx->rawlen - (uint32_t)(base - ctx->raw);
+                    if ((uint32_t)(slice_off + slice_len) <= avail) {
+                        fval_t *v = &out[0];
+                        memset(v, 0, sizeof *v);
+                        v->type      = FV_BYTES;
+                        v->bytes.len = slice_len;
+                        memcpy(v->bytes.data, base + slice_off, (size_t)slice_len);
+                        return 1;
+                    }
+                }
+            }
+            return 0;  /* slice field not resolved */
+        }
+    }
+
     /* ── alias expansion (like caracal's aliases()) ── */
     if (!strcmp(field, "ip.addr")) {
         int n = 0;
@@ -688,6 +727,14 @@ static int fval_matches(const fval_t *fv, op_t op, const char *val)
     case FV_STR: {
         if (op == OP_CONTAINS || op == OP_MATCHES) return strstr(fv->str, val) != NULL;
         return cmp_sign(op, (long long)strcmp(fv->str, val));
+    }
+    case FV_BYTES: {
+        /* Extract big-endian integer from the slice bytes */
+        uint64_t lv = 0;
+        for (int i = 0; i < fv->bytes.len; i++)
+            lv = (lv << 8) | fv->bytes.data[i];
+        uint64_t rv = to_num(val);
+        return cmp_sign(op, (lv > rv) - (lv < rv));
     }
     default: return 0;
     }
