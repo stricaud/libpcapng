@@ -58,3 +58,8 @@ add_executable(pcapng-spec pcapng-spec.c)
 target_link_libraries(pcapng-spec ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(Pcapng-Spec pcapng-spec)
 set_tests_properties(Pcapng-Spec PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+
+add_executable(filter filter.c)
+target_link_libraries(filter ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Filter filter)
+set_tests_properties(Filter PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")

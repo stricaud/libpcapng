@@ -176,6 +176,23 @@ int pcapng_capture_set_buffer_size(pcapng_capture_t *, size_t bytes);
 int pcapng_capture_set_filter(pcapng_capture_t *, const char *expr, char *errbuf);
 
 /*
+ * pcapng_capture_filter_match — test a filter expression against raw bytes.
+ *
+ * Compiles `expr` and immediately evaluates it against `data[0..len-1]`.
+ * linktype: LINKTYPE_ETHERNET (1) or LINKTYPE_RAW (101).
+ *
+ * Returns  1  if the packet matches,
+ *          0  if it does not,
+ *         -1  on compile error (errbuf filled when non-NULL).
+ *
+ * Useful for unit-testing filters without a live capture handle.
+ */
+int pcapng_capture_filter_match(const char *expr,
+                                const uint8_t *data, uint32_t len,
+                                uint16_t linktype,
+                                char *errbuf);
+
+/*
  * pcapng_capture_set_field_provider — register a POSA / custom field hook.
  *
  * Called for any field name not resolved by the built-in dissector.

@@ -148,12 +148,19 @@ static void lex_next(lex_t *L)
         int n = 0;
         while (word_ch((unsigned char)*p) && n < (int)sizeof L->cur.s - 1)
             L->cur.s[n++] = *p++;
-        /* slice suffix: proto[offset] or proto[offset:len] — absorb into token */
+        /* slice suffix: proto[offset] or proto[offset:len] — absorb into token.
+           Also absorbs &mask when directly adjacent: tcp[13]&0x02
+           (single & only — && is the AND operator, never a mask) */
         if (*p == '[') {
             while (*p && *p != ']' && n < (int)sizeof L->cur.s - 1)
                 L->cur.s[n++] = *p++;
             if (*p == ']' && n < (int)sizeof L->cur.s - 1)
                 L->cur.s[n++] = *p++;
+            if (*p == '&' && p[1] != '&') {
+                L->cur.s[n++] = *p++;  /* & */
+                while (word_ch((unsigned char)*p) && n < (int)sizeof L->cur.s - 1)
+                    L->cur.s[n++] = *p++;
+            }
         }
         L->cur.s[n] = '\0';
         L->p = p;
@@ -445,13 +452,22 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
                           fval_t *out, int maxout,
                           pcapng_field_provider_t provider_fn, void *provider_ctx)
 {
-    /* ── slice notation: proto[offset] or proto[offset:len] ── */
+    /* ── slice notation: proto[offset] or proto[offset:len] ──────────────────
+     * Field strings like "tcp[13]", "tcp[0:2]", "tcp[13]&0x02" are produced
+     * by the lexer as single T_WORD tokens.  Extract the layer, bounds-check,
+     * assemble big-endian, apply optional bitmask, and return FV_UINT so the
+     * standard comparison path handles all operators without special casing. */
     {
         char slice_proto[20];
         int  slice_off = -1, slice_len = 1;
         if (sscanf(field, "%19[^[][%d:%d]", slice_proto, &slice_off, &slice_len) >= 2 ||
             (slice_len = 1, sscanf(field, "%19[^[][%d]", slice_proto, &slice_off) == 2)) {
             if (slice_off >= 0 && slice_len >= 1 && slice_len <= 8 && maxout >= 1) {
+                /* optional bitmask suffix: tcp[13]&0x02 */
+                uint64_t mask = ~(uint64_t)0;
+                const char *amp = strchr(field, '&');
+                if (amp) mask = strtoull(amp + 1, NULL, 0);
+
                 const uint8_t *base = NULL;
                 if      (!strcmp(slice_proto, "frame"))               base = ctx->raw;
                 else if (!strcmp(slice_proto, "eth")  && ctx->eth)    base = ctx->eth;
@@ -463,16 +479,18 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
                 if (base) {
                     uint32_t avail = ctx->rawlen - (uint32_t)(base - ctx->raw);
                     if ((uint32_t)(slice_off + slice_len) <= avail) {
+                        uint64_t lv = 0;
+                        int i; for (i = 0; i < slice_len; i++)
+                            lv = (lv << 8) | base[slice_off + i];
                         fval_t *v = &out[0];
                         memset(v, 0, sizeof *v);
-                        v->type      = FV_BYTES;
-                        v->bytes.len = slice_len;
-                        memcpy(v->bytes.data, base + slice_off, (size_t)slice_len);
+                        v->type = FV_UINT;
+                        v->u    = lv & mask;
                         return 1;
                     }
                 }
             }
-            return 0;  /* slice field not resolved */
+            return 0;  /* slice field not resolved (layer absent or OOB) */
         }
     }
 
@@ -775,6 +793,24 @@ static int filter_eval(const cap_filter_t *f, const pkt_ctx_t *ctx,
 {
     if (!f || f->match_all) return 1;
     return filter_eval_node(f->root, ctx, pfn, pctx);
+}
+
+int pcapng_capture_filter_match(const char *expr,
+                                const uint8_t *data, uint32_t len,
+                                uint16_t linktype,
+                                char *errbuf)
+{
+    char ebuf[PCAPNG_CAPTURE_ERRBUF_SIZE];
+    cap_filter_t *f = filter_compile(expr, ebuf, sizeof ebuf);
+    if (!f) {
+        if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE, "%s", ebuf);
+        return -1;
+    }
+    pkt_ctx_t ctx;
+    pkt_ctx_init(&ctx, data, len, linktype);
+    int r = filter_eval(f, &ctx, NULL, NULL);
+    filter_free(f);
+    return r;
 }
 
 /* ========================================================================

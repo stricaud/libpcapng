@@ -588,6 +588,30 @@ check_ws "DHCPv6: msg_type=SOLICIT"     "msg_type=SOLICIT"
 check_ws "BGP: type=KEEPALIVE"          "type=KEEPALIVE"
 check_ws "BGP: length=19"              "length=19"
 
+# ── Wireshark-compatible capture filter (C test binary) ──────────────────────
+echo ""
+echo "-- Capture filter (slice / bitmask / CIDR / sets) --"
+
+FILTER_BIN="${PCAPSH%/bin/pcapsh}/build/bin/filter"
+if [[ ! -x "$FILTER_BIN" ]]; then
+    FILTER_BIN="./build/bin/filter"
+fi
+if [[ -x "$FILTER_BIN" ]]; then
+    FILTER_OUT=$("$FILTER_BIN" 2>&1)
+    FILTER_PASS=$(echo "$FILTER_OUT" | grep -c "^  PASS" || true)
+    FILTER_FAIL=$(echo "$FILTER_OUT" | grep -c "^  FAIL" || true)
+    if [[ "$FILTER_FAIL" -eq 0 ]]; then
+        ok "filter binary: all $FILTER_PASS filter tests passed"
+    else
+        fail "filter binary: $FILTER_FAIL test(s) failed (of $((FILTER_PASS+FILTER_FAIL)))"
+        echo "$FILTER_OUT" | grep "^  FAIL" | while read -r line; do
+            echo "    $line"
+        done
+    fi
+else
+    fail "filter binary not found (run cmake --build build first)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
