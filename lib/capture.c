@@ -499,6 +499,10 @@ typedef struct {
     };
 } fval_t;
 
+/* Forward declarations for helpers used inside raw_field_get */
+static int parse_ipv4(const char *s, uint8_t out[4], int *cidr);
+static int parse_mac(const char *s, uint8_t out[6]);
+
 /* Populate out[] with field values; returns the count. */
 static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
                           fval_t *out, int maxout,
@@ -778,8 +782,27 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
     if (provider_fn) {
         char val[160];
         if (provider_fn(field, ctx->raw, ctx->rawlen, val, sizeof val, provider_ctx)) {
-            v->type = FV_STR;
-            snprintf(v->str, sizeof v->str, "%s", val);
+            /* Infer the value type from the string so that POSA-defined fields get
+             * the same comparison semantics as built-in fields: CIDR for IPv4,
+             * byte-order comparison for MACs, and numeric ordering for integers.
+             * Only falls back to FV_STR when the string doesn't match any typed
+             * format — e.g. a DNS name or a human-readable label field. */
+            uint8_t ipv4[4]; int cidr = 32;
+            uint8_t mac[6];
+            char *end;
+            if (parse_ipv4(val, ipv4, &cidr) == 0 && cidr == 32) {
+                v->type = FV_IPV4; memcpy(v->ipv4, ipv4, 4);
+            } else if (parse_mac(val, mac) == 0) {
+                v->type = FV_MAC; memcpy(v->mac, mac, 6);
+            } else {
+                uint64_t n = strtoull(val, &end, 0);
+                if (val[0] != '\0' && *end == '\0') {
+                    v->type = FV_UINT; v->u = n;
+                } else {
+                    v->type = FV_STR;
+                    snprintf(v->str, sizeof v->str, "%s", val);
+                }
+            }
             return 1;
         }
     }
