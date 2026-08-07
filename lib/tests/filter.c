@@ -232,6 +232,27 @@ static const uint8_t PKT_TCP_SSH[] = {
 };
 static const uint32_t PKT_TCP_SSH_LEN = sizeof PKT_TCP_SSH;
 
+/*
+ * PKT_VLAN_TCP — Ethernet 802.1Q / IPv4 / TCP SYN, VID=100
+ *
+ *   Ether: outer type=0x8100  TCI=0x0064(VID=100)  inner type=0x0800
+ *   IPv4:  src=192.168.1.1  dst=10.0.0.1  proto=6  TTL=64  total=40
+ *   TCP:   sport=12345  dport=80  SYN
+ */
+static const uint8_t PKT_VLAN_TCP[] = {
+    /* Ethernet */
+    0x11,0x22,0x33,0x44,0x55,0x66, 0xaa,0xbb,0xcc,0xdd,0xee,0xff, 0x81,0x00,
+    /* VLAN TCI (PCP=0,DEI=0,VID=100) + inner EtherType */
+    0x00,0x64, 0x08,0x00,
+    /* IPv4 */
+    0x45,0x00,0x00,0x28, 0x00,0x0a,0x00,0x00, 0x40,0x06,0x00,0x00,
+    0xc0,0xa8,0x01,0x01, 0x0a,0x00,0x00,0x01,
+    /* TCP */
+    0x30,0x39,0x00,0x50, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+    0x50,0x02,0xff,0xff, 0x00,0x00,0x00,0x00
+};
+static const uint32_t PKT_VLAN_TCP_LEN = sizeof PKT_VLAN_TCP;
+
 /* ── Tests ─────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -531,6 +552,162 @@ int main(void)
     /* slice into IPv6 TCP layer */
     CHECK(match  ("tcp[2:2] == 8080",  PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
     CHECK(match  ("tcp[13]&0x02 == 2", PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+
+    /* ── comma-separated in{} ───────────────────────────────────────────────
+     * Both whitespace and commas must be accepted as value separators.       */
+    SUITE("in{} comma separators");
+
+    CHECK(match  ("tcp.dstport in {80, 443, 8080}", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(nomatch("tcp.dstport in {443, 8080}",     PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.dstport in {443, 8080}",     PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    CHECK(match  ("udp.dstport in {53, 67, 123}",   PKT_UDP_DNS,    PKT_UDP_DNS_LEN,    LT_ETHERNET));
+    CHECK(match  ("ip.proto in {6, 17}",            PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("ip.proto in {6, 17}",            PKT_UDP_DNS,    PKT_UDP_DNS_LEN,    LT_ETHERNET));
+    CHECK(nomatch("ip.proto in {6, 17}",            PKT_ICMP,       PKT_ICMP_LEN,       LT_ETHERNET));
+
+    /* ── range notation in{} ─────────────────────────────────────────────── */
+    SUITE("in{} range notation (lo..hi)");
+
+    CHECK(match  ("tcp.dstport in {1..1024}",   PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));  /* 80 */
+    CHECK(nomatch("tcp.dstport in {1..79}",     PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));
+    CHECK(nomatch("tcp.dstport in {81..1024}",  PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));
+    CHECK(match  ("tcp.dstport in {80..80}",    PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));
+    CHECK(match  ("tcp.port in {1..1024}",      PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));  /* src 12345 or dst 80 */
+    CHECK(match  ("ip.ttl in {60..128}",        PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));  /* TTL=64 */
+    CHECK(nomatch("ip.ttl in {65..255}",        PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));
+    /* mix: discrete values and a range */
+    CHECK(match  ("tcp.dstport in {22, 80..90, 443}", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.dstport in {22, 80..90, 443}", PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    CHECK(match  ("tcp.dstport in {22, 80..90, 443}", PKT_TCP_SSH,    PKT_TCP_SSH_LEN,    LT_ETHERNET));
+
+    /* ── ip6.addr alias ──────────────────────────────────────────────────── */
+    SUITE("ip6.addr alias");
+
+    CHECK(match  ("ip6.addr == fd00::1", PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(match  ("ip6.addr == fd00::2", PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("ip6.addr == fd00::3", PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(match  ("ipv6.addr == fd00::1",PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("ip6.addr == fd00::1", PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));
+
+    /* ── VLAN ─────────────────────────────────────────────────────────────── */
+    SUITE("VLAN 802.1Q");
+
+    CHECK(match  ("vlan",           PKT_VLAN_TCP, PKT_VLAN_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("vlan",           PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));
+    CHECK(match  ("vlan.id == 100", PKT_VLAN_TCP, PKT_VLAN_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("vlan.id == 200", PKT_VLAN_TCP, PKT_VLAN_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("vlan.id == 100", PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));
+    /* VLAN-tagged frame: IP/TCP fields still resolve after tag is stripped */
+    CHECK(match  ("tcp and vlan.id == 100",  PKT_VLAN_TCP, PKT_VLAN_TCP_LEN, LT_ETHERNET));
+    CHECK(match  ("ip.src == 192.168.1.1",   PKT_VLAN_TCP, PKT_VLAN_TCP_LEN, LT_ETHERNET));
+    CHECK(match  ("tcp.dstport == 80",        PKT_VLAN_TCP, PKT_VLAN_TCP_LEN, LT_ETHERNET));
+    CHECK(match  ("vlan.id in {100, 200}",   PKT_VLAN_TCP, PKT_VLAN_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("vlan.id in {200, 300}",   PKT_VLAN_TCP, PKT_VLAN_TCP_LEN, LT_ETHERNET));
+
+    /* ── IPv6 CIDR ───────────────────────────────────────────────────────── */
+    SUITE("IPv6 CIDR / prefix matching");
+
+    /* exact match */
+    CHECK(match  ("ip6.src == fd00::1",    PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("ip6.src == fd00::2",    PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    /* /64 prefix */
+    CHECK(match  ("ip6.src == fd00::/64",  PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(match  ("ip6.dst == fd00::/64",  PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("ip6.src == fe80::/64",  PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    /* /128 same as exact */
+    CHECK(match  ("ip6.src == fd00::1/128",PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("ip6.src == fd00::2/128",PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    /* ip6.addr alias + CIDR */
+    CHECK(match  ("ip6.addr == fd00::/64", PKT_IPV6_TCP, PKT_IPV6_TCP_LEN, LT_ETHERNET));
+    CHECK(nomatch("ip6.addr == fd00::/64", PKT_TCP_SYN,  PKT_TCP_SYN_LEN,  LT_ETHERNET));
+
+    /* ── contains operator ───────────────────────────────────────────────── */
+    SUITE("contains (byte-sequence search)");
+
+    /* EtherType 0x0800 is at frame[12:2] in every IPv4 frame */
+    CHECK(match  ("frame contains 0x0800",     PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("frame contains 0xdeadbeef", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* Source IP 192.168.1.1 = c0:a8:01:01 */
+    CHECK(match  ("frame contains 0xc0a80101", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("frame contains 0xc0a80102", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* ip layer search */
+    CHECK(match  ("ip contains 0x0a000001",    PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* tcp layer: dport=80=0x0050 at tcp[2:2] */
+    CHECK(match  ("tcp contains 0x0050",       PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("tcp contains 0x01bb",       PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* udp layer: dport=53=0x0035 */
+    CHECK(match  ("udp contains 0x0035",       PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+    /* no-match on absent layer */
+    CHECK(nomatch("tcp contains 0x0050",       PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+
+    /* ── matches operator (POSIX ERE) ───────────────────────────────────── */
+    SUITE("matches (POSIX ERE)");
+
+    /* matches on non-string built-in fields: no match (they are not FV_STR) */
+    CHECK(nomatch("ip.src matches \"192\\.\"",  PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* these all compile cleanly */
+    CHECK(!compile_err("dns.qry.name matches \"\\\\.example\\\\.com$\""));
+    CHECK(!compile_err("http.host matches \"^www\\\\.\\.\""));
+    /* invalid regex: compile-time error at regex compile step → no match, no crash */
+    CHECK(nomatch("ip.src matches \"[invalid\"", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+
+    /* ── len() ──────────────────────────────────────────────────────────────
+     * PKT_TCP_SYN (54 B): ip_total=40, ip_hlen=20, tcp_hlen=20, tcp_pl=0
+     * PKT_UDP_DNS (42 B): ip_total=28, ip_hlen=20, udp_len=8,   udp_pl=0  */
+    SUITE("Function: len()");
+
+    /* len(frame) — total captured bytes */
+    CHECK(match  ("len(frame) == 54", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(match  ("len(frame) > 50",  PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("len(frame) < 50",  PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(match  ("len(frame) == 42", PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+    CHECK(match  ("len(frame) < 50",  PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+
+    /* len(ip) — IP total-length header field */
+    CHECK(match  ("len(ip) == 40",  PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(match  ("len(ip) == 28",  PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+    CHECK(nomatch("len(ip) == 40",  PKT_ARP,     PKT_ARP_LEN,     LT_ETHERNET));
+
+    /* len(ip.payload) — IP total minus IP header */
+    CHECK(match  ("len(ip.payload) == 20", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(match  ("len(ip.payload) == 8",  PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+
+    /* len(tcp) — TCP header length from data-offset nibble */
+    CHECK(match  ("len(tcp) == 20",        PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("len(tcp) == 20",        PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    CHECK(nomatch("len(tcp)",              PKT_UDP_DNS,    PKT_UDP_DNS_LEN,    LT_ETHERNET));
+
+    /* len(tcp.payload) — bytes after TCP header (computed from IP total len) */
+    CHECK(match  ("len(tcp.payload) == 0", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("len(tcp.payload) == 0", PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+
+    /* len(udp) — UDP length field (header + payload) */
+    CHECK(match  ("len(udp) == 8",         PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+    CHECK(nomatch("len(udp)",              PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+
+    /* len(udp.payload) — UDP length minus 8-byte header */
+    CHECK(match  ("len(udp.payload) == 0", PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+
+    /* len() combined with other predicates */
+    CHECK(match  ("tcp and len(frame) > 40", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("tcp and len(frame) < 40", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(match  ("tcp and len(tcp.payload) == 0", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+
+    /* ── upper() / lower() ───────────────────────────────────────────────────
+     * These functions transform FV_STR values.  Built-in numeric/IP fields
+     * return FV_UINT/FV_IPV4, so upper()/lower() on them returns no match —
+     * the intent is for provider-backed string fields (dns.qry.name, etc.).  */
+    SUITE("Function: upper() / lower()");
+
+    /* non-string built-in: silently no-match, do not crash */
+    CHECK(nomatch("lower(ip.src) == \"192.168.1.1\"", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("upper(ip.src) == \"192.168.1.1\"", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* unresolved inner field: no match */
+    CHECK(nomatch("lower(noexist.field) == \"test\"", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* expressions compile and evaluate without error */
+    CHECK(!compile_err("lower(dns.qry.name) == \"example.com\""));
+    CHECK(!compile_err("upper(http.host) == \"EXAMPLE.COM\""));
+    CHECK(!compile_err("lower(myproto.msg) == \"hello\" and tcp"));
 
     /* ── Summary ─────────────────────────────────────────────────────────── */
     printf("\n=== Results: %d/%d passed", g_passed, g_tests);

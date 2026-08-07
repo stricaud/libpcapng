@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <regex.h>
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
@@ -106,7 +107,8 @@ typedef struct {
 /* ---- Lexer ---- */
 
 typedef enum { T_WORD, T_STR, T_LP, T_RP, T_LC, T_RC, T_AND, T_OR, T_NOT,
-               T_EQ, T_NE, T_GT, T_LT, T_GE, T_LE, T_IN, T_EOF } ttype_t;
+               T_EQ, T_NE, T_GT, T_LT, T_GE, T_LE, T_IN,
+               T_CONTAINS, T_MATCHES, T_COMMA, T_EOF } ttype_t;
 
 typedef struct { ttype_t t; char s[160]; } tok_t;
 typedef struct { const char *p; tok_t cur; char err[200]; } lex_t;
@@ -125,6 +127,7 @@ static void lex_next(lex_t *L)
     case ')': L->cur.t = T_RP;  L->p = p + 1; return;
     case '{': L->cur.t = T_LC;  L->p = p + 1; return;
     case '}': L->cur.t = T_RC;  L->p = p + 1; return;
+    case ',': L->cur.t = T_COMMA; L->p = p + 1; return;
     case '&': if (p[1]=='&') { L->cur.t = T_AND; L->p = p+2; return; } break;
     case '|': if (p[1]=='|') { L->cur.t = T_OR;  L->p = p+2; return; } break;
     case '=': if (p[1]=='=') { L->cur.t = T_EQ;  L->p = p+2; return; } break;
@@ -162,6 +165,20 @@ static void lex_next(lex_t *L)
                     L->cur.s[n++] = *p++;
             }
         }
+        /* function call: len(field) / upper(field) / lower(field)
+           absorb as synthetic token "len:field", "upper:field", "lower:field" */
+        if (*p == '(') {
+            int is_func = (n == 3 && !memcmp(L->cur.s, "len",   3)) ||
+                          (n == 5 && (!memcmp(L->cur.s, "upper", 5) ||
+                                      !memcmp(L->cur.s, "lower", 5)));
+            if (is_func && n < (int)sizeof L->cur.s - 1) {
+                L->cur.s[n++] = ':';
+                p++;  /* skip '(' */
+                while (*p && *p != ')' && n < (int)sizeof L->cur.s - 1)
+                    L->cur.s[n++] = *p++;
+                if (*p == ')') p++;
+            }
+        }
         L->cur.s[n] = '\0';
         L->p = p;
         /* keyword promotion */
@@ -174,8 +191,9 @@ static void lex_next(lex_t *L)
         if (!strcmp(L->cur.s, "lt"))      { L->cur.t = T_LT;  return; }
         if (!strcmp(L->cur.s, "ge"))      { L->cur.t = T_GE;  return; }
         if (!strcmp(L->cur.s, "le"))      { L->cur.t = T_LE;  return; }
-        if (!strcmp(L->cur.s, "contains")){ L->cur.t = T_EQ; snprintf(L->cur.s, sizeof L->cur.s, "contains"); return; }
-        if (!strcmp(L->cur.s, "in"))      { L->cur.t = T_IN; return; }
+        if (!strcmp(L->cur.s, "contains")) { L->cur.t = T_CONTAINS; return; }
+        if (!strcmp(L->cur.s, "matches"))  { L->cur.t = T_MATCHES;  return; }
+        if (!strcmp(L->cur.s, "in"))       { L->cur.t = T_IN; return; }
         L->cur.t = T_WORD; return;
     }
     snprintf(L->err, sizeof L->err, "unexpected character '%c'", *p);
@@ -224,32 +242,60 @@ static fnode_t *parse_primary(lex_t *L)
         /* existence test if no operator follows */
         ttype_t ot = L->cur.t;
         if (ot != T_EQ && ot != T_NE && ot != T_GT && ot != T_LT &&
-            ot != T_GE && ot != T_LE && ot != T_IN) {
+            ot != T_GE && ot != T_LE && ot != T_IN &&
+            ot != T_CONTAINS && ot != T_MATCHES) {
             fnode_t *n = fnode_new(N_EXISTS);
             if (!n) return NULL;
             snprintf(n->field, sizeof n->field, "%s", field);
             return n;
         }
 
-        /* `field in { val1 val2 ... }` or `field in val` — expands to OR chain */
+        /* `field in { val1, val2, lo..hi, ... }` — expands to OR/AND chain */
         if (ot == T_IN) {
             lex_next(L);   /* consume "in" */
             int use_braces = (L->cur.t == T_LC);
             if (use_braces) lex_next(L);  /* consume '{' */
             fnode_t *root = NULL;
             while (L->cur.t == T_WORD || L->cur.t == T_STR) {
-                fnode_t *cmp = fnode_new(N_CMP);
-                if (!cmp) { fnode_free(root); return NULL; }
-                snprintf(cmp->field, sizeof cmp->field, "%s", field);
-                cmp->op = OP_EQ;
-                snprintf(cmp->value, sizeof cmp->value, "%s", L->cur.s);
+                const char *tok = L->cur.s;
+                const char *dotdot = strstr(tok, "..");
+                fnode_t *item = NULL;
+                if (dotdot && dotdot > tok) {
+                    /* range: lo..hi → (field >= lo) AND (field <= hi) */
+                    char lo_s[80], hi_s[80];
+                    int lo_len = (int)(dotdot - tok);
+                    if (lo_len >= (int)sizeof lo_s) lo_len = (int)sizeof lo_s - 1;
+                    memcpy(lo_s, tok, lo_len); lo_s[lo_len] = '\0';
+                    snprintf(hi_s, sizeof hi_s, "%s", dotdot + 2);
+                    fnode_t *ge = fnode_new(N_CMP), *le = fnode_new(N_CMP),
+                            *an = fnode_new(N_AND);
+                    if (!ge || !le || !an) {
+                        fnode_free(ge); fnode_free(le); fnode_free(an);
+                        fnode_free(root); return NULL;
+                    }
+                    snprintf(ge->field, sizeof ge->field, "%s", field);
+                    ge->op = OP_GE;
+                    snprintf(ge->value, sizeof ge->value, "%s", lo_s);
+                    snprintf(le->field, sizeof le->field, "%s", field);
+                    le->op = OP_LE;
+                    snprintf(le->value, sizeof le->value, "%s", hi_s);
+                    an->a = ge; an->b = le; item = an;
+                } else {
+                    fnode_t *cmp = fnode_new(N_CMP);
+                    if (!cmp) { fnode_free(root); return NULL; }
+                    snprintf(cmp->field, sizeof cmp->field, "%s", field);
+                    cmp->op = OP_EQ;
+                    snprintf(cmp->value, sizeof cmp->value, "%s", tok);
+                    item = cmp;
+                }
                 lex_next(L);
-                if (!root) { root = cmp; }
+                if (!root) { root = item; }
                 else {
                     fnode_t *or = fnode_new(N_OR);
-                    if (!or) { fnode_free(root); fnode_free(cmp); return NULL; }
-                    or->a = root; or->b = cmp; root = or;
+                    if (!or) { fnode_free(root); fnode_free(item); return NULL; }
+                    or->a = root; or->b = item; root = or;
                 }
+                if (L->cur.t == T_COMMA) lex_next(L);  /* skip optional comma */
                 if (!use_braces) break;   /* single-value form: stop after first */
             }
             if (use_braces && L->cur.t == T_RC) lex_next(L);  /* consume '}' */
@@ -259,13 +305,15 @@ static fnode_t *parse_primary(lex_t *L)
 
         op_t op;
         switch (ot) {
-        case T_EQ: op = OP_EQ; break;
-        case T_NE: op = OP_NE; break;
-        case T_GT: op = OP_GT; break;
-        case T_LT: op = OP_LT; break;
-        case T_GE: op = OP_GE; break;
-        case T_LE: op = OP_LE; break;
-        default:   op = OP_EQ; break;
+        case T_EQ:       op = OP_EQ;       break;
+        case T_NE:       op = OP_NE;       break;
+        case T_GT:       op = OP_GT;       break;
+        case T_LT:       op = OP_LT;       break;
+        case T_GE:       op = OP_GE;       break;
+        case T_LE:       op = OP_LE;       break;
+        case T_CONTAINS: op = OP_CONTAINS; break;
+        case T_MATCHES:  op = OP_MATCHES;  break;
+        default:         op = OP_EQ;       break;
         }
         lex_next(L);   /* consume operator */
 
@@ -353,6 +401,8 @@ typedef struct {
 
     const uint8_t  *eth;
     uint16_t        ethertype;
+    uint16_t        vlan_id;
+    int             has_vlan;
 
     const uint8_t  *ip4;
     const uint8_t  *ip6;
@@ -383,6 +433,8 @@ static void pkt_ctx_init(pkt_ctx_t *ctx,
 
         /* 802.1Q VLAN tag */
         if (et == 0x8100 && l3len >= 4) {
+            ctx->has_vlan = 1;
+            ctx->vlan_id  = (uint16_t)(((uint16_t)(l3[0] & 0x0f) << 8) | l3[1]);
             et     = (uint16_t)((l3[2] << 8) | l3[3]);
             l3    += 4;
             l3len -= 4;
@@ -494,6 +546,67 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
         }
     }
 
+    /* ── function calls: len:FIELD, upper:FIELD, lower:FIELD ─────────────────
+     * Lexer encodes len(tcp.payload) as the synthetic token "len:tcp.payload".
+     * len() returns FV_UINT byte count; upper/lower transform FV_STR in place. */
+    if (!strncmp(field, "len:", 4)) {
+        const char *inner = field + 4;
+        if (maxout < 1) return 0;
+        fval_t *v = &out[0]; memset(v, 0, sizeof *v);
+        /* named layer lengths */
+        if (!strcmp(inner, "frame"))
+            { v->type = FV_UINT; v->u = ctx->rawlen; return 1; }
+        if (!strcmp(inner, "ip") && ctx->ip4)
+            { v->type = FV_UINT; v->u = (uint32_t)((ctx->ip4[2]<<8)|ctx->ip4[3]); return 1; }
+        if (!strcmp(inner, "ip.payload") && ctx->ip4) {
+            uint32_t tot  = (uint32_t)((ctx->ip4[2]<<8)|ctx->ip4[3]);
+            uint32_t hlen = (uint32_t)(ctx->ip4[0] & 0xf) * 4;
+            v->type = FV_UINT; v->u = (tot > hlen) ? tot - hlen : 0; return 1;
+        }
+        if (!strcmp(inner, "tcp") && ctx->tcp)
+            { v->type = FV_UINT; v->u = (uint32_t)(ctx->tcp[12] >> 4) * 4; return 1; }
+        if (!strcmp(inner, "tcp.payload") && ctx->tcp && ctx->ip4) {
+            uint32_t tot      = (uint32_t)((ctx->ip4[2]<<8)|ctx->ip4[3]);
+            uint32_t ip_hlen  = (uint32_t)(ctx->ip4[0] & 0xf) * 4;
+            uint32_t tcp_hlen = (uint32_t)(ctx->tcp[12] >> 4) * 4;
+            uint32_t pl = (tot > ip_hlen + tcp_hlen) ? tot - ip_hlen - tcp_hlen : 0;
+            v->type = FV_UINT; v->u = pl; return 1;
+        }
+        if (!strcmp(inner, "udp") && ctx->udp)
+            { v->type = FV_UINT; v->u = (uint32_t)((ctx->udp[4]<<8)|ctx->udp[5]); return 1; }
+        if (!strcmp(inner, "udp.payload") && ctx->udp) {
+            uint32_t udp_len = (uint32_t)((ctx->udp[4]<<8)|ctx->udp[5]);
+            v->type = FV_UINT; v->u = (udp_len >= 8) ? udp_len - 8 : 0; return 1;
+        }
+        /* fallback: resolve the inner field and return its string length */
+        {
+            fval_t iv[CAP_MAX_FVALS];
+            if (raw_field_get(ctx, inner, iv, CAP_MAX_FVALS, provider_fn, provider_ctx) > 0
+                    && iv[0].type == FV_STR) {
+                v->type = FV_UINT; v->u = strlen(iv[0].str); return 1;
+            }
+        }
+        return 0;
+    }
+    if (!strncmp(field, "upper:", 6) || !strncmp(field, "lower:", 6)) {
+        int is_upper = (field[0] == 'u');
+        const char *inner = field + 6;
+        if (maxout < 1) return 0;
+        fval_t iv[CAP_MAX_FVALS];
+        if (raw_field_get(ctx, inner, iv, CAP_MAX_FVALS, provider_fn, provider_ctx) > 0
+                && iv[0].type == FV_STR) {
+            out[0] = iv[0];
+            char *s = out[0].str;
+            while (*s) {
+                *s = is_upper ? (char)toupper((unsigned char)*s)
+                              : (char)tolower((unsigned char)*s);
+                s++;
+            }
+            return 1;
+        }
+        return 0;
+    }
+
     /* ── alias expansion (like caracal's aliases()) ── */
     if (!strcmp(field, "ip.addr")) {
         int n = 0;
@@ -524,6 +637,12 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
         char alt[80];
         snprintf(alt, sizeof alt, "ip6.%s", field + 5);
         return raw_field_get(ctx, alt, out, maxout, provider_fn, provider_ctx);
+    }
+    if (!strcmp(field, "ip6.addr") || !strcmp(field, "ipv6.addr")) {
+        int n = 0;
+        n += raw_field_get(ctx, "ip6.src", out + n, maxout - n, provider_fn, provider_ctx);
+        n += raw_field_get(ctx, "ip6.dst", out + n, maxout - n, provider_fn, provider_ctx);
+        return n;
     }
 
     if (maxout < 1) return 0;
@@ -634,6 +753,15 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
         }
     }
 
+    /* ── VLAN ── */
+    if (!strcmp(field, "vlan.id")) {
+        if (!ctx->has_vlan) return 0;
+        v->type = FV_UINT; v->u = ctx->vlan_id; return 1;
+    }
+    if (!strcmp(field, "vlan")) {
+        v->type = FV_UINT; v->u = ctx->has_vlan ? 1 : 0; return v->u ? 1 : 0;
+    }
+
     /* ── Protocol existence ── */
     if (!strcmp(field, "ip"))   { v->type = FV_UINT; v->u = ctx->ip4  ? 1 : 0; return v->u ? 1 : 0; }
     if (!strcmp(field, "ip6") || !strcmp(field, "ipv6")) {
@@ -693,6 +821,66 @@ static int parse_mac(const char *s, uint8_t out[6])
     return -1;
 }
 
+static int parse_ipv6_cidr(const char *s, uint8_t out[16], int *prefix)
+{
+    char addr[64];
+    *prefix = 128;
+    const char *slash = strchr(s, '/');
+    if (slash) {
+        int len = (int)(slash - s);
+        if (len >= (int)sizeof addr) return -1;
+        memcpy(addr, s, len); addr[len] = '\0';
+        *prefix = atoi(slash + 1);
+        if (*prefix < 0)   *prefix = 0;
+        if (*prefix > 128) *prefix = 128;
+    } else {
+        snprintf(addr, sizeof addr, "%s", s);
+    }
+    return inet_pton(AF_INET6, addr, out) == 1 ? 0 : -1;
+}
+
+/* Convert a filter value string to a raw byte pattern for 'contains' searches:
+ *   0xNNNN...  → big-endian bytes (pairs of hex digits)
+ *   aa:bb:cc   → colon-separated hex bytes
+ *   ASCII text → literal bytes */
+static int parse_byte_pattern(const char *val, uint8_t *buf, int *outlen)
+{
+    if (val[0] == '0' && (val[1] == 'x' || val[1] == 'X')) {
+        const char *p = val + 2; int n = 0;
+        while (*p && n < 8) {
+            if (!isxdigit((unsigned char)p[0])) break;
+            char hex[3] = { p[0], isxdigit((unsigned char)p[1]) ? p[1] : '0', '\0' };
+            if (isxdigit((unsigned char)p[1])) {
+                buf[n++] = (uint8_t)strtoul(hex, NULL, 16); p += 2;
+            } else {
+                hex[1] = '\0';
+                buf[n++] = (uint8_t)strtoul(hex, NULL, 16); p++;
+            }
+        }
+        *outlen = n; return n > 0 ? 0 : -1;
+    }
+    if (strchr(val, ':')) {
+        int n = 0; const char *p = val;
+        while (*p && n < 64) {
+            buf[n++] = (uint8_t)strtoul(p, NULL, 16);
+            p = strchr(p, ':'); if (!p) break; p++;
+        }
+        *outlen = n; return n > 0 ? 0 : -1;
+    }
+    int n = (int)strlen(val); if (n > 64) n = 64;
+    memcpy(buf, val, n); *outlen = n; return 0;
+}
+
+static int bytes_contains(const uint8_t *hay, uint32_t hlen,
+                           const uint8_t *needle, int nlen)
+{
+    if (nlen <= 0 || (uint32_t)nlen > hlen) return 0;
+    uint32_t i;
+    for (i = 0; i <= hlen - (uint32_t)nlen; i++)
+        if (memcmp(hay + i, needle, nlen) == 0) return 1;
+    return 0;
+}
+
 static int cmp_sign(op_t op, long long c)
 {
     switch (op) {
@@ -731,11 +919,18 @@ static int fval_matches(const fval_t *fv, op_t op, const char *val)
         return cmp_sign(op, (long long)memcmp(fv->ipv4, ip, 4));
     }
     case FV_IPV6: {
-        /* IPv6: string comparison only for now */
-        char s[64];
-        if (!inet_ntop(AF_INET6, fv->ipv6, s, sizeof s)) return 0;
-        if (op == OP_CONTAINS || op == OP_MATCHES) return strstr(s, val) != NULL;
-        return cmp_sign(op, (long long)strcmp(s, val));
+        uint8_t ip[16]; int prefix = 128;
+        if (parse_ipv6_cidr(val, ip, &prefix) != 0) return 0;
+        if (op == OP_EQ || op == OP_NE) {
+            int full = prefix / 8, rem = prefix % 8, eq = 1, i;
+            for (i = 0; i < full && eq; i++) eq = (fv->ipv6[i] == ip[i]);
+            if (eq && rem) {
+                uint8_t mask = (uint8_t)(0xff << (8 - rem)) & 0xff;
+                eq = ((fv->ipv6[full] & mask) == (ip[full] & mask));
+            }
+            return (op == OP_EQ) ? eq : !eq;
+        }
+        return cmp_sign(op, (long long)memcmp(fv->ipv6, ip, 16));
     }
     case FV_MAC: {
         uint8_t m[6];
@@ -743,7 +938,14 @@ static int fval_matches(const fval_t *fv, op_t op, const char *val)
         return cmp_sign(op, (long long)memcmp(fv->mac, m, 6));
     }
     case FV_STR: {
-        if (op == OP_CONTAINS || op == OP_MATCHES) return strstr(fv->str, val) != NULL;
+        if (op == OP_CONTAINS) return strstr(fv->str, val) != NULL;
+        if (op == OP_MATCHES) {
+            regex_t re;
+            if (regcomp(&re, val, REG_EXTENDED | REG_NOSUB) != 0) return 0;
+            int r = (regexec(&re, fv->str, 0, NULL, 0) == 0);
+            regfree(&re);
+            return r;
+        }
         return cmp_sign(op, (long long)strcmp(fv->str, val));
     }
     case FV_BYTES: {
@@ -778,6 +980,22 @@ static int filter_eval_node(const fnode_t *n, const pkt_ctx_t *ctx,
         return raw_field_get(ctx, n->field, hits, CAP_MAX_FVALS, pfn, pctx) > 0;
     }
     case N_CMP: {
+        /* OP_CONTAINS on a named layer: byte-sequence search in raw bytes */
+        if (n->op == OP_CONTAINS) {
+            const uint8_t *base = NULL; uint32_t blen = 0;
+            if      (!strcmp(n->field, "frame"))               { base = ctx->raw;  blen = ctx->rawlen; }
+            else if (!strcmp(n->field, "eth")  && ctx->eth)    { base = ctx->eth;  blen = ctx->rawlen - (uint32_t)(ctx->eth  - ctx->raw); }
+            else if (!strcmp(n->field, "ip")   && ctx->ip4)    { base = ctx->ip4;  blen = ctx->rawlen - (uint32_t)(ctx->ip4  - ctx->raw); }
+            else if (!strcmp(n->field, "ip6")  && ctx->ip6)    { base = ctx->ip6;  blen = ctx->rawlen - (uint32_t)(ctx->ip6  - ctx->raw); }
+            else if (!strcmp(n->field, "tcp")  && ctx->tcp)    { base = ctx->tcp;  blen = ctx->rawlen - (uint32_t)(ctx->tcp  - ctx->raw); }
+            else if (!strcmp(n->field, "udp")  && ctx->udp)    { base = ctx->udp;  blen = ctx->rawlen - (uint32_t)(ctx->udp  - ctx->raw); }
+            if (base) {
+                uint8_t pat[64]; int plen = 0;
+                return parse_byte_pattern(n->value, pat, &plen) == 0
+                       && bytes_contains(base, blen, pat, plen);
+            }
+            /* fall through: provider-backed FV_STR fields use fval_matches */
+        }
         fval_t hits[CAP_MAX_FVALS];
         int nh = raw_field_get(ctx, n->field, hits, CAP_MAX_FVALS, pfn, pctx);
         for (int i = 0; i < nh; i++)

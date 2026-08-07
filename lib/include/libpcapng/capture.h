@@ -154,6 +154,11 @@ int pcapng_capture_set_buffer_size(pcapng_capture_t *, size_t bytes);
  *   Comparison:   ip.src == 1.2.3.4    tcp.dstport != 80    ip.ttl >= 64
  *   CIDR:         ip.src == 192.168.0.0/16
  *   Boolean:      and/&&   or/||   not/!   ( )
+ *   Byte slice:   tcp[13] == 0x02    tcp[0:2] == 0x1234    tcp[13]&0x02 == 0x02
+ *   Functions:    len(frame) > 100   len(tcp.payload) == 0
+ *                 lower(field) == "value"   upper(field) == "VALUE"
+ *     len() layers: frame | ip | ip.payload | tcp | tcp.payload | udp | udp.payload
+ *     upper/lower only transform FV_STR fields (custom provider or dns.qry.name etc.)
  *
  * Built-in fields:
  *   eth.src  eth.dst  eth.type
