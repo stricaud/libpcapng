@@ -108,7 +108,7 @@ typedef struct {
 
 typedef enum { T_WORD, T_STR, T_LP, T_RP, T_LC, T_RC, T_AND, T_OR, T_NOT,
                T_EQ, T_NE, T_GT, T_LT, T_GE, T_LE, T_IN,
-               T_CONTAINS, T_MATCHES, T_COMMA, T_EOF } ttype_t;
+               T_CONTAINS, T_MATCHES, T_COMMA, T_BITAND, T_EOF } ttype_t;
 
 typedef struct { ttype_t t; char s[160]; } tok_t;
 typedef struct { const char *p; tok_t cur; char err[200]; } lex_t;
@@ -128,7 +128,8 @@ static void lex_next(lex_t *L)
     case '{': L->cur.t = T_LC;  L->p = p + 1; return;
     case '}': L->cur.t = T_RC;  L->p = p + 1; return;
     case ',': L->cur.t = T_COMMA; L->p = p + 1; return;
-    case '&': if (p[1]=='&') { L->cur.t = T_AND; L->p = p+2; return; } break;
+    case '&': if (p[1]=='&') { L->cur.t = T_AND;   L->p = p+2; return; }
+              L->cur.t = T_BITAND; L->p = p+1; return;
     case '|': if (p[1]=='|') { L->cur.t = T_OR;  L->p = p+2; return; } break;
     case '=': if (p[1]=='=') { L->cur.t = T_EQ;  L->p = p+2; return; } break;
     case '!': if (p[1]=='=') { L->cur.t = T_NE;  L->p = p+2; return; }
@@ -168,9 +169,10 @@ static void lex_next(lex_t *L)
         /* function call: len(field) / upper(field) / lower(field)
            absorb as synthetic token "len:field", "upper:field", "lower:field" */
         if (*p == '(') {
-            int is_func = (n == 3 && !memcmp(L->cur.s, "len",   3)) ||
-                          (n == 5 && (!memcmp(L->cur.s, "upper", 5) ||
-                                      !memcmp(L->cur.s, "lower", 5)));
+            int is_func = (n == 3 && !memcmp(L->cur.s, "len",    3)) ||
+                          (n == 5 && (!memcmp(L->cur.s, "upper",  5) ||
+                                      !memcmp(L->cur.s, "lower",  5))) ||
+                          (n == 6 &&  !memcmp(L->cur.s, "lookup", 6));
             if (is_func && n < (int)sizeof L->cur.s - 1) {
                 L->cur.s[n++] = ':';
                 p++;  /* skip '(' */
@@ -239,6 +241,17 @@ static fnode_t *parse_primary(lex_t *L)
         snprintf(field, sizeof field, "%s", L->cur.s);
         lex_next(L);
 
+        /* named bitwise AND: tcp.flags & 0x02 — encode as "tcp.flags&0x02" */
+        if (L->cur.t == T_BITAND) {
+            lex_next(L);   /* consume '&' */
+            if (L->cur.t == T_WORD || L->cur.t == T_STR) {
+                char masked[120];
+                snprintf(masked, sizeof masked, "%s&%s", field, L->cur.s);
+                snprintf(field, sizeof field, "%s", masked);
+                lex_next(L);
+            }
+        }
+
         /* existence test if no operator follows */
         ttype_t ot = L->cur.t;
         if (ot != T_EQ && ot != T_NE && ot != T_GT && ot != T_LT &&
@@ -250,11 +263,12 @@ static fnode_t *parse_primary(lex_t *L)
             return n;
         }
 
-        /* `field in { val1, val2, lo..hi, ... }` — expands to OR/AND chain */
+        /* `field in { val1, val2, lo..hi, ... }` or `field in (...)` */
         if (ot == T_IN) {
             lex_next(L);   /* consume "in" */
-            int use_braces = (L->cur.t == T_LC);
-            if (use_braces) lex_next(L);  /* consume '{' */
+            int use_braces = (L->cur.t == T_LC || L->cur.t == T_LP);
+            ttype_t close_tok = (L->cur.t == T_LP) ? T_RP : T_RC;
+            if (use_braces) lex_next(L);  /* consume '{' or '(' */
             fnode_t *root = NULL;
             while (L->cur.t == T_WORD || L->cur.t == T_STR) {
                 const char *tok = L->cur.s;
@@ -298,7 +312,7 @@ static fnode_t *parse_primary(lex_t *L)
                 if (L->cur.t == T_COMMA) lex_next(L);  /* skip optional comma */
                 if (!use_braces) break;   /* single-value form: stop after first */
             }
-            if (use_braces && L->cur.t == T_RC) lex_next(L);  /* consume '}' */
+            if (use_braces && L->cur.t == close_tok) lex_next(L);  /* consume '}' or ')' */
             if (!root) { snprintf(L->err, sizeof L->err, "empty 'in' set"); return NULL; }
             return root;
         }
@@ -359,6 +373,172 @@ static fnode_t *parse_or(lex_t *L)
     return a;
 }
 
+/* ========================================================================
+ * TCP flow tracking for tcp.analysis.retransmission
+ *
+ * A directional flow table (src_ip, dst_ip, sport, dport, proto) tracks
+ * the sequence-number high-water mark for each TCP half-connection.
+ * A packet whose seq falls below the high-water mark is a retransmission.
+ *
+ * The table is updated for EVERY TCP packet that passes through pkt_ctx_init,
+ * not only when the field appears in the filter expression — this ensures
+ * the state remains accurate even when packets don't match the filter.
+ *
+ * pcapng_capture_t owns a flow table allocated at open time.
+ * pcapng_capture_filter_match() (stateless) passes NULL → always returns 0.
+ * Use pcapng_capture_filter_match_ex() with a pcapng_flow_table_t to do
+ * stateful retransmission detection in scripts or one-shot evaluations.
+ * ======================================================================== */
+
+#define TCP_FLOW_MAX    4096u   /* power of 2, open-addressing; ~192 KB */
+#define TCP_FLOW_PROBE  16u     /* max linear probe before eviction      */
+
+typedef struct {
+    /* Directional 5-tuple key */
+    uint8_t  src[16];       /* IPv4 in first 4 bytes; full 16 for IPv6  */
+    uint8_t  dst[16];
+    uint16_t sport;
+    uint16_t dport;
+    uint8_t  is_ipv6;
+    uint8_t  used;
+    /* Sequence tracking */
+    uint32_t isn;           /* initial sequence number (from SYN)        */
+    uint32_t max_seq_end;   /* high-water mark: max(seq + payload_len)   */
+    uint8_t  syn_seen;
+    /* ACK + window tracking */
+    uint32_t last_ack;      /* last ACK number sent from this direction  */
+    uint8_t  last_ack_valid;/* 1 once any ACK has been recorded          */
+    uint16_t last_win;      /* last window size advertised by this side  */
+    uint8_t  zero_window;   /* this side last advertised window = 0      */
+    uint32_t dup_ack_count; /* consecutive duplicate ACKs from this dir  */
+    /* Bidirectional event flags */
+    uint8_t  keep_alive_pending;     /* a keep-alive was received; expect ack  */
+    uint8_t  zero_win_probe_pending; /* a zerowin probe was received; expect ack */
+} tcp_flow_slot_t;
+
+struct pcapng_flow_table {
+    tcp_flow_slot_t slots[TCP_FLOW_MAX];
+};
+
+pcapng_flow_table_t *pcapng_flow_table_create(void)
+{
+    return calloc(1, sizeof(pcapng_flow_table_t));
+}
+void pcapng_flow_table_free(pcapng_flow_table_t *ft) { free(ft); }
+
+static uint32_t flow_hash(const uint8_t *src, const uint8_t *dst,
+                           uint16_t sport, uint16_t dport, int is_ipv6)
+{
+    uint32_t h = 2166136261u;
+    int i, n = is_ipv6 ? 16 : 4;
+    for (i = 0; i < n; i++) { h ^= src[i]; h *= 16777619u; }
+    for (i = 0; i < n; i++) { h ^= dst[i]; h *= 16777619u; }
+    h ^= (uint32_t)sport; h *= 16777619u;
+    h ^= (uint32_t)dport; h *= 16777619u;
+    return h & (TCP_FLOW_MAX - 1);
+}
+
+static tcp_flow_slot_t *flow_get(pcapng_flow_table_t *ft,
+                                  const uint8_t *src, const uint8_t *dst,
+                                  uint16_t sport, uint16_t dport, int is_ipv6)
+{
+    int n = is_ipv6 ? 16 : 4;
+    uint32_t h = flow_hash(src, dst, sport, dport, is_ipv6);
+    uint32_t i;
+    for (i = 0; i < TCP_FLOW_PROBE; i++) {
+        tcp_flow_slot_t *s = &ft->slots[(h + i) & (TCP_FLOW_MAX - 1)];
+        if (!s->used) {
+            memset(s, 0, sizeof *s);
+            memcpy(s->src, src, n); memcpy(s->dst, dst, n);
+            s->sport = sport; s->dport = dport;
+            s->is_ipv6 = (uint8_t)is_ipv6; s->used = 1;
+            return s;
+        }
+        if (s->is_ipv6 == (uint8_t)is_ipv6 &&
+            memcmp(s->src, src, n) == 0 && memcmp(s->dst, dst, n) == 0 &&
+            s->sport == sport && s->dport == dport)
+            return s;
+    }
+    /* neighbourhood full — evict the primary slot */
+    tcp_flow_slot_t *s = &ft->slots[h];
+    memset(s, 0, sizeof *s);
+    memcpy(s->src, src, n); memcpy(s->dst, dst, n);
+    s->sport = sport; s->dport = dport;
+    s->is_ipv6 = (uint8_t)is_ipv6; s->used = 1;
+    return s;
+}
+
+/* ========================================================================
+ * Filter alias table
+ *
+ * Two alias kinds:
+ *   expression aliases — whole filter string substitution (key may contain spaces)
+ *   field aliases      — field name expands to a comma-separated list of targets
+ *                        with OR semantics (no spaces in key)
+ * ======================================================================== */
+
+#define CAP_MAX_ALIASES 256
+
+typedef struct {
+    char from[128];
+    char to[512];
+    int  is_field;  /* 0 = expression alias, 1 = field alias */
+} cap_alias_t;
+
+static cap_alias_t g_aliases[CAP_MAX_ALIASES];
+static int         g_nalias = 0;
+
+int pcapng_filter_alias_add(const char *from, const char *to)
+{
+    if (!from || !to || g_nalias >= CAP_MAX_ALIASES) return -1;
+    cap_alias_t *a = &g_aliases[g_nalias++];
+    snprintf(a->from, sizeof a->from, "%s", from);
+    snprintf(a->to,   sizeof a->to,   "%s", to);
+    a->is_field = (strchr(from, ' ') == NULL && strchr(from, '\t') == NULL);
+    return 0;
+}
+
+int pcapng_filter_aliases_load(const char *path, char *errbuf)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                             "cannot open '%s': %s", path, strerror(errno));
+        return -1;
+    }
+    char line[700];
+    while (fgets(line, sizeof line, fp)) {
+        /* strip newline */
+        char *nl = strchr(line, '\n'); if (nl) *nl = '\0';
+        nl = strchr(line, '\r'); if (nl) *nl = '\0';
+        /* skip blanks and comments */
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p || *p == '#') continue;
+        /* locate '=' separator */
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        /* key: everything before '=', rtrimmed */
+        char key[128];
+        int klen = (int)(eq - line);
+        while (klen > 0 && (line[klen-1] == ' ' || line[klen-1] == '\t')) klen--;
+        if (klen <= 0 || klen >= (int)sizeof key) continue;
+        memcpy(key, line, klen); key[klen] = '\0';
+        /* value: everything after '=', ltrimmed */
+        const char *vp = eq + 1;
+        while (*vp == ' ' || *vp == '\t') vp++;
+        char val[512];
+        snprintf(val, sizeof val, "%s", vp);
+        int vlen = (int)strlen(val);
+        while (vlen > 0 && (val[vlen-1] == ' ' || val[vlen-1] == '\t')) vlen--;
+        val[vlen] = '\0';
+        if (!val[0]) continue;
+        pcapng_filter_alias_add(key, val);
+    }
+    fclose(fp);
+    return 0;
+}
+
 static cap_filter_t *filter_compile(const char *expr, char *errbuf, size_t esz)
 {
     cap_filter_t *f = calloc(1, sizeof *f);
@@ -369,9 +549,31 @@ static cap_filter_t *filter_compile(const char *expr, char *errbuf, size_t esz)
         return f;
     }
 
+    /* expression alias expansion: if the trimmed expression matches an alias
+     * key (no spaces or spaces — whole string), substitute before parsing */
+    const char *use_expr = expr;
+    char alias_expanded[512];
+    {
+        /* trim leading/trailing whitespace for comparison */
+        const char *s = expr;
+        while (*s == ' ' || *s == '\t') s++;
+        char trimmed[512];
+        snprintf(trimmed, sizeof trimmed, "%s", s);
+        int tlen = (int)strlen(trimmed);
+        while (tlen > 0 && (trimmed[tlen-1] == ' ' || trimmed[tlen-1] == '\t')) tlen--;
+        trimmed[tlen] = '\0';
+        for (int i = 0; i < g_nalias; i++) {
+            if (!g_aliases[i].is_field && !strcmp(trimmed, g_aliases[i].from)) {
+                snprintf(alias_expanded, sizeof alias_expanded, "%s", g_aliases[i].to);
+                use_expr = alias_expanded;
+                break;
+            }
+        }
+    }
+
     lex_t L;
     memset(&L, 0, sizeof L);
-    L.p = expr;
+    L.p = use_expr;
     lex_next(&L);
     f->root = parse_or(&L);
     if (!f->root || L.cur.t != T_EOF) {
@@ -409,11 +611,199 @@ typedef struct {
     const uint8_t  *tcp;
     const uint8_t  *udp;
     const uint8_t  *icmp;
+    const uint8_t  *icmp6;
+    const uint8_t  *arp;
+
+    /* Precomputed TCP analysis fields (require flow table; all 0 without one) */
+    struct {
+        uint8_t  retransmission;
+        uint8_t  fast_retransmission;
+        uint8_t  spurious_retransmission;
+        uint8_t  duplicate_ack;
+        uint32_t duplicate_ack_num;
+        uint8_t  zero_window;
+        uint8_t  zero_window_probe;
+        uint8_t  zero_window_probe_ack;
+        uint8_t  keep_alive;
+        uint8_t  keep_alive_ack;
+        uint8_t  window_update;
+        uint8_t  out_of_order;
+        uint32_t bytes_in_flight;
+        uint8_t  lost_segment;
+    } tcp_analysis;
 } pkt_ctx_t;
+
+/* Runs all tcp.analysis computations for this packet, writing into ctx->tcp_analysis.
+ * Looks up both the forward (src→dst) and reverse (dst→src) flow slots so that
+ * bidirectional fields (bytes_in_flight, fast_retransmission, …) are available.
+ * Placed after pkt_ctx_t so it can reference ctx fields directly. */
+static void tcp_run_analysis(pcapng_flow_table_t *ft, pkt_ctx_t *ctx)
+{
+    if (!ft || !ctx->tcp) return;
+
+    uint8_t  flags    = ctx->tcp[13];
+    uint16_t win      = (uint16_t)((ctx->tcp[14] << 8) | ctx->tcp[15]);
+    uint32_t seq      = ((uint32_t)ctx->tcp[4]  << 24) | ((uint32_t)ctx->tcp[5]  << 16)
+                      | ((uint32_t)ctx->tcp[6]  <<  8) |  (uint32_t)ctx->tcp[7];
+    uint32_t ack_num  = ((uint32_t)ctx->tcp[8]  << 24) | ((uint32_t)ctx->tcp[9]  << 16)
+                      | ((uint32_t)ctx->tcp[10] <<  8) |  (uint32_t)ctx->tcp[11];
+    uint32_t tcp_hlen = (uint32_t)(ctx->tcp[12] >> 4) * 4;
+    uint8_t  is_ack   = (flags & 0x10) ? 1 : 0;
+    uint8_t  is_syn   = (flags & 0x02) ? 1 : 0;
+    uint8_t  is_fin   = (flags & 0x01) ? 1 : 0;
+    uint8_t  is_rst   = (flags & 0x04) ? 1 : 0;
+
+    /* payload length */
+    uint32_t data_len = 0;
+    if (ctx->ip4) {
+        uint32_t ip_tot  = (uint32_t)((ctx->ip4[2] << 8) | ctx->ip4[3]);
+        uint32_t ip_hlen = (uint32_t)(ctx->ip4[0] & 0x0f) * 4;
+        if (ip_tot > ip_hlen + tcp_hlen) data_len = ip_tot - ip_hlen - tcp_hlen;
+    } else if (ctx->ip6) {
+        uint32_t plen = (uint32_t)((ctx->ip6[4] << 8) | ctx->ip6[5]);
+        if (plen > tcp_hlen) data_len = plen - tcp_hlen;
+    }
+
+    /* directional flow key */
+    uint8_t src[16] = {0}, dst[16] = {0};
+    int is_ipv6 = 0;
+    if (ctx->ip4) {
+        memcpy(src, ctx->ip4 + 12, 4); memcpy(dst, ctx->ip4 + 16, 4);
+    } else if (ctx->ip6) {
+        memcpy(src, ctx->ip6 +  8, 16); memcpy(dst, ctx->ip6 + 24, 16); is_ipv6 = 1;
+    } else { return; }
+
+    uint16_t sport = (uint16_t)((ctx->tcp[0] << 8) | ctx->tcp[1]);
+    uint16_t dport = (uint16_t)((ctx->tcp[2] << 8) | ctx->tcp[3]);
+
+    tcp_flow_slot_t *fwd = flow_get(ft, src, dst, sport, dport, is_ipv6);
+    tcp_flow_slot_t *rev = flow_get(ft, dst, src, dport, sport, is_ipv6);
+    if (!fwd || !rev) return;
+
+    uint32_t seq_end   = seq + data_len + (is_fin ? 1u : 0u) + (is_syn ? 1u : 0u);
+    int      has_data  = (data_len > 0 || is_fin) ? 1 : 0;
+    int      is_pure_ack = (is_ack && !is_syn && !is_fin && !is_rst && data_len == 0) ? 1 : 0;
+
+    /* RST — reset this direction's state and stop */
+    if (is_rst) {
+        fwd->syn_seen = 0; fwd->max_seq_end = 0;
+        fwd->dup_ack_count = 0; fwd->zero_window = 0;
+        fwd->keep_alive_pending = 0; fwd->zero_win_probe_pending = 0;
+        return;
+    }
+
+    /* zero_window: this direction advertises window = 0 (not on SYN) */
+    if (!is_syn) {
+        ctx->tcp_analysis.zero_window = (win == 0) ? 1 : 0;
+        fwd->zero_window = (win == 0) ? 1 : 0;
+    }
+
+    /* SYN / SYN-ACK */
+    if (is_syn) {
+        if (fwd->syn_seen && seq == fwd->isn) {
+            ctx->tcp_analysis.retransmission = 1;
+        } else {
+            fwd->isn = seq; fwd->syn_seen = 1;
+            fwd->max_seq_end = seq + 1;
+        }
+        if (is_ack) { fwd->last_ack = ack_num; fwd->last_ack_valid = 1; }
+        fwd->last_win = win;
+        return;
+    }
+
+    /* --- Established-phase analysis --- */
+
+    /* zero_window_probe: 1 byte sent toward the side that said window=0 */
+    if (data_len == 1 && rev->zero_window && fwd->syn_seen) {
+        ctx->tcp_analysis.zero_window_probe = 1;
+        fwd->zero_win_probe_pending = 1;
+    }
+
+    /* zero_window_probe_ack: pure ACK from the zero-window side after a probe */
+    if (is_pure_ack && fwd->zero_window && rev->zero_win_probe_pending) {
+        ctx->tcp_analysis.zero_window_probe_ack = 1;
+        rev->zero_win_probe_pending = 0;
+    }
+
+    /* keep_alive: seq is one behind what the peer has acknowledged, len ≤ 1 */
+    if (!is_fin && data_len <= 1 && fwd->syn_seen &&
+        rev->last_ack_valid && seq == (uint32_t)(rev->last_ack - 1u)) {
+        ctx->tcp_analysis.keep_alive = 1;
+        rev->keep_alive_pending = 1;
+    }
+
+    /* keep_alive_ack: pure ACK in response to a keep-alive we received */
+    if (is_pure_ack && fwd->keep_alive_pending) {
+        ctx->tcp_analysis.keep_alive_ack = 1;
+        fwd->keep_alive_pending = 0;
+    }
+
+    /* ACK number / window analysis */
+    if (is_ack) {
+        int ack_advanced = (!fwd->last_ack_valid ||
+                            (int32_t)(ack_num - fwd->last_ack) > 0) ? 1 : 0;
+
+        if (is_pure_ack &&
+            !ctx->tcp_analysis.zero_window_probe_ack &&
+            !ctx->tcp_analysis.keep_alive_ack) {
+            if (fwd->last_ack_valid && !ack_advanced) {
+                if (win == fwd->last_win) {
+                    /* duplicate ACK */
+                    fwd->dup_ack_count++;
+                    ctx->tcp_analysis.duplicate_ack     = 1;
+                    ctx->tcp_analysis.duplicate_ack_num = fwd->dup_ack_count;
+                } else {
+                    /* window update: same ack, different window */
+                    ctx->tcp_analysis.window_update = 1;
+                    fwd->dup_ack_count = 0;
+                }
+            } else {
+                fwd->dup_ack_count = 0;
+            }
+        } else if (!is_pure_ack) {
+            fwd->dup_ack_count = 0;
+        }
+
+        if (ack_advanced) { fwd->last_ack = ack_num; fwd->last_ack_valid = 1; }
+        fwd->last_win = win;
+    }
+
+    /* Sequence-space analysis for data/FIN segments */
+    if (has_data && fwd->syn_seen) {
+        if ((int32_t)(seq - fwd->max_seq_end) < 0) {
+            if ((int32_t)(seq_end - fwd->max_seq_end) <= 0) {
+                /* all bytes previously seen → retransmission */
+                ctx->tcp_analysis.retransmission = 1;
+                /* spurious if peer already acked past this seq */
+                if (rev->last_ack_valid && (int32_t)(seq - rev->last_ack) < 0)
+                    ctx->tcp_analysis.spurious_retransmission = 1;
+                /* fast if peer had sent ≥ 3 duplicate ACKs */
+                if (rev->dup_ack_count >= 3)
+                    ctx->tcp_analysis.fast_retransmission = 1;
+            } else {
+                /* straddles high-water mark → out-of-order (contains new data) */
+                ctx->tcp_analysis.out_of_order = 1;
+                fwd->max_seq_end = seq_end;
+            }
+        } else if ((int32_t)(seq - fwd->max_seq_end) > 0) {
+            /* gap: seq jumped ahead → a segment before this is missing */
+            ctx->tcp_analysis.lost_segment = 1;
+            fwd->max_seq_end = seq_end;
+        } else {
+            fwd->max_seq_end = seq_end;
+        }
+    }
+
+    /* bytes_in_flight: data sent by this direction not yet acknowledged by peer */
+    if (fwd->syn_seen && rev->last_ack_valid) {
+        int32_t bif = (int32_t)(fwd->max_seq_end - rev->last_ack);
+        ctx->tcp_analysis.bytes_in_flight = (bif > 0) ? (uint32_t)bif : 0u;
+    }
+}
 
 static void pkt_ctx_init(pkt_ctx_t *ctx,
                           const uint8_t *data, uint32_t len,
-                          uint16_t linktype)
+                          uint16_t linktype, pcapng_flow_table_t *ft)
 {
     memset(ctx, 0, sizeof *ctx);
     ctx->raw     = data;
@@ -470,10 +860,17 @@ static void pkt_ctx_init(pkt_ctx_t *ctx,
         const uint8_t *l4    = l3 + 40;
         uint32_t       l4len = l3len - 40;
 
-        if (nxt == 6  && l4len >= 20) { ctx->tcp  = l4; }
-        if (nxt == 17 && l4len >=  8) { ctx->udp  = l4; }
-        if (nxt == 58 && l4len >=  4) { ctx->icmp = l4; }
+        if (nxt == 6  && l4len >= 20) { ctx->tcp   = l4; }
+        if (nxt == 17 && l4len >=  8) { ctx->udp   = l4; }
+        if (nxt == 58 && l4len >=  4) { ctx->icmp6 = l4; }
+
+    } else if (et == 0x0806 && l3len >= 28) {
+        /* ARP: htype(2) ptype(2) hlen(1) plen(1) oper(2) sha(6) spa(4) tha(6) tpa(4) */
+        ctx->arp = l3;
     }
+
+    /* Precompute TCP analysis fields (updates flow table state). */
+    tcp_run_analysis(ft, ctx);
 }
 
 /* ========================================================================
@@ -514,30 +911,43 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
      * assemble big-endian, apply optional bitmask, and return FV_UINT so the
      * standard comparison path handles all operators without special casing. */
     {
-        char slice_proto[20];
-        int  slice_off = -1, slice_len = 1;
-        if (sscanf(field, "%19[^[][%d:%d]", slice_proto, &slice_off, &slice_len) >= 2 ||
-            (slice_len = 1, sscanf(field, "%19[^[][%d]", slice_proto, &slice_off) == 2)) {
-            if (slice_off >= 0 && slice_len >= 1 && slice_len <= 8 && maxout >= 1) {
+        char slice_proto[24];
+        int  slice_off = 0, slice_len = 1;
+        if (sscanf(field, "%23[^[][%d:%d]", slice_proto, &slice_off, &slice_len) >= 2 ||
+            (slice_len = 1, sscanf(field, "%23[^[][%d]", slice_proto, &slice_off) == 2)) {
+            if (slice_len >= 1 && slice_len <= 8 && maxout >= 1) {
                 /* optional bitmask suffix: tcp[13]&0x02 */
                 uint64_t mask = ~(uint64_t)0;
                 const char *amp = strchr(field, '&');
                 if (amp) mask = strtoull(amp + 1, NULL, 0);
 
                 const uint8_t *base = NULL;
-                if      (!strcmp(slice_proto, "frame"))               base = ctx->raw;
-                else if (!strcmp(slice_proto, "eth")  && ctx->eth)    base = ctx->eth;
-                else if (!strcmp(slice_proto, "ip")   && ctx->ip4)    base = ctx->ip4;
-                else if (!strcmp(slice_proto, "ip6")  && ctx->ip6)    base = ctx->ip6;
-                else if (!strcmp(slice_proto, "tcp")  && ctx->tcp)    base = ctx->tcp;
-                else if (!strcmp(slice_proto, "udp")  && ctx->udp)    base = ctx->udp;
-                else if (!strcmp(slice_proto, "icmp") && ctx->icmp)   base = ctx->icmp;
+                if      (!strcmp(slice_proto, "frame"))                  base = ctx->raw;
+                else if (!strcmp(slice_proto, "eth")    && ctx->eth)     base = ctx->eth;
+                else if (!strcmp(slice_proto, "eth.dst") && ctx->eth)    base = ctx->eth;
+                else if (!strcmp(slice_proto, "eth.src") && ctx->eth)    base = ctx->eth + 6;
+                else if (!strcmp(slice_proto, "ip")     && ctx->ip4)     base = ctx->ip4;
+                else if (!strcmp(slice_proto, "ip.src") && ctx->ip4)     base = ctx->ip4 + 12;
+                else if (!strcmp(slice_proto, "ip.dst") && ctx->ip4)     base = ctx->ip4 + 16;
+                else if (!strcmp(slice_proto, "ip6")    && ctx->ip6)     base = ctx->ip6;
+                else if (!strcmp(slice_proto, "ip6.src") && ctx->ip6)    base = ctx->ip6 + 8;
+                else if (!strcmp(slice_proto, "ip6.dst") && ctx->ip6)    base = ctx->ip6 + 24;
+                else if (!strcmp(slice_proto, "tcp")    && ctx->tcp)     base = ctx->tcp;
+                else if (!strcmp(slice_proto, "udp")    && ctx->udp)     base = ctx->udp;
+                else if (!strcmp(slice_proto, "icmp")   && ctx->icmp)    base = ctx->icmp;
+                else if (!strcmp(slice_proto, "icmpv6") && ctx->icmp6)   base = ctx->icmp6;
                 if (base) {
                     uint32_t avail = ctx->rawlen - (uint32_t)(base - ctx->raw);
-                    if ((uint32_t)(slice_off + slice_len) <= avail) {
+                    /* resolve negative offset from end */
+                    int off = slice_off;
+                    if (off < 0) {
+                        off = (int)avail + off;
+                        if (off < 0) return 0;
+                    }
+                    if ((uint32_t)(off + slice_len) <= avail) {
                         uint64_t lv = 0;
                         int i; for (i = 0; i < slice_len; i++)
-                            lv = (lv << 8) | base[slice_off + i];
+                            lv = (lv << 8) | base[off + i];
                         fval_t *v = &out[0];
                         memset(v, 0, sizeof *v);
                         v->type = FV_UINT;
@@ -610,6 +1020,52 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
         }
         return 0;
     }
+    /* lookup(SYMBOL) → asks the provider to resolve a POSA symbolic name.
+     * Lexer encodes lookup(CREATED) as "lookup:CREATED".  Provider is called
+     * with "__lookup__:CREATED"; it should return the numeric value ("0x41"). */
+    if (!strncmp(field, "lookup:", 7)) {
+        const char *sym = field + 7;
+        if (maxout < 1 || !provider_fn) return 0;
+        char lookup_key[200], val[160];
+        snprintf(lookup_key, sizeof lookup_key, "__lookup__:%s", sym);
+        if (provider_fn(lookup_key, ctx->raw, ctx->rawlen, val, sizeof val, provider_ctx)) {
+            fval_t *v = &out[0]; memset(v, 0, sizeof *v);
+            char *end;
+            uint64_t n = strtoull(val, &end, 0);
+            if (val[0] != '\0' && *end == '\0') {
+                v->type = FV_UINT; v->u = n;
+            } else {
+                v->type = FV_STR;
+                snprintf(v->str, sizeof v->str, "%s", val);
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    /* ── named-field bitmask: tcp.flags&0x02, ip.dsfield&0x3 ──────────────
+     * Lexer emits "field&mask" only when there is no slice bracket, so this
+     * won't conflict with the tcp[13]&0x02 slice path above. */
+    {
+        const char *amp2 = strchr(field, '&');
+        if (amp2 && !strchr(field, '[')) {
+            char base_field[80];
+            int blen = (int)(amp2 - field);
+            if (blen > 0 && blen < (int)sizeof base_field) {
+                memcpy(base_field, field, blen);
+                base_field[blen] = '\0';
+                uint64_t mask2 = strtoull(amp2 + 1, NULL, 0);
+                fval_t bv[1];
+                if (raw_field_get(ctx, base_field, bv, 1, provider_fn, provider_ctx) > 0
+                        && bv[0].type == FV_UINT && maxout >= 1) {
+                    out[0].type = FV_UINT;
+                    out[0].u    = bv[0].u & mask2;
+                    return 1;
+                }
+            }
+            return 0;
+        }
+    }
 
     /* ── alias expansion (like caracal's aliases()) ── */
     if (!strcmp(field, "ip.addr")) {
@@ -652,6 +1108,11 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
     if (maxout < 1) return 0;
     fval_t *v = &out[0];
     memset(v, 0, sizeof *v);
+
+    /* ── Frame-level fields ── */
+    if (!strcmp(field, "frame.len") || !strcmp(field, "frame.cap_len")) {
+        v->type = FV_UINT; v->u = ctx->rawlen; return 1;
+    }
 
     /* ── Ethernet ── */
     if (ctx->eth) {
@@ -729,6 +1190,55 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
             v->u = ((uint32_t)ctx->tcp[4] << 24) | ((uint32_t)ctx->tcp[5] << 16) |
                    ((uint32_t)ctx->tcp[6] <<  8) |  (uint32_t)ctx->tcp[7]; return 1;
         }
+        if (!strcmp(field, "tcp.ack")) {
+            v->type = FV_UINT;
+            v->u = ((uint32_t)ctx->tcp[8]  << 24) | ((uint32_t)ctx->tcp[9]  << 16) |
+                   ((uint32_t)ctx->tcp[10] <<  8) |  (uint32_t)ctx->tcp[11]; return 1;
+        }
+        if (!strcmp(field, "tcp.window_size") || !strcmp(field, "tcp.window_size_value")) {
+            v->type = FV_UINT;
+            v->u = (uint32_t)((ctx->tcp[14] << 8) | ctx->tcp[15]); return 1;
+        }
+        if (!strcmp(field, "tcp.flags.psh")) {
+            v->type = FV_UINT; v->u = (ctx->tcp[13] & 0x08) ? 1 : 0; return 1;
+        }
+        if (!strcmp(field, "tcp.flags.urg")) {
+            v->type = FV_UINT; v->u = (ctx->tcp[13] & 0x20) ? 1 : 0; return 1;
+        }
+        /* tcp.analysis.* fields: precomputed by tcp_run_analysis via flow table.
+         * All return 0 when no flow table is attached (stateless evaluation). */
+        if (!strncmp(field, "tcp.analysis.", 13)) {
+            const char *af = field + 13;
+            v->type = FV_UINT;
+            if (!strcmp(af, "retransmission"))
+                { v->u = ctx->tcp_analysis.retransmission; return 1; }
+            if (!strcmp(af, "fast_retransmission"))
+                { v->u = ctx->tcp_analysis.fast_retransmission; return 1; }
+            if (!strcmp(af, "spurious_retransmission"))
+                { v->u = ctx->tcp_analysis.spurious_retransmission; return 1; }
+            if (!strcmp(af, "duplicate_ack"))
+                { v->u = ctx->tcp_analysis.duplicate_ack; return 1; }
+            if (!strcmp(af, "duplicate_ack_num"))
+                { v->u = ctx->tcp_analysis.duplicate_ack_num; return 1; }
+            if (!strcmp(af, "zero_window"))
+                { v->u = ctx->tcp_analysis.zero_window; return 1; }
+            if (!strcmp(af, "zero_window_probe"))
+                { v->u = ctx->tcp_analysis.zero_window_probe; return 1; }
+            if (!strcmp(af, "zero_window_probe_ack"))
+                { v->u = ctx->tcp_analysis.zero_window_probe_ack; return 1; }
+            if (!strcmp(af, "keep_alive"))
+                { v->u = ctx->tcp_analysis.keep_alive; return 1; }
+            if (!strcmp(af, "keep_alive_ack"))
+                { v->u = ctx->tcp_analysis.keep_alive_ack; return 1; }
+            if (!strcmp(af, "window_update"))
+                { v->u = ctx->tcp_analysis.window_update; return 1; }
+            if (!strcmp(af, "out_of_order"))
+                { v->u = ctx->tcp_analysis.out_of_order; return 1; }
+            if (!strcmp(af, "bytes_in_flight"))
+                { v->u = ctx->tcp_analysis.bytes_in_flight; return 1; }
+            if (!strcmp(af, "lost_segment"))
+                { v->u = ctx->tcp_analysis.lost_segment; return 1; }
+        }
     }
 
     /* ── UDP ── */
@@ -757,6 +1267,37 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
         }
     }
 
+    /* ── ICMPv6 ── */
+    if (ctx->icmp6) {
+        if (!strcmp(field, "icmpv6.type")) {
+            v->type = FV_UINT; v->u = ctx->icmp6[0]; return 1;
+        }
+        if (!strcmp(field, "icmpv6.code")) {
+            v->type = FV_UINT; v->u = ctx->icmp6[1]; return 1;
+        }
+    }
+
+    /* ── ARP ── */
+    if (ctx->arp) {
+        if (!strcmp(field, "arp.opcode") || !strcmp(field, "arp.op")) {
+            v->type = FV_UINT;
+            v->u = (uint32_t)((ctx->arp[6] << 8) | ctx->arp[7]); return 1;
+        }
+        /* standard Ethernet ARP: htype=1 hlen=6 ptype=0x0800 plen=4 */
+        if (!strcmp(field, "arp.src.proto_ipv4") && ctx->arp[4] == 6) {
+            v->type = FV_IPV4; memcpy(v->ipv4, ctx->arp + 14, 4); return 1;
+        }
+        if (!strcmp(field, "arp.dst.proto_ipv4") && ctx->arp[4] == 6) {
+            v->type = FV_IPV4; memcpy(v->ipv4, ctx->arp + 24, 4); return 1;
+        }
+        if (!strcmp(field, "arp.src.hw_mac") && ctx->arp[4] == 6) {
+            v->type = FV_MAC; memcpy(v->mac, ctx->arp + 8,  6); return 1;
+        }
+        if (!strcmp(field, "arp.dst.hw_mac") && ctx->arp[4] == 6) {
+            v->type = FV_MAC; memcpy(v->mac, ctx->arp + 18, 6); return 1;
+        }
+    }
+
     /* ── VLAN ── */
     if (!strcmp(field, "vlan.id")) {
         if (!ctx->has_vlan) return 0;
@@ -767,15 +1308,34 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
     }
 
     /* ── Protocol existence ── */
-    if (!strcmp(field, "ip"))   { v->type = FV_UINT; v->u = ctx->ip4  ? 1 : 0; return v->u ? 1 : 0; }
+    if (!strcmp(field, "ip"))      { v->type = FV_UINT; v->u = ctx->ip4   ? 1 : 0; return v->u ? 1 : 0; }
     if (!strcmp(field, "ip6") || !strcmp(field, "ipv6")) {
-                                  v->type = FV_UINT; v->u = ctx->ip6  ? 1 : 0; return v->u ? 1 : 0; }
-    if (!strcmp(field, "tcp"))  { v->type = FV_UINT; v->u = ctx->tcp  ? 1 : 0; return v->u ? 1 : 0; }
-    if (!strcmp(field, "udp"))  { v->type = FV_UINT; v->u = ctx->udp  ? 1 : 0; return v->u ? 1 : 0; }
-    if (!strcmp(field, "icmp")) { v->type = FV_UINT; v->u = ctx->icmp ? 1 : 0; return v->u ? 1 : 0; }
-    if (!strcmp(field, "arp"))  {
-        v->type = FV_UINT;
-        v->u = (ctx->ethertype == 0x0806) ? 1 : 0; return v->u ? 1 : 0;
+                                     v->type = FV_UINT; v->u = ctx->ip6   ? 1 : 0; return v->u ? 1 : 0; }
+    if (!strcmp(field, "tcp"))     { v->type = FV_UINT; v->u = ctx->tcp   ? 1 : 0; return v->u ? 1 : 0; }
+    if (!strcmp(field, "udp"))     { v->type = FV_UINT; v->u = ctx->udp   ? 1 : 0; return v->u ? 1 : 0; }
+    if (!strcmp(field, "icmp"))    { v->type = FV_UINT; v->u = ctx->icmp  ? 1 : 0; return v->u ? 1 : 0; }
+    if (!strcmp(field, "icmpv6"))  { v->type = FV_UINT; v->u = ctx->icmp6 ? 1 : 0; return v->u ? 1 : 0; }
+    if (!strcmp(field, "arp"))     { v->type = FV_UINT; v->u = ctx->arp   ? 1 : 0; return v->u ? 1 : 0; }
+
+    /* ── Registered field aliases (ECS or custom) ── */
+    for (int _ai = 0; _ai < g_nalias; _ai++) {
+        if (!g_aliases[_ai].is_field) continue;
+        if (strcmp(field, g_aliases[_ai].from) != 0) continue;
+        /* expand comma-separated target list with OR semantics */
+        int _n = 0;
+        char _targets[512];
+        snprintf(_targets, sizeof _targets, "%s", g_aliases[_ai].to);
+        char *_save = NULL, *_tok = strtok_r(_targets, ",", &_save);
+        while (_tok && _n < maxout) {
+            while (*_tok == ' ' || *_tok == '\t') _tok++;
+            char *_end = _tok + strlen(_tok);
+            while (_end > _tok && (_end[-1] == ' ' || _end[-1] == '\t')) _end--;
+            *_end = '\0';
+            if (*_tok)
+                _n += raw_field_get(ctx, _tok, out + _n, maxout - _n, provider_fn, provider_ctx);
+            _tok = strtok_r(NULL, ",", &_save);
+        }
+        return _n;
     }
 
     /* ── Custom field provider ── */
@@ -1048,7 +1608,26 @@ int pcapng_capture_filter_match(const char *expr,
         return -1;
     }
     pkt_ctx_t ctx;
-    pkt_ctx_init(&ctx, data, len, linktype);
+    pkt_ctx_init(&ctx, data, len, linktype, NULL);  /* NULL = no flow state */
+    int r = filter_eval(f, &ctx, NULL, NULL);
+    filter_free(f);
+    return r;
+}
+
+int pcapng_capture_filter_match_ex(const char *expr,
+                                    const uint8_t *data, uint32_t len,
+                                    uint16_t linktype,
+                                    pcapng_flow_table_t *table,
+                                    char *errbuf)
+{
+    char ebuf[PCAPNG_CAPTURE_ERRBUF_SIZE];
+    cap_filter_t *f = filter_compile(expr, ebuf, sizeof ebuf);
+    if (!f) {
+        if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE, "%s", ebuf);
+        return -1;
+    }
+    pkt_ctx_t ctx;
+    pkt_ctx_init(&ctx, data, len, linktype, table);
     int r = filter_eval(f, &ctx, NULL, NULL);
     filter_free(f);
     return r;
@@ -1068,6 +1647,7 @@ struct pcapng_capture {
     cap_filter_t              *filter;
     pcapng_field_provider_t    field_fn;
     void                      *field_ctx;
+    pcapng_flow_table_t       *flow_table;
 
     pcapng_capture_stats_t     stats;
 
@@ -1256,6 +1836,7 @@ pcapng_capture_t *pcapng_capture_open(const char *device, char *errbuf)
     cap->fd      = -1;   /* stub backend: never opened, but tested before use */
 #endif
 
+    cap->flow_table = pcapng_flow_table_create();
     return cap;
 }
 
@@ -1454,7 +2035,7 @@ static int linux_process_block(pcapng_capture_t *cap,
         if (caplen > cap->snaplen) caplen = cap->snaplen;
 
         pkt_ctx_t ctx;
-        pkt_ctx_init(&ctx, data, caplen, cap->linktype);
+        pkt_ctx_init(&ctx, data, caplen, cap->linktype, cap->flow_table);
 
         if (filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx)) {
             pcapng_packet_info_t info;
@@ -1624,7 +2205,7 @@ static int bsd_dispatch(pcapng_capture_t *cap,
         if (caplen > cap->snaplen) caplen = cap->snaplen;
 
         pkt_ctx_t ctx;
-        pkt_ctx_init(&ctx, data, caplen, cap->linktype);
+        pkt_ctx_init(&ctx, data, caplen, cap->linktype, cap->flow_table);
 
         if (filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx)) {
             pcapng_packet_info_t info;
@@ -1793,6 +2374,7 @@ void pcapng_capture_close(pcapng_capture_t *cap)
     stub_close(cap);
 #endif
     filter_free(cap->filter);
+    pcapng_flow_table_free(cap->flow_table);
     free(cap);
 }
 

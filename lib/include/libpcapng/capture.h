@@ -161,18 +161,39 @@ int pcapng_capture_set_buffer_size(pcapng_capture_t *, size_t bytes);
  *     upper/lower only transform FV_STR fields (custom provider or dns.qry.name etc.)
  *
  * Built-in fields:
+ *   frame.len  frame.cap_len
  *   eth.src  eth.dst  eth.type
  *   ip.src   ip.dst   ip.proto  ip.ttl  ip.len
  *   ip6.src  ip6.dst  (aliases: ipv6.src  ipv6.dst)
- *   tcp.srcport  tcp.dstport  tcp.flags
- *   udp.srcport  udp.dstport
- *   icmp.type  icmp.code
+ *   tcp.srcport  tcp.dstport  tcp.flags  tcp.seq  tcp.ack
+ *   tcp.window_size  tcp.window_size_value
+ *   tcp.flags.syn  tcp.flags.ack  tcp.flags.rst  tcp.flags.fin
+ *   tcp.flags.psh  tcp.flags.urg
+ *   udp.srcport  udp.dstport  udp.len
+ *   icmp.type   icmp.code
+ *   icmpv6.type icmpv6.code
+ *   arp.opcode  arp.src.proto_ipv4  arp.dst.proto_ipv4
+ *   arp.src.hw_mac  arp.dst.hw_mac
+ *   vlan.id
  *
  * Alias fields (match either side):
  *   ip.addr  →  ip.src  or  ip.dst
+ *   ip6.addr → ip6.src  or  ip6.dst  (also ipv6.addr)
  *   tcp.port →  tcp.srcport  or  tcp.dstport
  *   udp.port →  udp.srcport  or  udp.dstport
  *   eth.addr →  eth.src  or  eth.dst
+ *
+ * Named-field bitwise AND (tcp.flags & 0x02 != 0):
+ *   Any numeric field can be masked: field & mask op value
+ *   e.g. tcp.flags & 0x12 == 0x02   (SYN set, ACK clear)
+ *
+ * Named-field slices (eth.src[0:3] == 0xaabbcc):
+ *   Supported bases: eth.src  eth.dst  ip.src  ip.dst  ip6.src  ip6.dst
+ *   Negative offsets: tcp[-7] == 0x02  (7th byte from end)
+ *
+ * POSA lookup function:
+ *   coap.code == lookup(CREATED)
+ *   The provider receives "__lookup__:CREATED" and returns the numeric value.
  *
  * Unknown fields are passed to the registered field provider (if any).
  *
@@ -181,7 +202,7 @@ int pcapng_capture_set_buffer_size(pcapng_capture_t *, size_t bytes);
 int pcapng_capture_set_filter(pcapng_capture_t *, const char *expr, char *errbuf);
 
 /*
- * pcapng_capture_filter_match — test a filter expression against raw bytes.
+ * pcapng_capture_filter_match — stateless filter evaluation against raw bytes.
  *
  * Compiles `expr` and immediately evaluates it against `data[0..len-1]`.
  * linktype: LINKTYPE_ETHERNET (1) or LINKTYPE_RAW (101).
@@ -190,22 +211,109 @@ int pcapng_capture_set_filter(pcapng_capture_t *, const char *expr, char *errbuf
  *          0  if it does not,
  *         -1  on compile error (errbuf filled when non-NULL).
  *
- * Useful for unit-testing filters without a live capture handle.
+ * Note: tcp.analysis.retransmission always returns 0 here (no flow state).
+ * Use pcapng_capture_filter_match_ex() with a flow table for stateful detection.
  */
 int pcapng_capture_filter_match(const char *expr,
                                 const uint8_t *data, uint32_t len,
                                 uint16_t linktype,
                                 char *errbuf);
 
+/* ── Stateful flow tracking (tcp.analysis.*) ──────────────────────────────
+ *
+ * pcapng_capture_t automatically creates and owns a flow table; every packet
+ * processed by pcapng_capture_loop() / _dispatch() updates it.
+ *
+ * For one-shot / scripting use, create a standalone table, feed packets to
+ * pcapng_capture_filter_match_ex() in order, and free when done.
+ *
+ * Supported tcp.analysis fields (all return 0 without a flow table):
+ *   tcp.analysis.retransmission        — seq below high-water mark (data re-sent)
+ *   tcp.analysis.fast_retransmission   — retransmit after ≥3 dup ACKs from peer
+ *   tcp.analysis.spurious_retransmission — retransmit of already-acked data
+ *   tcp.analysis.duplicate_ack         — pure ACK, same ACK#, same window
+ *   tcp.analysis.duplicate_ack_num     — consecutive count of duplicate ACKs
+ *   tcp.analysis.zero_window           — window field = 0 in this packet
+ *   tcp.analysis.zero_window_probe     — 1-byte probe to a zero-window peer
+ *   tcp.analysis.zero_window_probe_ack — ACK of a zero-window probe
+ *   tcp.analysis.keep_alive            — seq = peer_last_ack − 1, len ≤ 1
+ *   tcp.analysis.keep_alive_ack        — ACK of a keep-alive
+ *   tcp.analysis.window_update         — pure ACK, same ACK#, different window
+ *   tcp.analysis.out_of_order          — seq behind hw-mark but extends past it
+ *   tcp.analysis.bytes_in_flight       — bytes sent but not yet acked by peer
+ *   tcp.analysis.lost_segment          — gap detected (seq jumped forward)
+ */
+typedef struct pcapng_flow_table pcapng_flow_table_t;
+
+pcapng_flow_table_t *pcapng_flow_table_create(void);
+void                 pcapng_flow_table_free(pcapng_flow_table_t *);
+
+/*
+ * pcapng_capture_filter_match_ex — stateful filter evaluation.
+ *
+ * Same as pcapng_capture_filter_match() but accepts a persistent flow table.
+ * Pass the same table for each successive packet to accumulate TCP state.
+ * `table` may be NULL (equivalent to the stateless variant).
+ */
+int pcapng_capture_filter_match_ex(const char *expr,
+                                    const uint8_t *data, uint32_t len,
+                                    uint16_t linktype,
+                                    pcapng_flow_table_t *table,
+                                    char *errbuf);
+
 /*
  * pcapng_capture_set_field_provider — register a POSA / custom field hook.
  *
  * Called for any field name not resolved by the built-in dissector.
  * Pass fn=NULL to unregister.
+ *
+ * The provider also receives synthetic field names used by the filter engine:
+ *   "__lookup__:NAME" — resolve a POSA symbolic name (e.g. "CREATED") to its
+ *                       numeric value string (e.g. "0x41").  Used by lookup().
  */
 void pcapng_capture_set_field_provider(pcapng_capture_t *,
                                         pcapng_field_provider_t fn,
                                         void *ctx);
+
+/* ── Filter alias management ──────────────────────────────────────────────
+ *
+ * Aliases let you define shorthand names for filter expressions and
+ * multi-field expansions that are checked every time a filter is compiled.
+ *
+ * Two kinds of alias:
+ *
+ *   Expression alias (key contains spaces):
+ *     When an entire filter string (trimmed) equals the key, it is replaced
+ *     by the value before parsing.
+ *     Example:  "new TCP connections" → "tcp.flags.syn == 1 and tcp.flags.ack == 0"
+ *
+ *   Field alias (key has no spaces):
+ *     When the key appears as a field name inside a filter, it expands to
+ *     each comma-separated target field with OR semantics — the first field
+ *     present in the packet matches (same as ip.addr → ip.src or ip.dst).
+ *     Example:  "host.name" → "dns.qry.name, http.host, tls.handshake.extensions_server_name"
+ *
+ * Aliases are global; they apply to every capture handle and to
+ * pcapng_capture_filter_match().
+ */
+
+/*
+ * pcapng_filter_alias_add — register one alias programmatically.
+ * Returns 0 on success, -1 if the table is full (CAP_MAX_ALIASES = 256).
+ */
+int pcapng_filter_alias_add(const char *from, const char *to);
+
+/*
+ * pcapng_filter_aliases_load — load aliases from a config file.
+ *
+ * File format (one entry per line):
+ *   # comment
+ *   failed dns = udp.dstport == 53 or udp.srcport == 53
+ *   host.name  = dns.qry.name, http.host, tls.handshake.extensions_server_name
+ *
+ * Returns 0 on success, -1 on open failure (errbuf filled).
+ */
+int pcapng_filter_aliases_load(const char *path, char *errbuf);
 
 /* ======================================================================
  * Run

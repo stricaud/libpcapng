@@ -253,6 +253,71 @@ static const uint8_t PKT_VLAN_TCP[] = {
 };
 static const uint32_t PKT_VLAN_TCP_LEN = sizeof PKT_VLAN_TCP;
 
+/*
+ * PKT_IPV6_ICMP6 — Ethernet/IPv6/ICMPv6 echo request
+ *
+ *   IPv6:   src=fd00::1  dst=fd00::2  next=58(ICMPv6)  hop=64
+ *   ICMPv6: type=128(echo-request)  code=0
+ */
+static const uint8_t PKT_IPV6_ICMP6[] = {
+    /* Ethernet */
+    0x00,0x01,0x02,0x03,0x04,0x05, 0x06,0x07,0x08,0x09,0x0a,0x0b, 0x86,0xdd,
+    /* IPv6 */
+    0x60,0x00,0x00,0x00, 0x00,0x08,0x3a,0x40,
+    0xfd,0x00,0x00,0x00,0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,
+    0xfd,0x00,0x00,0x00,0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,
+    /* ICMPv6 echo request */
+    0x80,0x00,0x00,0x00, 0x00,0x01,0x00,0x01
+};
+static const uint32_t PKT_IPV6_ICMP6_LEN = sizeof PKT_IPV6_ICMP6;
+
+/* ── Bidirectional packet builder ──────────────────────────────────────── */
+
+/*
+ * mk_pkt — write a minimal Ethernet/IPv4/TCP frame into buf[].
+ * total size = 54 + dlen bytes.
+ * IP total length = 40 + dlen (IP header + TCP header + payload).
+ * Checksum fields are left as zero (kernel never validates them in tests).
+ */
+static void mk_pkt(uint8_t *buf, uint32_t bufsize,
+                   const uint8_t srcip[4], const uint8_t dstip[4],
+                   uint16_t sport, uint16_t dport,
+                   uint8_t flags, uint32_t seq, uint32_t ack_n, uint16_t win,
+                   uint32_t dlen)
+{
+    uint32_t total = 54u + dlen;
+    if (total > bufsize) return;
+    memset(buf, 0, total);
+    /* Ethernet: ethertype = IPv4 */
+    buf[12] = 0x08; buf[13] = 0x00;
+    /* IPv4: IHL=5, TTL=64, proto=6 */
+    buf[14] = 0x45;
+    uint16_t iplen = (uint16_t)(40u + dlen);
+    buf[16] = (uint8_t)(iplen >> 8); buf[17] = (uint8_t)iplen;
+    buf[22] = 0x40; buf[23] = 0x06;
+    memcpy(buf + 26, srcip, 4); memcpy(buf + 30, dstip, 4);
+    /* TCP */
+    buf[34] = (uint8_t)(sport >> 8); buf[35] = (uint8_t)sport;
+    buf[36] = (uint8_t)(dport >> 8); buf[37] = (uint8_t)dport;
+    buf[38] = (uint8_t)(seq  >> 24); buf[39] = (uint8_t)(seq  >> 16);
+    buf[40] = (uint8_t)(seq  >>  8); buf[41] = (uint8_t)(seq);
+    buf[42] = (uint8_t)(ack_n >> 24); buf[43] = (uint8_t)(ack_n >> 16);
+    buf[44] = (uint8_t)(ack_n >>  8); buf[45] = (uint8_t)(ack_n);
+    buf[46] = 0x50;      /* data offset = 5 */
+    buf[47] = flags;
+    buf[48] = (uint8_t)(win >> 8); buf[49] = (uint8_t)win;
+}
+
+/* IPs and ports for the bidirectional test flows */
+static const uint8_t _IP_A[4] = {10, 0, 0, 1};
+static const uint8_t _IP_B[4] = {10, 0, 0, 2};
+#define MK_AB(buf_, flags_, seq_, ack_, win_, dlen_) \
+    mk_pkt((buf_), sizeof(buf_), _IP_A, _IP_B, 1234, 80, \
+           (flags_), (seq_), (ack_), (win_), (dlen_))
+#define MK_BA(buf_, flags_, seq_, ack_, win_, dlen_) \
+    mk_pkt((buf_), sizeof(buf_), _IP_B, _IP_A, 80, 1234, \
+           (flags_), (seq_), (ack_), (win_), (dlen_))
+
 /* ── Tests ─────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -708,6 +773,456 @@ int main(void)
     CHECK(!compile_err("lower(dns.qry.name) == \"example.com\""));
     CHECK(!compile_err("upper(http.host) == \"EXAMPLE.COM\""));
     CHECK(!compile_err("lower(myproto.msg) == \"hello\" and tcp"));
+
+    /* ── Named bitwise AND: tcp.flags & mask ──────────────────────────────
+     * PKT_TCP_SYN:    tcp.flags=0x02 (SYN)
+     * PKT_TCP_ACKPSH: tcp.flags=0x18 (PSH+ACK) */
+    SUITE("Named bitwise AND");
+
+    CHECK(match  ("tcp.flags & 0x02 == 0x02", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(nomatch("tcp.flags & 0x02 == 0x02", PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    CHECK(match  ("tcp.flags & 0x10 == 0x10", PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    CHECK(nomatch("tcp.flags & 0x10 == 0x10", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.flags & 0x02 != 0",    PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(nomatch("tcp.flags & 0x02 != 0",    PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    /* ip.proto masked */
+    CHECK(match  ("ip.proto & 0xff == 6",     PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(nomatch("ip.proto & 0xf0 == 0x10",  PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+
+    /* ── in() with parentheses ─────────────────────────────────────────── */
+    SUITE("in() parentheses");
+
+    /* tcp.port in (80, 443) — parentheses must work like braces */
+    CHECK(match  ("tcp.dstport in (80, 443)",      PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.dstport in (443, 80)",      PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(nomatch("tcp.dstport in (443, 8080)",    PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.dstport in (443, 8080, 80)", PKT_TCP_SYN,   PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    /* same as braces for IPv4 */
+    CHECK(match  ("ip.proto in (6, 17)",           PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("ip.proto in (6, 17)",           PKT_UDP_DNS,    PKT_UDP_DNS_LEN,    LT_ETHERNET));
+
+    /* ── frame.len ─────────────────────────────────────────────────────────
+     * PKT_TCP_SYN = 54 bytes, PKT_UDP_DNS = 42 bytes */
+    SUITE("frame.len");
+
+    CHECK(match  ("frame.len == 54",  PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("frame.len == 54",  PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+    CHECK(match  ("frame.len == 42",  PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+    CHECK(match  ("frame.len > 50",   PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("frame.len > 50",   PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+    CHECK(match  ("frame.len >= 42",  PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+    CHECK(match  ("frame.len < 60",   PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(match  ("tcp and frame.len == 54", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+
+    /* ── tcp.ack and tcp.window_size ───────────────────────────────────────
+     * PKT_TCP_SYN:    ack=0  window=0xffff(65535)
+     * PKT_TCP_ACKPSH: ack=1  window=0x2000(8192) */
+    SUITE("tcp.ack / tcp.window_size");
+
+    CHECK(match  ("tcp.ack == 0",        PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(nomatch("tcp.ack != 0",        PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.ack == 1",        PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    CHECK(match  ("tcp.ack > 0",         PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+
+    CHECK(match  ("tcp.window_size == 65535", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.window_size == 8192",  PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    CHECK(nomatch("tcp.window_size == 0",     PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.window_size > 1000",   PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+
+    /* tcp.flags.psh: PKT_TCP_SYN flags=0x02 (no PSH), PKT_TCP_ACKPSH flags=0x18 (PSH+ACK) */
+    CHECK(nomatch("tcp.flags.psh == 1", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp.flags.psh == 1", PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+
+    /* ── ICMPv6 ─────────────────────────────────────────────────────────── */
+    SUITE("ICMPv6");
+
+    CHECK(match  ("icmpv6",             PKT_IPV6_ICMP6, PKT_IPV6_ICMP6_LEN, LT_ETHERNET));
+    CHECK(nomatch("icmpv6",             PKT_IPV6_TCP,   PKT_IPV6_TCP_LEN,   LT_ETHERNET));
+    CHECK(nomatch("icmpv6",             PKT_ICMP,       PKT_ICMP_LEN,       LT_ETHERNET));
+    CHECK(match  ("icmpv6.type == 128", PKT_IPV6_ICMP6, PKT_IPV6_ICMP6_LEN, LT_ETHERNET));
+    CHECK(nomatch("icmpv6.type == 8",   PKT_IPV6_ICMP6, PKT_IPV6_ICMP6_LEN, LT_ETHERNET));
+    CHECK(match  ("icmpv6.code == 0",   PKT_IPV6_ICMP6, PKT_IPV6_ICMP6_LEN, LT_ETHERNET));
+    /* icmp (v4) must not match ICMPv6 packet and vice versa */
+    CHECK(nomatch("icmp",               PKT_IPV6_ICMP6, PKT_IPV6_ICMP6_LEN, LT_ETHERNET));
+    CHECK(match  ("icmp",               PKT_ICMP,       PKT_ICMP_LEN,       LT_ETHERNET));
+
+    /* ── ARP fields ─────────────────────────────────────────────────────────
+     * PKT_ARP: op=REQUEST(1)  spa=192.168.1.1  tpa=192.168.1.254
+     *          sha=aa:bb:cc:dd:ee:ff  tha=00:00:00:00:00:00 */
+    SUITE("ARP fields");
+
+    CHECK(match  ("arp.opcode == 1",                 PKT_ARP, PKT_ARP_LEN, LT_ETHERNET));
+    CHECK(nomatch("arp.opcode == 2",                 PKT_ARP, PKT_ARP_LEN, LT_ETHERNET));
+    CHECK(match  ("arp.src.proto_ipv4 == 192.168.1.1",   PKT_ARP, PKT_ARP_LEN, LT_ETHERNET));
+    CHECK(nomatch("arp.src.proto_ipv4 == 10.0.0.1",      PKT_ARP, PKT_ARP_LEN, LT_ETHERNET));
+    CHECK(match  ("arp.dst.proto_ipv4 == 192.168.1.254", PKT_ARP, PKT_ARP_LEN, LT_ETHERNET));
+    CHECK(match  ("arp.src.hw_mac == aa:bb:cc:dd:ee:ff", PKT_ARP, PKT_ARP_LEN, LT_ETHERNET));
+    /* no ARP fields on non-ARP packets */
+    CHECK(nomatch("arp.opcode == 1",                 PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+
+    /* ── Named-field slices ──────────────────────────────────────────────── */
+    SUITE("Named-field slices");
+
+    /* eth.src[0:3] = first 3 bytes of source MAC in PKT_TCP_SYN = aa:bb:cc = 0xaabbcc */
+    CHECK(match  ("eth.src[0:3] == 0xaabbcc", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("eth.src[0:3] == 0x112233", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* eth.dst[0] = 0xff (broadcast) */
+    CHECK(match  ("eth.dst[0] == 0xff",        PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    /* ip.src[0] = 0xc0 (192.168.1.1 → first byte) */
+    CHECK(match  ("ip.src[0] == 0xc0",         PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+    CHECK(nomatch("ip.src[0] == 0x0a",         PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
+
+    /* ── Negative slice offsets ───────────────────────────────────────────── */
+    SUITE("Negative slice offsets");
+
+    /* tcp[-7] = tcp[13] (flags byte) in PKT_TCP_SYN = 0x02 (SYN) */
+    CHECK(match  ("tcp[-7] == 0x02",   PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(nomatch("tcp[-7] == 0x18",   PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(match  ("tcp[-7] == 0x18",   PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    /* tcp[-1] = last byte of 20-byte TCP header (urgent ptr low byte = 0x00) */
+    CHECK(match  ("tcp[-1] == 0x00",   PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    /* frame[-1] = last byte of frame */
+    CHECK(match  ("frame[-1] == 0x00", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+
+    /* ── tcp.analysis.retransmission ────────────────────────────────────────
+     *
+     * Requires pcapng_capture_filter_match_ex() + a persistent flow table.
+     * We craft a minimal TCP stream:
+     *   pkt A: SYN  seq=1000             → NOT a retransmission
+     *   pkt B: SYN  seq=1000  (again)    → IS  a retransmission
+     *   pkt C: data seq=1001 len=100     → NOT a retransmission
+     *   pkt D: data seq=1001 len=100     → IS  a retransmission (same seq)
+     *   pkt E: data seq=1101 len=50      → NOT a retransmission (new data)
+     *
+     * Ethernet/IPv4/TCP helper — build a packet with given seq, flags, iplen.
+     * ip_total_len includes IP header (20) + TCP header (20) + data.
+     */
+    SUITE("tcp.analysis.retransmission");
+    {
+        /* Build reusable packet template: eth/ipv4/tcp
+         * src=10.0.0.1:1234  dst=10.0.0.2:80 */
+#define MAKE_TCP(pkt_, flags_, seq_, iplen_) do { \
+    uint8_t _s = (uint8_t)(((seq_) >> 24) & 0xff); \
+    uint8_t _s1= (uint8_t)(((seq_) >> 16) & 0xff); \
+    uint8_t _s2= (uint8_t)(((seq_) >>  8) & 0xff); \
+    uint8_t _s3= (uint8_t)(((seq_)      ) & 0xff); \
+    uint8_t _il= (uint8_t)(((iplen_) >> 8) & 0xff); \
+    uint8_t _il1=(uint8_t)(((iplen_)     ) & 0xff); \
+    static const uint8_t _tmpl[] = { \
+        /* Ethernet */ \
+        0x00,0x00,0x00,0x00,0x00,0x02, 0x00,0x00,0x00,0x00,0x00,0x01, 0x08,0x00, \
+        /* IPv4: IHL=5 TOS=0 total=? id=0 TTL=64 proto=6 */ \
+        0x45,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x40,0x06,0x00,0x00, \
+        0x0a,0x00,0x00,0x01, 0x0a,0x00,0x00,0x02, \
+        /* TCP: sport=1234(0x04D2) dport=80(0x0050) seq=? ack=0 off=5 flags=? win=8192 */ \
+        0x04,0xd2,0x00,0x50, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, \
+        0x50,0x00,0x20,0x00, 0x00,0x00,0x00,0x00 \
+    }; \
+    memcpy((pkt_), _tmpl, sizeof _tmpl); \
+    /* patch ip total len */ (pkt_)[16] = _il; (pkt_)[17] = _il1; \
+    /* patch seq */          (pkt_)[38] = _s;  (pkt_)[39] = _s1; \
+                             (pkt_)[40] = _s2; (pkt_)[41] = _s3; \
+    /* patch flags */        (pkt_)[47] = (flags_); \
+} while(0)
+
+        const char *retr_expr = "tcp.analysis.retransmission == 1";
+        const char *not_retr  = "tcp.analysis.retransmission == 0";
+
+        pcapng_flow_table_t *ft = pcapng_flow_table_create();
+
+        /* stateless match always returns 0 for retransmission */
+        uint8_t pktA[58]; MAKE_TCP(pktA, 0x02, 1000, 40);  /* SYN, seq=1000, no data */
+        CHECK(nomatch(retr_expr, pktA, sizeof pktA, LT_ETHERNET));
+
+        /* feed pkt A (SYN, seq=1000) — first SYN, NOT a retransmission */
+        CHECK(pcapng_capture_filter_match_ex(not_retr,  pktA, sizeof pktA, LT_ETHERNET, ft, NULL) == 1);
+
+        /* pkt B: duplicate SYN, same seq=1000 → retransmission */
+        uint8_t pktB[58]; MAKE_TCP(pktB, 0x02, 1000, 40);
+        CHECK(pcapng_capture_filter_match_ex(retr_expr, pktB, sizeof pktB, LT_ETHERNET, ft, NULL) == 1);
+
+        /* pkt C: data, seq=1001, ip_total=140 → 100 bytes of payload, first time → NOT retr */
+        uint8_t pktC[154]; memset(pktC, 0, sizeof pktC);
+        MAKE_TCP(pktC, 0x10, 1001, 140);  /* ACK+data */
+        CHECK(pcapng_capture_filter_match_ex(not_retr,  pktC, sizeof pktC, LT_ETHERNET, ft, NULL) == 1);
+
+        /* pkt D: same seq=1001, len=100 → retransmission */
+        uint8_t pktD[154]; memset(pktD, 0, sizeof pktD);
+        MAKE_TCP(pktD, 0x10, 1001, 140);
+        CHECK(pcapng_capture_filter_match_ex(retr_expr, pktD, sizeof pktD, LT_ETHERNET, ft, NULL) == 1);
+
+        /* pkt E: new data seq=1101, len=50 → NOT retransmission */
+        uint8_t pktE[104]; memset(pktE, 0, sizeof pktE);
+        MAKE_TCP(pktE, 0x10, 1101, 90);
+        CHECK(pcapng_capture_filter_match_ex(not_retr,  pktE, sizeof pktE, LT_ETHERNET, ft, NULL) == 1);
+
+        /* pkt F: partial overlap — seq=1120, len=50, straddles max(1151)
+         * seq_end=1170 > 1151 → out_of_order, NOT a plain retransmission.
+         * Both assertions in one call so flow state is only advanced once. */
+        uint8_t pktF[104]; memset(pktF, 0, sizeof pktF);
+        MAKE_TCP(pktF, 0x10, 1120, 90);  /* seq=1120, len=50, seq_end=1170 */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.out_of_order == 1 and tcp.analysis.retransmission == 0",
+              pktF, sizeof pktF, LT_ETHERNET, ft, NULL) == 1);
+
+        /* pkt G: fully within seen range (max now 1170 after F) → retransmission */
+        uint8_t pktG[104]; memset(pktG, 0, sizeof pktG);
+        MAKE_TCP(pktG, 0x10, 1001, 90);  /* seq=1001, len=50, seq_end=1051 ≤ 1170 */
+        CHECK(pcapng_capture_filter_match_ex(retr_expr, pktG, sizeof pktG, LT_ETHERNET, ft, NULL) == 1);
+
+        pcapng_flow_table_free(ft);
+#undef MAKE_TCP
+    }
+
+    /* ── tcp.analysis.duplicate_ack / window_update ─────────────────────── */
+    SUITE("tcp.analysis.duplicate_ack");
+    {
+        /* A→B SYN, A→B data(100), B→A ACK(first), B→A same ACK(dup#1),
+         * B→A same ACK(dup#2), B→A same ACK different win(window_update) */
+        pcapng_flow_table_t *ft = pcapng_flow_table_create();
+
+        uint8_t d1[54];  MK_AB(d1, 0x02, 1000, 0, 8192, 0);        /* A: SYN */
+        pcapng_capture_filter_match_ex("tcp", d1, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t d2[154]; memset(d2, 0, 154);
+        MK_AB(d2, 0x10, 1001, 0, 8192, 100);                        /* A: data */
+        pcapng_capture_filter_match_ex("tcp", d2, 154, LT_ETHERNET, ft, NULL);
+
+        uint8_t d3[54];  MK_BA(d3, 0x10, 2000, 1101, 8192, 0);     /* B: ACK (first) */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.duplicate_ack == 0", d3, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        /* Both assertions in one call to avoid double-advancing flow state. */
+        uint8_t d4[54];  MK_BA(d4, 0x10, 2000, 1101, 8192, 0);     /* B: dup ACK #1 */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.duplicate_ack == 1 and tcp.analysis.duplicate_ack_num == 1",
+              d4, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        uint8_t d5[54];  MK_BA(d5, 0x10, 2000, 1101, 8192, 0);     /* B: dup ACK #2 */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.duplicate_ack_num == 2", d5, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        uint8_t d6[54];  MK_BA(d6, 0x10, 2000, 1101, 4096, 0);     /* B: win update */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.window_update == 1 and tcp.analysis.duplicate_ack == 0",
+              d6, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        pcapng_flow_table_free(ft);
+    }
+
+    /* ── tcp.analysis.zero_window / zero_window_probe / probe_ack ────────── */
+    SUITE("tcp.analysis.zero_window");
+    {
+        pcapng_flow_table_t *ft = pcapng_flow_table_create();
+
+        uint8_t z1[54]; MK_AB(z1, 0x02, 1000, 0, 8192, 0);         /* A: SYN */
+        pcapng_capture_filter_match_ex("tcp", z1, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t z2[54]; MK_AB(z2, 0x10, 1001, 0, 8192, 0);         /* A: ACK, win nonzero */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.zero_window == 0", z2, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        uint8_t z3[54]; MK_BA(z3, 0x10, 2000, 1001, 0, 0);         /* B: win=0 */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.zero_window == 1", z3, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        /* A probes with 1 byte → zero_window_probe */
+        uint8_t z4[55]; memset(z4, 0, 55);
+        MK_AB(z4, 0x10, 1001, 2001, 8192, 1);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.zero_window_probe == 1", z4, 55, LT_ETHERNET, ft, NULL) == 1);
+
+        /* B ACKs the probe → zero_window_probe_ack */
+        uint8_t z5[54]; MK_BA(z5, 0x10, 2000, 1002, 0, 0);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.zero_window_probe_ack == 1", z5, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        pcapng_flow_table_free(ft);
+    }
+
+    /* ── tcp.analysis.keep_alive / keep_alive_ack ────────────────────────── */
+    SUITE("tcp.analysis.keep_alive");
+    {
+        pcapng_flow_table_t *ft = pcapng_flow_table_create();
+
+        /* Establish: A SYN, A data(100), B ACK(1101) */
+        uint8_t k1[54];  MK_AB(k1, 0x02, 1000, 0, 8192, 0);
+        pcapng_capture_filter_match_ex("tcp", k1, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t k2[154]; memset(k2, 0, 154);
+        MK_AB(k2, 0x10, 1001, 0, 8192, 100);
+        pcapng_capture_filter_match_ex("tcp", k2, 154, LT_ETHERNET, ft, NULL);
+
+        uint8_t k3[54];  MK_BA(k3, 0x10, 2000, 1101, 8192, 0);     /* B: ACK(1101) */
+        pcapng_capture_filter_match_ex("tcp", k3, 54, LT_ETHERNET, ft, NULL);
+
+        /* A: keep-alive — seq = B's last_ack(1101) - 1 = 1100, len=0 */
+        uint8_t k4[54];  MK_AB(k4, 0x10, 1100, 2001, 8192, 0);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.keep_alive == 1", k4, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        /* B: keep-alive-ack — pure ACK after receiving keep-alive */
+        uint8_t k5[54];  MK_BA(k5, 0x10, 2001, 1101, 8192, 0);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.keep_alive_ack == 1", k5, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        /* normal new data is NOT keep_alive */
+        uint8_t k6[104]; memset(k6, 0, 104);
+        MK_AB(k6, 0x10, 1101, 2001, 8192, 50);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.keep_alive == 0", k6, 104, LT_ETHERNET, ft, NULL) == 1);
+
+        pcapng_flow_table_free(ft);
+    }
+
+    /* ── tcp.analysis.fast_retransmission ───────────────────────────────── */
+    SUITE("tcp.analysis.fast_retransmission");
+    {
+        /* A sends data, B acks, A sends more data, B sends 3 dup ACKs, A retransmits */
+        pcapng_flow_table_t *ft = pcapng_flow_table_create();
+
+        uint8_t f1[54];  MK_AB(f1, 0x02, 1000, 0, 8192, 0);         /* A: SYN */
+        pcapng_capture_filter_match_ex("tcp", f1, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t f2[154]; memset(f2, 0, 154);
+        MK_AB(f2, 0x10, 1001, 0, 8192, 100);                         /* A: data(1001+100) */
+        pcapng_capture_filter_match_ex("tcp", f2, 154, LT_ETHERNET, ft, NULL);
+
+        uint8_t f3[54];  MK_BA(f3, 0x10, 2000, 1101, 8192, 0);      /* B: ACK(1101) */
+        pcapng_capture_filter_match_ex("tcp", f3, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t f4[154]; memset(f4, 0, 154);
+        MK_AB(f4, 0x10, 1101, 2001, 8192, 100);                      /* A: data(1101+100) */
+        pcapng_capture_filter_match_ex("tcp", f4, 154, LT_ETHERNET, ft, NULL);
+
+        /* B: 3 dup ACKs (still at 1101 — didn't receive 1101+100) */
+        uint8_t fa[54]; MK_BA(fa, 0x10, 2000, 1101, 8192, 0);
+        pcapng_capture_filter_match_ex("tcp", fa, 54, LT_ETHERNET, ft, NULL);
+        uint8_t fb[54]; MK_BA(fb, 0x10, 2000, 1101, 8192, 0);
+        pcapng_capture_filter_match_ex("tcp", fb, 54, LT_ETHERNET, ft, NULL);
+        uint8_t fc[54]; MK_BA(fc, 0x10, 2000, 1101, 8192, 0);
+        pcapng_capture_filter_match_ex("tcp", fc, 54, LT_ETHERNET, ft, NULL);
+
+        /* A: retransmit seq=1101 (after 3 dup ACKs → fast retransmission) */
+        uint8_t f5[154]; memset(f5, 0, 154);
+        MK_AB(f5, 0x10, 1101, 2001, 8192, 100);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.fast_retransmission == 1", f5, 154, LT_ETHERNET, ft, NULL) == 1);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.retransmission == 1", f5, 154, LT_ETHERNET, ft, NULL) == 1);
+
+        pcapng_flow_table_free(ft);
+    }
+
+    /* ── tcp.analysis.spurious_retransmission ────────────────────────────── */
+    SUITE("tcp.analysis.spurious_retransmission");
+    {
+        /* A sends data, B fully acks it, A retransmits old data → spurious */
+        pcapng_flow_table_t *ft = pcapng_flow_table_create();
+
+        uint8_t s1[54];  MK_AB(s1, 0x02, 1000, 0, 8192, 0);
+        pcapng_capture_filter_match_ex("tcp", s1, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t s2[154]; memset(s2, 0, 154);
+        MK_AB(s2, 0x10, 1001, 0, 8192, 100);                         /* A: data */
+        pcapng_capture_filter_match_ex("tcp", s2, 154, LT_ETHERNET, ft, NULL);
+
+        uint8_t s3[54]; MK_BA(s3, 0x10, 2000, 1101, 8192, 0);       /* B: ACK(1101) */
+        pcapng_capture_filter_match_ex("tcp", s3, 54, LT_ETHERNET, ft, NULL);
+
+        /* A: retransmit seq=1001 — B already acked past 1101 → spurious */
+        uint8_t s4[154]; memset(s4, 0, 154);
+        MK_AB(s4, 0x10, 1001, 2001, 8192, 100);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.spurious_retransmission == 1", s4, 154, LT_ETHERNET, ft, NULL) == 1);
+        /* spurious implies retransmission */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.retransmission == 1", s4, 154, LT_ETHERNET, ft, NULL) == 1);
+        /* but NOT fast (no 3 dup ACKs) */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.fast_retransmission == 0", s4, 154, LT_ETHERNET, ft, NULL) == 1);
+
+        pcapng_flow_table_free(ft);
+    }
+
+    /* ── tcp.analysis.bytes_in_flight ───────────────────────────────────── */
+    SUITE("tcp.analysis.bytes_in_flight");
+    {
+        /* A: SYN, data(100), B: ACK(1101), A: data(200) → bif=200 */
+        pcapng_flow_table_t *ft = pcapng_flow_table_create();
+
+        uint8_t b1[54];  MK_AB(b1, 0x02, 1000, 0, 8192, 0);         /* A: SYN */
+        pcapng_capture_filter_match_ex("tcp", b1, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t b2[154]; memset(b2, 0, 154);
+        MK_AB(b2, 0x10, 1001, 0, 8192, 100);                         /* A: data(100) */
+        pcapng_capture_filter_match_ex("tcp", b2, 154, LT_ETHERNET, ft, NULL);
+
+        /* A: data(200) before any ACK from B → advance state, bif not computed */
+        uint8_t b3[254]; memset(b3, 0, 254);
+        MK_AB(b3, 0x10, 1101, 0, 8192, 200);                         /* A: data(200), max→1301 */
+        pcapng_capture_filter_match_ex("tcp", b3, 254, LT_ETHERNET, ft, NULL);
+
+        uint8_t b4[54];  MK_BA(b4, 0x10, 2000, 1101, 8192, 0);      /* B: ACK(1101) */
+        pcapng_capture_filter_match_ex("tcp", b4, 54, LT_ETHERNET, ft, NULL);
+
+        /* A: more data seq=1301, len=50 → max=1351, bif = 1351 - 1101 = 250 */
+        uint8_t b5[104]; memset(b5, 0, 104);
+        MK_AB(b5, 0x10, 1301, 2001, 8192, 50);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.bytes_in_flight == 250", b5, 104, LT_ETHERNET, ft, NULL) == 1);
+
+        /* B acks everything → bif drops to 50 on next A→B packet */
+        uint8_t b6[54];  MK_BA(b6, 0x10, 2000, 1351, 8192, 0);      /* B: ACK(1351) */
+        pcapng_capture_filter_match_ex("tcp", b6, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t b7[54];  MK_AB(b7, 0x10, 1351, 2001, 8192, 0);      /* A: pure ACK */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.bytes_in_flight == 0", b7, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        pcapng_flow_table_free(ft);
+    }
+
+    /* ── tcp.analysis.lost_segment ──────────────────────────────────────── */
+    SUITE("tcp.analysis.lost_segment");
+    {
+        pcapng_flow_table_t *ft = pcapng_flow_table_create();
+
+        uint8_t l1[54];  MK_AB(l1, 0x02, 1000, 0, 8192, 0);         /* A: SYN */
+        pcapng_capture_filter_match_ex("tcp", l1, 54, LT_ETHERNET, ft, NULL);
+
+        uint8_t l2[154]; memset(l2, 0, 154);
+        MK_AB(l2, 0x10, 1001, 0, 8192, 100);                         /* A: data(1001+100) */
+        pcapng_capture_filter_match_ex("tcp", l2, 154, LT_ETHERNET, ft, NULL);
+
+        /* A: jump to seq=1301, skipping 1101..1300 → lost_segment, not retransmission.
+         * Both in one call so state is advanced only once. */
+        uint8_t l3[104]; memset(l3, 0, 104);
+        MK_AB(l3, 0x10, 1301, 0, 8192, 50);
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.lost_segment == 1 and tcp.analysis.retransmission == 0",
+              l3, 104, LT_ETHERNET, ft, NULL) == 1);
+
+        /* next in-order packet is normal */
+        uint8_t l4[54];  MK_AB(l4, 0x10, 1351, 0, 8192, 0);         /* A: ACK, in order */
+        CHECK(pcapng_capture_filter_match_ex(
+              "tcp.analysis.lost_segment == 0", l4, 54, LT_ETHERNET, ft, NULL) == 1);
+
+        pcapng_flow_table_free(ft);
+    }
+
+    /* ── Filter aliases ──────────────────────────────────────────────────── */
+    SUITE("Filter aliases");
+
+    /* expression alias: whole-string substitution */
+    pcapng_filter_alias_add("new TCP connections",
+                            "tcp.flags.syn == 1 and tcp.flags.ack == 0");
+    CHECK(match  ("new TCP connections", PKT_TCP_SYN,    PKT_TCP_SYN_LEN,    LT_ETHERNET));
+    CHECK(nomatch("new TCP connections", PKT_TCP_ACKPSH, PKT_TCP_ACKPSH_LEN, LT_ETHERNET));
+    CHECK(nomatch("new TCP connections", PKT_UDP_DNS,    PKT_UDP_DNS_LEN,    LT_ETHERNET));
+
+    /* expression alias with leading/trailing whitespace in the call */
+    CHECK(match  (" new TCP connections ", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
 
     /* ── Summary ─────────────────────────────────────────────────────────── */
     printf("\n=== Results: %d/%d passed", g_passed, g_tests);
