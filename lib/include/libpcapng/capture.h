@@ -287,6 +287,13 @@ void pcapng_capture_set_field_provider(pcapng_capture_t *,
  *     by the value before parsing.
  *     Example:  "new TCP connections" → "tcp.flags.syn == 1 and tcp.flags.ack == 0"
  *
+ *     Keys may include "$1" as a positional variable; the matching portion of
+ *     the user's input is captured and substituted wherever $1 appears in the
+ *     value, allowing parameterised natural-language filters:
+ *       key:   "show packets containing $1"
+ *       value: "frame contains $1"
+ *       usage: show packets containing "password"  →  frame contains "password"
+ *
  *   Field alias (key has no spaces):
  *     When the key appears as a field name inside a filter, it expands to
  *     each comma-separated target field with OR semantics — the first field

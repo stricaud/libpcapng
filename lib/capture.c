@@ -549,12 +549,14 @@ static cap_filter_t *filter_compile(const char *expr, char *errbuf, size_t esz)
         return f;
     }
 
-    /* expression alias expansion: if the trimmed expression matches an alias
-     * key (no spaces or spaces — whole string), substitute before parsing */
+    /* expression alias expansion: if the trimmed expression matches an alias key,
+     * substitute before parsing.  Keys may contain "$1" as a positional variable;
+     * the matching substring is captured and substituted wherever $1 appears in
+     * the value.  Example:  "show packets containing $1 = frame contains $1"
+     * used as "show packets containing \"password\"" → "frame contains \"password\"" */
     const char *use_expr = expr;
     char alias_expanded[512];
     {
-        /* trim leading/trailing whitespace for comparison */
         const char *s = expr;
         while (*s == ' ' || *s == '\t') s++;
         char trimmed[512];
@@ -562,9 +564,56 @@ static cap_filter_t *filter_compile(const char *expr, char *errbuf, size_t esz)
         int tlen = (int)strlen(trimmed);
         while (tlen > 0 && (trimmed[tlen-1] == ' ' || trimmed[tlen-1] == '\t')) tlen--;
         trimmed[tlen] = '\0';
+        /* unescape \$ → $ in input so "show packets containing \$1" matches literally */
+        char unescaped[512]; int ulen = 0;
+        for (const char *p = trimmed; *p && ulen < (int)sizeof(unescaped) - 1; p++) {
+            if (*p == '\\' && *(p + 1) == '$') { unescaped[ulen++] = '$'; p++; }
+            else unescaped[ulen++] = *p;
+        }
+        unescaped[ulen] = '\0';
         for (int i = 0; i < g_nalias; i++) {
-            if (!g_aliases[i].is_field && !strcmp(trimmed, g_aliases[i].from)) {
-                snprintf(alias_expanded, sizeof alias_expanded, "%s", g_aliases[i].to);
+            if (g_aliases[i].is_field) continue;
+            const char *key = g_aliases[i].from;
+            const char *var = strstr(key, "$1");
+            if (!var) {
+                /* exact match */
+                if (!strcmp(unescaped, key)) {
+                    snprintf(alias_expanded, sizeof alias_expanded, "%s", g_aliases[i].to);
+                    use_expr = alias_expanded;
+                    break;
+                }
+            } else {
+                /* parameterized: extract what $1 stands for then substitute into value */
+                int pfxlen = (int)(var - key);
+                const char *sfx = var + 2;
+                int sfxlen = (int)strlen(sfx);
+                if (pfxlen > 0 && strncmp(unescaped, key, pfxlen) != 0) continue;
+                if (sfxlen > 0 && (ulen < pfxlen + sfxlen ||
+                    strcmp(unescaped + ulen - sfxlen, sfx) != 0)) continue;
+                int v1len = ulen - pfxlen - sfxlen;
+                if (v1len <= 0) continue;
+                char v1[256];
+                if (v1len >= (int)sizeof v1) continue;
+                memcpy(v1, unescaped + pfxlen, v1len); v1[v1len] = '\0';
+                /* substitute v1 for $1 in the alias value.
+                 * \$1 in the value outputs a literal $1 (escape). */
+                {
+                    const char *val = g_aliases[i].to;
+                    char *out = alias_expanded;
+                    char *end = alias_expanded + sizeof alias_expanded - 1;
+                    for (const char *p = val; *p && out < end; ) {
+                        if (p[0] == '\\' && p[1] == '$' && p[2] == '1') {
+                            if (out + 1 < end) { *out++ = '$'; *out++ = '1'; }
+                            p += 3;
+                        } else if (p[0] == '$' && p[1] == '1') {
+                            int copy = v1len;
+                            if (out + copy > end) copy = (int)(end - out);
+                            memcpy(out, v1, copy); out += copy;
+                            p += 2;
+                        } else { *out++ = *p++; }
+                    }
+                    *out = '\0';
+                }
                 use_expr = alias_expanded;
                 break;
             }
