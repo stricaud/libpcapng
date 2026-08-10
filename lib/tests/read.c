@@ -11,6 +11,7 @@
 
 int main(int argc, char **argv)
 {
+    (void)argc;
 
 	libpcapng_file_read_debug(argv[1]);
 

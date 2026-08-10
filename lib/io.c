@@ -26,18 +26,12 @@
 #define PCAP_MAGIC_NS_NAT   0xa1b23c4du
 #define PCAP_MAGIC_NS_SWP   0x4d3cb2a1u
 
-static uint16_t _pcap_swap16(uint16_t v) {
-    return (uint16_t)((v >> 8) | (v << 8));
-}
 static uint32_t _pcap_swap32(uint32_t v) {
     return ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) <<  8) |
            ((v & 0x00FF0000u) >>  8) | ((v & 0xFF000000u) >> 24);
 }
 static uint32_t _pcap_u32(const unsigned char *p, int swap) {
     uint32_t v; memcpy(&v, p, 4); return swap ? _pcap_swap32(v) : v;
-}
-static uint16_t _pcap_u16(const unsigned char *p, int swap) {
-    uint16_t v; memcpy(&v, p, 2); return swap ? _pcap_swap16(v) : v;
 }
 
 /* Returns 1 if buf starts with a classic pcap magic; sets *need_swap. */
@@ -187,24 +181,22 @@ static int _fp_read_classic_pcap(FILE *fp, foreach_pcapng_block_cb cb, void *use
 
 int foreach_pcapng_block(uint32_t block_counter, uint32_t block_type, uint32_t block_total_length, unsigned char *data, void *userdata)
 {
+    (void)block_counter; (void)userdata;
 
 	switch (block_type) {
 	case PCAPNG_SECTION_HEADER_BLOCK: {
 		/* printf("Section Header Block\n"); */
-		pcapng_section_header_block_light_t *shb;
-		shb = libpcapng_section_header_block_read(data, block_total_length);
+		(void)libpcapng_section_header_block_read(data, block_total_length);
 	}
 		break;
 	case PCAPNG_CUSTOM_DATA_BLOCK: {
 		/* printf("Custom Data Block\n"); */
-		pcapng_custom_data_block_light_t *cb;
-		cb = libpcapng_custom_data_block_read(data, block_total_length);
+		(void)libpcapng_custom_data_block_read(data, block_total_length);
 	}
 		break;
 	case PCAPNG_ENHANCED_PACKET_BLOCK: {
 		/* printf("PCAPNG_ENHANCED_PACKET_BLOCK\n"); */
-		pcapng_enhanced_packet_block_light_t *epb;
-		epb = libpcapng_enhanced_packet_block_read(data, block_total_length);
+		(void)libpcapng_enhanced_packet_block_read(data, block_total_length);
 	}
 		break;
 	case PCAPNG_INTERFACE_DESCRIPTION_BLOCK:

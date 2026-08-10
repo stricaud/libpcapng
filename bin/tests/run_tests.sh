@@ -355,6 +355,49 @@ check_tftp "IP/UDP/TFTP dispatch to RRQ with filename"    "TFTP_RRQ opcode=RRQ(1
 # direct sub-protocol name still works
 check_tftp "TFTP_ACK direct (no dispatch) block=3"        "TFTP_ACK opcode=ACK(4) block=3"
 
+# ── variable-length integers and enum spellings ──────────────────────────────
+echo ""
+echo "-- varint types and enum spellings --"
+
+VP=bin/tests/varint_protos.posa
+
+check_v() {
+    local desc="$1"; local expr="$2"; local expected="$3"
+    local out
+    out=$("$PCAPSH" -p "$VP" -e "$expr" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+    if echo "$out" | grep -q "$expected"; then
+        ok "$desc"
+    else
+        fail "$desc — expected '$expected', got: $out"
+    fi
+}
+
+# RFC 9000 Appendix A.1 test vectors — one per encoded width, plus the
+# non-minimal two-byte encoding of 37 that must still decode to 37.
+check_v "quic_varint 8-byte width"  'show("VInt", fromhex("c2 19 7c 5e ff 14 e8 8c"))' 'v=151288809941952652'
+check_v "quic_varint 4-byte width"  'show("VInt", fromhex("9d 7f 3e 7d"))'             'v=494878333'
+check_v "quic_varint 2-byte width"  'show("VInt", fromhex("7b bd"))'                   'v=15293'
+check_v "quic_varint 1-byte width"  'show("VInt", fromhex("25"))'                      'v=37'
+check_v "quic_varint non-minimal"   'show("VInt", fromhex("40 25"))'                   'v=37'
+
+# Encoding picks the shortest width, so a build/parse round-trip is stable.
+check_v "quic_varint encodes short" 'hexdump(VInt(v=15293))'                           '7B BD'
+
+# LEB128 canonical vector: e5 8e 26 = 624485.
+check_v "leb128 multi-octet"        'show("VLeb", fromhex("e5 8e 26"))'                'v=624485'
+check_v "leb128 single octet"       'show("VLeb", fromhex("7f"))'                      'v=127'
+
+# A varint length must bound bytes[] correctly — the failure this guards against
+# is silent: a mis-sized varint shifts every following field.
+check_v "varint length bounds bytes" 'show("VFrame", fromhex("04 05 06 44 00 01 10 ff"))' "body=<0644000110>"
+check_v "varint enum resolves"       'show("VFrame", fromhex("04 05 06 44 00 01 10 ff"))' 'ftype=SETTINGS'
+
+# Both enum spellings, on plain fields and through a Lookup table.
+check_v "enum name-first"            'show("VEnumNameFirst",  fromhex("04"))'          'a=SETTINGS'
+check_v "enum value-first"           'show("VEnumValueFirst", fromhex("04"))'          'a=SETTINGS'
+check_v "lookup on numeric field"    'show("VEnumLookup",     fromhex("04"))'          'a=SETTINGS'
+check_v "lookup on varint field"     'show("VVarintLookup",   fromhex("04"))'          'a=SETTINGS'
+
 # ── cstring / bytes[N] / payload security ────────────────────────────────────
 echo ""
 echo "-- cstring / bytes[N] / payload security --"
@@ -592,10 +635,17 @@ check_ws "BGP: length=19"              "length=19"
 echo ""
 echo "-- Capture filter (slice / bitmask / CIDR / sets) --"
 
-FILTER_BIN="${PCAPSH%/bin/pcapsh}/build/bin/filter"
-if [[ ! -x "$FILTER_BIN" ]]; then
-    FILTER_BIN="./build/bin/filter"
-fi
+# CMake builds this from lib/tests, so it lands in <build>/lib/tests, not
+# <build>/bin next to pcapsh. Derive the build root from $PCAPSH — which may be
+# an absolute path under ctest — and try the layouts we actually produce.
+FILTER_BUILD_ROOT=$(dirname "$(dirname "$PCAPSH")")
+FILTER_BIN=""
+for cand in "$FILTER_BUILD_ROOT/lib/tests/filter" \
+            "$FILTER_BUILD_ROOT/bin/filter" \
+            "./build/lib/tests/filter" \
+            "./build/bin/filter"; do
+    if [[ -x "$cand" ]]; then FILTER_BIN="$cand"; break; fi
+done
 if [[ -x "$FILTER_BIN" ]]; then
     FILTER_OUT=$("$FILTER_BIN" 2>&1)
     FILTER_PASS=$(echo "$FILTER_OUT" | grep -c "^  PASS" || true)

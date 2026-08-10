@@ -298,13 +298,25 @@ uint8 type "Type"
 shows as `Type: IGMPv3 Membership Report (34)`, and `%s` in a `label`/`info`
 gives the name rather than the number.
 
-Enum values are normally **numbers** (decimal, hex, or `0b` binary):
+Enum values are normally **numbers** (decimal, hex, or `0b` binary), and the
+pair may be written either way round — whichever reads better for the protocol
+at hand:
 
 ```posa
 uint8 type "Type"
-    Membership Query = 0x11
+    Membership Query = 0x11          # name on the left
     IGMPv3 Membership Report = 0x22
+
+uint8 frame_type "Frame Type"
+    0x00 = "DATA"                    # value on the left
+    0x04 = "SETTINGS"
 ```
+
+The two forms are told apart by which side is a number: a left side that is
+entirely a number, paired with a right side that is not, means the value came
+first. Specifications that number their messages in a table (HTTP/3 frame
+types, IEC-104 type IDs) read most naturally value-first; ones that name a
+handful of flags read better name-first.
 
 For text-protocol fields — SIP status codes, HTTP methods, SMTP replies, any
 field where the wire value is ASCII — use **string-keyed enums**: quote the key
@@ -342,6 +354,26 @@ string status_code until " " lookup SipStatusCodes "Status-Code"
 references it with `lookup NAME` on its field line. The runtime checks the inline
 enums first, then the lookup table. Lookup tables hold up to **128 entries** and
 can be referenced from multiple fields.
+
+Tables work for numeric fields as well as text ones, and take either enum
+spelling. Referencing one from two fields is the point — HTTP/3's type octet
+means a packetisation mode in a frame header and a plain NAL type inside a
+fragment header, so the same table serves both:
+
+```posa
+Lookup Http3FrameTypes
+    0x00 = "DATA"
+    0x04 = "SETTINGS"
+
+required quic_varint frame_type lookup Http3FrameTypes "Frame Type"
+```
+
+On a `bits` field the reference goes on its own indented line instead:
+
+```posa
+bits msg_element_length msg_type 16 16 "Message Type"
+    lookup CapwapMessageTypes
+```
 
 ---
 

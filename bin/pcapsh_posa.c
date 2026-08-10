@@ -16,141 +16,122 @@ pdef_t *find_pdef_by_id(int id) {
     return NULL;
 }
 
-pftype_t parse_posa_type(const char *s, size_t *nbytes_out) {
-    if (!strcasecmp(s,"uint8")||!strcasecmp(s,"int8"))   return PFT_U8;
-    if (!strcasecmp(s,"uint16")||!strcasecmp(s,"int16")) return PFT_U16;
-    if (!strcasecmp(s,"uint32")||!strcasecmp(s,"int32")) return PFT_U32;
-    if (!strcasecmp(s,"uint64")||!strcasecmp(s,"int64")) return PFT_U64;
-    if (!strcasecmp(s,"le_uint16")||!strcasecmp(s,"uint16le")) return PFT_LE_U16;
-    if (!strcasecmp(s,"le_uint32")||!strcasecmp(s,"uint32le")) return PFT_LE_U32;
-    if (!strcasecmp(s,"le_uint64")||!strcasecmp(s,"uint64le")) return PFT_LE_U64;
-    if (!strcasecmp(s,"mac"))    return PFT_MAC;
-    if (!strcasecmp(s,"ip4")||!strcasecmp(s,"ip")) return PFT_IP4;
-    if (!strcasecmp(s,"string")||!strcasecmp(s,"cstring")) return PFT_STR;
-    if (!strcasecmp(s,"payload")||!strcasecmp(s,"bytes_eod")) return PFT_PAYLOAD;
-    if (!strncasecmp(s,"bytes<",6)||!strncasecmp(s,"byte<",5)) {
-        const char *lt = strchr(s,'<');
-        if (lt) *nbytes_out = (size_t)atoi(lt+1);
-        return PFT_BYTES;
+/* Map a library field type onto the flat one pcapsh builds packets with.
+   Returns -1 for the structural entries (when/scope/repeat/bits/…) and for the
+   types pcapsh has no builder for; the caller skips those. */
+static int lib_type_to_pft(const pcapng_posa_fld_t *lf, size_t *nbytes_out)
+{
+    *nbytes_out = 0;
+    switch (lf->type) {
+    case PCAPNG_POSA_U8:     return PFT_U8;
+    case PCAPNG_POSA_U16:    return PFT_U16;
+    case PCAPNG_POSA_U24:    return PFT_U24;
+    case PCAPNG_POSA_U32:    return PFT_U32;
+    case PCAPNG_POSA_U64:    return PFT_U64;
+    case PCAPNG_POSA_LE16:   return PFT_LE_U16;
+    case PCAPNG_POSA_LE32:   return PFT_LE_U32;
+    case PCAPNG_POSA_LE64:   return PFT_LE_U64;
+    case PCAPNG_POSA_MAC:    return PFT_MAC;
+    case PCAPNG_POSA_IP4:    return PFT_IP4;
+    case PCAPNG_POSA_IP6:    *nbytes_out = 16; return PFT_BYTES;
+    case PCAPNG_POSA_CSTRING: return PFT_STR;
+    case PCAPNG_POSA_PAYLOAD: return PFT_PAYLOAD;
+    case PCAPNG_POSA_QUIC_VARINT: return PFT_QUIC_VARINT;
+    case PCAPNG_POSA_LEB128:      return PFT_LEB128;
+    case PCAPNG_POSA_BYTES_FIXED:
+    case PCAPNG_POSA_STR_FIXED:   *nbytes_out = lf->nbytes; return PFT_BYTES;
+    case PCAPNG_POSA_BYTES_REF:
+    case PCAPNG_POSA_STR_REF:
+    case PCAPNG_POSA_UTF16:       return PFT_BYTES_REF;
+    default:                      return -1;
     }
-    if (!strncasecmp(s,"bytes[",6)) return PFT_BYTES_REF;
-    if (!strncasecmp(s,"enum<",5)) {
-        const char *inner = s+5;
-        if (!strncasecmp(inner,"uint8",5)||!strncasecmp(inner,"int8",4)) return PFT_U8;
-        if (!strncasecmp(inner,"uint32",6)||!strncasecmp(inner,"int32",6)) return PFT_U32;
-        return PFT_U16;
-    }
-    if (!strcasecmp(s,"enum")) return PFT_U16;
-    return PFT_U16;
 }
 
-/* Parse posa-format text; returns number of new protocols registered. */
-int parse_posa_src(const char *src) {
-    pdef_t *cur = NULL;
-    pfld_t *lastfld = NULL;
-    int added = 0;
-    char line[1024];
-    const char *p = src;
-    while (*p) {
-        int li = 0;
-        while (*p && *p != '\n' && li < 1023) line[li++] = *p++;
-        if (*p == '\n') p++;
-        line[li] = '\0';
-        while (li > 0 && (line[li-1]==' '||line[li-1]=='\r'||line[li-1]=='\t')) line[--li]='\0';
-        char *s = line;
-        while (*s==' '||*s=='\t') s++;
-        if (!*s || *s=='#') continue;
-        int indent = (int)(s - line);
+/* Copy one library protocol into the pdef_t table pcapsh builds packets from.
+   Enums are flattened here — inline entries first, then any `lookup` table the
+   field names — so pcapsh shows the same labels the library resolves. */
+static void adopt_lib_proto(const pcapng_posa_proto_t *lp)
+{
+    pdef_t *cur;
+    int i;
+    static const char *dc[] = {CBYEL,CBGRN,CBMAG,CBCYN,CBRED,CBLU,CWHT};
 
-        if (!strncasecmp(s,"Object",6)) {
-            if (npdefs >= MAX_PDEFS) continue;
-            cur = &pdefs[npdefs];
-            memset(cur, 0, sizeof(*cur));
-            cur->proto_id = PROTO_DYNAMIC_BASE + npdefs;
-            lastfld = NULL;
-            const char *q = s + 6;
-            if (*q == '<') {
-                q++;
-                int pi = 0;
-                while (*q && *q != '>' && pi < 63) cur->parent[pi++] = *q++;
-                cur->parent[pi] = '\0';
-                if (*q == '>') q++;
-                if (!strcasecmp(cur->parent, "main")) cur->parent[0] = '\0';
-            }
-            while (*q==' '||*q=='\t') q++;
-            int ni = 0;
-            while (*q && *q!=' ' && *q!='\t' && ni<63) cur->pname[ni++] = *q++;
-            cur->pname[ni] = '\0';
-            if (cur->pname[0]) {
-                npdefs++; added++;
-                static const char *dc[] = {CBYEL,CBGRN,CBMAG,CBCYN,CBRED,CBLU,CWHT};
-                proto_register(cur->proto_id, cur->pname, dc[cur->proto_id % 7]);
-            }
-            continue;
+    if (npdefs >= MAX_PDEFS || !lp->name[0]) return;
+    cur = &pdefs[npdefs];
+    memset(cur, 0, sizeof(*cur));
+    cur->proto_id = PROTO_DYNAMIC_BASE + npdefs;
+    snprintf(cur->pname, sizeof cur->pname, "%s", lp->name);
+    if (lp->parent[0] && strcasecmp(lp->parent, "main") != 0)
+        snprintf(cur->parent, sizeof cur->parent, "%s", lp->parent);
+
+    for (i = 0; i < lp->nflds && cur->nflds < MAX_PFLDS; i++) {
+        const pcapng_posa_fld_t *lf = &lp->flds[i];
+        size_t nb = 0;
+        int pft = lib_type_to_pft(lf, &nb);
+        pfld_t *f;
+        int j;
+
+        if (pft < 0 || !lf->name[0]) continue;   /* structural, or unnamed */
+        f = &cur->flds[cur->nflds];
+        memset(f, 0, sizeof(*f));
+        snprintf(f->fname, sizeof f->fname, "%s", lf->name);
+        f->ftype  = (pftype_t)pft;
+        f->nbytes = nb;
+        f->defnum = lf->defnum;
+        snprintf(f->lenfield, sizeof f->lenfield, "%s", lf->lenfield);
+
+        for (j = 0; j < lf->nenums && f->nevals < MAX_PEVALS; j++) {
+            if (lf->enums[j].key[0]) continue;   /* string-keyed: no numeric form */
+            snprintf(f->evals[f->nevals].name, sizeof f->evals[0].name, "%s", lf->enums[j].name);
+            f->evals[f->nevals].val = lf->enums[j].val;
+            f->nevals++;
+        }
+        if (lf->lookup_name[0]) {
+            const pcapng_posa_lookup_t *lk = pcapng_posa_find_lookup(lf->lookup_name);
+            if (lk)
+                for (j = 0; j < lk->nenums && f->nevals < MAX_PEVALS; j++) {
+                    if (lk->enums[j].key[0]) continue;
+                    snprintf(f->evals[f->nevals].name, sizeof f->evals[0].name, "%s", lk->enums[j].name);
+                    f->evals[f->nevals].val = lk->enums[j].val;
+                    f->nevals++;
+                }
         }
 
-        if (!strncasecmp(s,"required",8)||!strncasecmp(s,"optional",8)||!strncasecmp(s,"list",4)) {
-            if (!cur || cur->nflds >= MAX_PFLDS) continue;
-            pfld_t *f = &cur->flds[cur->nflds];
-            memset(f, 0, sizeof(*f));
-            while (*s && *s!=' ' && *s!='\t') s++;
-            while (*s==' '||*s=='\t') s++;
-            char typestr[64]; int ti=0;
-            while (*s && *s!=' ' && *s!='\t' && ti<63) typestr[ti++]=*s++;
-            typestr[ti]='\0';
-            while (*s==' '||*s=='\t') s++;
-            if (!strcasecmp(typestr,"object")) { lastfld=NULL; continue; }
-            int fi=0;
-            while (*s && *s!=' ' && *s!='\t' && *s!='=' && fi<63) f->fname[fi++]=*s++;
-            f->fname[fi]='\0';
-            while (*s==' '||*s=='\t') s++;
-            size_t nb = 0;
-            f->ftype = parse_posa_type(typestr, &nb);
-            f->nbytes = nb;
-            if (f->ftype == PFT_BYTES_REF) {
-                const char *lb = strchr(typestr, '[');
-                const char *rb = lb ? strchr(lb, ']') : NULL;
-                if (lb && rb && rb > lb+1) {
-                    size_t nlen = (size_t)(rb - lb - 1);
-                    if (nlen >= 64) nlen = 63;
-                    strncpy(f->lenfield, lb+1, nlen);
-                    f->lenfield[nlen] = '\0';
-                }
-            }
-            if (*s == '=') {
-                s++; while (*s==' '||*s=='\t') s++;
-                if (!strncmp(s,"0x",2)||!strncmp(s,"0X",2)) f->defnum = strtoull(s,NULL,16);
-                else if (isdigit((unsigned char)*s))          f->defnum = strtoull(s,NULL,10);
-                else if (*s) {
-                    strncpy(f->defstr, s, 255);
-                    if (f->ftype==PFT_IP4) f->defnum = ntohl(inet_addr(f->defstr));
-                }
-            }
-            if (f->ftype==PFT_IP4 && !f->defstr[0]) strcpy(f->defstr,"0.0.0.0");
-            if (f->ftype==PFT_MAC && !f->defstr[0]) strcpy(f->defstr,"00:00:00:00:00:00");
-            lastfld = f;
-            cur->nflds++;
-            continue;
-        }
-
-        if (indent >= 4 && lastfld && *s != '#') {
-            char ename[64]; int ei=0;
-            const char *t = s;
-            while (*t && *t!=' ' && *t!='\t' && *t!='=' && ei<63) ename[ei++]=*t++;
-            ename[ei]='\0';
-            while (*t==' '||*t=='\t') t++;
-            if (*t=='=' && t[1]!='=') {
-                t++; while (*t==' '||*t=='\t') t++;
-                if (lastfld->nevals < MAX_PEVALS) {
-                    peval_t *ev = &lastfld->evals[lastfld->nevals++];
-                    strncpy(ev->name, ename, 63);
-                    ev->val = (!strncmp(t,"0x",2)||!strncmp(t,"0X",2))
-                              ? strtoull(t,NULL,16) : strtoull(t,NULL,10);
-                }
-            }
-        }
+        if (f->ftype == PFT_IP4 && !f->defstr[0]) strcpy(f->defstr, "0.0.0.0");
+        if (f->ftype == PFT_MAC && !f->defstr[0]) strcpy(f->defstr, "00:00:00:00:00:00");
+        cur->nflds++;
     }
-    return added;
+
+    npdefs++;
+    proto_register(cur->proto_id, cur->pname, dc[cur->proto_id % 7]);
+}
+
+/* Parse posa-format text. The parsing itself belongs to the library — pcapsh
+   used to carry a second, simpler parser, and the two drifted: `lookup` tables,
+   value-first enums, uint24 and enum names containing spaces all worked in one
+   and silently did nothing in the other. There is now one parser, and pcapsh
+   adopts what it produces into the flat pdef_t table its packet *builder*
+   needs (the library dissects but does not build).
+
+   Structural entries — when/scope/repeat/bits — have no place in that flat
+   table and are skipped, so `show()` still walks a decoder's fields in file
+   order. Dissection of those constructs is the library's, via
+   pcapng_posa_dissect(). */
+int parse_posa_src(const char *src) {
+    char err[256] = "";
+    int before = pcapng_posa_count();
+    int i, after;
+
+    if (pcapng_posa_load_text(src, err, sizeof err) < 0) {
+        fprintf(stderr, "posa: %s\n", err[0] ? err : "parse error");
+        return 0;
+    }
+    after = pcapng_posa_count();
+    for (i = before; i < after; i++) {
+        const pcapng_posa_proto_t *lp = pcapng_posa_at(i);
+        if (lp) adopt_lib_proto(lp);
+    }
+    return after - before;
 }
 
 int parse_posa_file(const char *path) {
@@ -177,7 +158,10 @@ int load_protos_dir(const char *dir) {
         size_t nlen = strlen(name);
         if (nlen < 6 || strcmp(name + nlen - 5, ".posa") != 0) continue;
         char path[MAXPATH];
-        snprintf(path, sizeof(path), "%s/%s", dir, name);
+        int wrote = snprintf(path, sizeof(path), "%s/%s", dir, name);
+        /* Skip rather than use a truncated path: a half-formed name would
+           either miss the file or, worse, name a different one. */
+        if (wrote < 0 || (size_t)wrote >= sizeof(path)) continue;
         total += parse_posa_file(path);
     }
     closedir(d);
@@ -211,6 +195,14 @@ size_t serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t max) {
             case PFT_U32:
                 if (off+4 <= max) { uint32_t x=htonl((uint32_t)v); memcpy(out+off,&x,4); off+=4; }
                 break;
+            case PFT_U24:
+                if (off+3 <= max) {
+                    out[off]   = (uint8_t)((v >> 16) & 0xff);
+                    out[off+1] = (uint8_t)((v >> 8) & 0xff);
+                    out[off+2] = (uint8_t)(v & 0xff);
+                    off += 3;
+                }
+                break;
             case PFT_U64:
                 if (off+8 <= max) {
                     uint64_t vv = v;
@@ -243,6 +235,33 @@ size_t serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t max) {
                     off += 8;
                 }
                 break;
+            case PFT_QUIC_VARINT: {
+                /* Emit the shortest width that holds the value — 6, 14, 30 or
+                   62 usable bits — with the width encoded in the top two bits.
+                   RFC 9000 permits a longer encoding, but the short one is what
+                   every implementation sends, so it is what a crafted packet
+                   should look like. */
+                size_t n = (v < 0x40ULL) ? 1 : (v < 0x4000ULL) ? 2 : (v < 0x40000000ULL) ? 4 : 8;
+                unsigned prefix = (n == 1) ? 0u : (n == 2) ? 1u : (n == 4) ? 2u : 3u;
+                if (off + n <= max) {
+                    uint64_t x = v;
+                    for (size_t b = n; b-- > 0; ) { out[off+b] = (uint8_t)(x & 0xff); x >>= 8; }
+                    out[off] = (uint8_t)((out[off] & 0x3f) | (prefix << 6));
+                    off += n;
+                }
+                break;
+            }
+            case PFT_LEB128: {
+                uint64_t x = v;
+                do {
+                    uint8_t b = (uint8_t)(x & 0x7f);
+                    x >>= 7;
+                    if (x) b |= 0x80;
+                    if (off + 1 > max) break;
+                    out[off++] = b;
+                } while (x);
+                break;
+            }
             case PFT_IP4: {
                 uint32_t ip = htonl((uint32_t)v);
                 if (off+4 <= max) { memcpy(out+off,&ip,4); off+=4; }
@@ -300,8 +319,9 @@ layer_t *make_dynamic_layer(pdef_t *def) {
     for (int i = 0; i < def->nflds; i++) {
         pfld_t *f = &def->flds[i];
         switch (f->ftype) {
-            case PFT_U8: case PFT_U16: case PFT_U32: case PFT_U64:
+            case PFT_U8: case PFT_U16: case PFT_U24: case PFT_U32: case PFT_U64:
             case PFT_LE_U16: case PFT_LE_U32: case PFT_LE_U64:
+            case PFT_QUIC_VARINT: case PFT_LEB128:
                 set_u64(l, f->fname, f->defnum); break;
             case PFT_IP4: set_ip4(l, f->fname, f->defstr[0]?f->defstr:"0.0.0.0"); break;
             case PFT_MAC: set_mac(l, f->fname, f->defstr[0]?f->defstr:"00:00:00:00:00:00"); break;

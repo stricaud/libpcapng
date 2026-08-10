@@ -26,6 +26,7 @@ static size_t h2_frame(uint8_t type, uint8_t flags,
 
 size_t h2_build_preface(uint8_t *out, size_t max_len)
 {
+    (void)max_len;
     const char *preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     size_t len = strlen(preface);
     memcpy(out, preface, len);
@@ -34,6 +35,7 @@ size_t h2_build_preface(uint8_t *out, size_t max_len)
 
 size_t h2_build_settings(uint8_t *out, size_t max_len)
 {
+    (void)max_len;
     uint8_t payload[6];
 
     // SETTINGS_MAX_CONCURRENT_STREAMS = 100
@@ -47,6 +49,7 @@ size_t h2_build_settings(uint8_t *out, size_t max_len)
 /* Minimal HEADERS (no HPACK, just fake block) */
 size_t h2_build_headers(uint8_t *out, size_t max_len, uint32_t stream_id)
 {
+    (void)max_len;
     uint8_t fake_headers[] = {
         0x82, // :method GET (indexed)
         0x84, // :path /
@@ -63,6 +66,7 @@ size_t h2_build_data(uint8_t *out, size_t max_len,
                      uint32_t stream_id,
                      const uint8_t *data, size_t data_len)
 {
+    (void)max_len;
     return h2_frame(H2_FRAME_DATA, 0x01, stream_id,
                     data, data_len, out);
 }

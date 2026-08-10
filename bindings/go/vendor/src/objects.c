@@ -384,7 +384,10 @@ static void http_extract(pcapng_object_extractor_t *ex, flow_t *f)
         }
         if (!fn[0]) {
           if (ri < nreq) uri_filename(reqs[ri].uri, fn, sizeof fn);
-          else snprintf(fn, sizeof fn, "%s-%d", o->hostname, o->frame);
+          /* Reserve room for "-<frame>": the frame number is what makes the name
+             unique, so it must not be the part that gets cut. */
+          else snprintf(fn, sizeof fn, "%.*s-%d",
+                        (int)(sizeof fn - 13), o->hostname, o->frame);
         }
         sanitize(fn);
         snprintf(o->filename, sizeof o->filename, "%s", fn);
@@ -617,7 +620,7 @@ static void smb_extract(pcapng_object_extractor_t *ex, flow_t *f)
     o->complete = (sf->eof > 0) ? (sf->len >= sf->eof) : 1;
     base = sf->name;
     { const char *p; for (p = sf->name; *p; p++) if (*p=='\\'||*p=='/') base = p + 1; }
-    snprintf(o->filename, sizeof o->filename, "%s", base[0] ? base : "smbfile");
+    snprintf(o->filename, sizeof o->filename, "%.*s", (int)sizeof o->filename - 1, base[0] ? base : "smbfile");
     { char tmp[256]; snprintf(tmp, sizeof tmp, "%s", o->filename);
       sanitize(tmp); snprintf(o->filename, sizeof o->filename, "%s", tmp); }
     cp = malloc(sf->len);

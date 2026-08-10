@@ -66,13 +66,22 @@ typedef enum {
   PCAPNG_POSA_ELSE,          /* else: — the arm taken when the `when` above it
                                 at the same indent was not (DHCP: decode the
                                 options we know, show the rest as bytes)      */
-  PCAPNG_POSA_KVBLOCK        /* kvblock <name> [sep "..."] ["Label"]
+  PCAPNG_POSA_KVBLOCK,       /* kvblock <name> [sep "..."] ["Label"]
                                 Parse a MIME-style "Key: Value\r\n" header block
                                 into named child fields. sub[] holds the separator
                                 (default ": "); delim/ndelim hold the end sentinel
                                 (default "\r\n\r\n"). Each header becomes a child
                                 field at <proto>.<name>.<normalized_key>, enabling
                                 display filters like sip.headers.content_type.   */
+  PCAPNG_POSA_QUIC_VARINT,   /* quic_varint — RFC 9000 §16 variable-length integer.
+                                The top two bits of the first octet give the total
+                                width (1, 2, 4 or 8 octets); the remaining 62 bits
+                                are the value, big-endian. Used by QUIC and by
+                                every field of HTTP/3.                           */
+  PCAPNG_POSA_LEB128         /* leb128 — seven value bits per octet, least
+                                significant group first, high bit set on every
+                                octet but the last (protobuf, DWARF, Thrift
+                                compact).                                        */
 } pcapng_posa_ftype_t;
 
 #define PCAPNG_POSA_NAME_MAX   64

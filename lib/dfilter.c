@@ -203,7 +203,7 @@ static node_t *parse_primary(lex_t *L)
     snprintf(L->err, sizeof L->err, "expected a field name");
     return NULL;
   }
-  snprintf(field, sizeof field, "%s", L->cur.s);
+  snprintf(field, sizeof field, "%.*s", (int)sizeof field - 1, L->cur.s);
   lex_next(L);
 
   /* optional byte-slice: field[i:j] */
@@ -276,7 +276,9 @@ static node_t *parse_primary(lex_t *L)
       lex_next(&inner);
       sub = parse_or(&inner);
       g_alias_depth--;
-      if (!sub) { snprintf(L->err, sizeof L->err, "in alias '%s': %s", field, inner.err); return NULL; }
+      if (!sub) { snprintf(L->err, sizeof L->err, "in alias '%.*s': %.*s",
+                                (int)(sizeof L->err / 4), field,
+                                (int)(sizeof L->err / 2), inner.err); return NULL; }
       return sub;
     }
     n = mknode(N_EXISTS);
@@ -390,7 +392,8 @@ static int parse_ipv4(const char *s, uint8_t out[4], int *cidr)
   if (sscanf(s, "%u.%u.%u.%u/%d", &a, &b, &c, &d, &bits) >= 4) {
     if (a > 255 || b > 255 || c > 255 || d > 255) return -1;
     out[0] = (uint8_t)a; out[1] = (uint8_t)b; out[2] = (uint8_t)c; out[3] = (uint8_t)d;
-    if (bits < 0) bits = 0; if (bits > 32) bits = 32;
+    if (bits < 0) bits = 0;
+    if (bits > 32) bits = 32;
     *cidr = bits;
     return 0;
   }

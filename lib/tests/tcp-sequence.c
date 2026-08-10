@@ -11,6 +11,7 @@ int write_tcp_packet(uint32_t src_ip, uint32_t dst_ip,
                      uint16_t src_port, uint16_t dst_port,
                      uint8_t flags, const uint8_t *payload, 
                      uint16_t payload_len) {
+    (void)payload;
     
     uint32_t side_a_ip, side_b_ip;
     uint16_t side_a_port, side_b_port;

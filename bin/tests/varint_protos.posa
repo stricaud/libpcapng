@@ -1,0 +1,56 @@
+# varint_protos.posa — coverage for the variable-length integer types and for
+# enum spellings, used by run_tests.sh.
+#
+# VInt exists to check widths against the RFC 9000 Appendix A.1 vectors; the
+# trailing payload keeps a short buffer from being treated as truncated.
+
+Object<main> VInt
+    abbrev "vint"
+    col "VINT"
+    required quic_varint v "Value"
+    payload rest "Rest"
+
+Object<main> VLeb
+    abbrev "vleb"
+    col "VLEB"
+    required leb128 v "Value"
+    payload rest "Rest"
+
+# A varint length driving bytes[] — the case that matters, because getting the
+# varint's own width wrong silently shifts every field after it.
+Object<main> VFrame
+    abbrev "vframe"
+    col "VFRAME"
+    required quic_varint ftype "Frame Type"
+        0x00 = "DATA"
+        0x04 = "SETTINGS"
+    required quic_varint flen "Length"
+    required bytes[flen] body "Body"
+    payload rest "Rest"
+
+# Both enum spellings, and a shared Lookup on a numeric field.
+Lookup VEnumTable
+    4 = "SETTINGS"
+    6 = "MaxFieldSection"
+
+Object<main> VEnumNameFirst
+    abbrev "venf"
+    col "VENF"
+    required uint8 a "A"
+        SETTINGS = 4
+
+Object<main> VEnumValueFirst
+    abbrev "vevf"
+    col "VEVF"
+    required uint8 a "A"
+        4 = "SETTINGS"
+
+Object<main> VEnumLookup
+    abbrev "vel"
+    col "VEL"
+    required uint8 a lookup VEnumTable "A"
+
+Object<main> VVarintLookup
+    abbrev "vvl"
+    col "VVL"
+    required quic_varint a lookup VEnumTable "A"

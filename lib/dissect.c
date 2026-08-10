@@ -579,10 +579,10 @@ static void dissect_ipv6(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *r
   ip = f;
   set_range(c, ip, d, 40);
   { pcapng_field_t *s = pf_add(ip, "ipv6.src", PCAPNG_FT_IPV6); pf_set_ipv6(s, d + 8);
-    snprintf(ss, sizeof ss, "%s", s->str);
+    snprintf(ss, sizeof ss, "%.*s", (int)sizeof ss - 1, s->str);
     pf_set_label(s, "Source Address: %s", ss); set_range(c, s, d + 8, 16); }
   { pcapng_field_t *dd = pf_add(ip, "ipv6.dst", PCAPNG_FT_IPV6); pf_set_ipv6(dd, d + 24);
-    snprintf(ds, sizeof ds, "%s", dd->str);
+    snprintf(ds, sizeof ds, "%.*s", (int)sizeof ds - 1, dd->str);
     pf_set_label(dd, "Destination Address: %s", ds); set_range(c, dd, d + 24, 16); }
   pf_set_label(ip, "Internet Protocol Version 6, Src: %s, Dst: %s", ss, ds);
 

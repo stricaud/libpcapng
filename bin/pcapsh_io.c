@@ -396,6 +396,10 @@ void dissect_pdef_layer(pdef_t *def, const uint8_t *data, size_t len) {
             case PFT_U16:
                 if (off+2 <= len) v = ((uint64_t)data[off]<<8)|data[off+1];
                 consumed = 2; break;
+            case PFT_U24:
+                if (off+3 <= len)
+                    v = ((uint64_t)data[off]<<16)|((uint64_t)data[off+1]<<8)|data[off+2];
+                consumed = 3; break;
             case PFT_U32:
                 if (off+4 <= len)
                     v = ((uint64_t)data[off]<<24)|((uint64_t)data[off+1]<<16)|
@@ -415,6 +419,30 @@ void dissect_pdef_layer(pdef_t *def, const uint8_t *data, size_t len) {
             case PFT_LE_U64:
                 if (off+8 <= len) { for (int b=0;b<8;b++) v |= ((uint64_t)data[off+b])<<(8*b); }
                 consumed = 8; break;
+            case PFT_QUIC_VARINT: {
+                /* RFC 9000 §16: the first octet's top two bits are log2 of the
+                   total width, so 00→1, 01→2, 10→4, 11→8 octets; the value is
+                   the remaining 62 bits, big-endian. */
+                size_t n = (size_t)1 << (data[off] >> 6);
+                if (off + n <= len) {
+                    v = (uint64_t)(data[off] & 0x3f);
+                    for (size_t b = 1; b < n; b++) v = (v << 8) | data[off+b];
+                }
+                consumed = n; break;
+            }
+            case PFT_LEB128: {
+                /* Seven value bits per octet, low group first, high bit set on
+                   every octet but the last. Ten octets cover the whole uint64
+                   range and stop a run of 0x80 padding from walking the buffer. */
+                size_t n = 0;
+                while (off + n < len && n < 10) {
+                    uint8_t b = data[off+n];
+                    v |= (uint64_t)(b & 0x7f) << (7 * n);
+                    n++;
+                    if (!(b & 0x80)) break;
+                }
+                consumed = n; break;
+            }
             case PFT_IP4: {
                 if (off+4 <= len) {
                     printf(CWHT "%s" CR "=%u.%u.%u.%u ",
@@ -1012,7 +1040,7 @@ static const proto_field_info_t ip_fields[] = {
     {"chksum",  "Header checksum",           FT_U64,  2,      0, "(auto)"},
     {"src",     "Source IP",                 FT_IP4,  0,      0, "0.0.0.0"},
     {"dst",     "Destination IP",            FT_IP4,  0,      0, "0.0.0.0"},
-    {NULL,NULL,0}
+    {NULL, NULL, 0, 0, 0, NULL}
 };
 static const proto_field_info_t tcp_fields[] = {
     {"sport",   "Source port",              FT_U64,  2,      0, NULL},
@@ -1026,20 +1054,20 @@ static const proto_field_info_t tcp_fields[] = {
     {"urgptr",  "Urgent pointer",           FT_U64,  2,      0, NULL},
     {"mss",     "Max segment size option",  FT_U64,  2,      0, "0=none"},
     {"sack_perm","SACK permitted option",   FT_U64,  1,      0, "0=none"},
-    {NULL,NULL,0}
+    {NULL, NULL, 0, 0, 0, NULL}
 };
 static const proto_field_info_t udp_fields[] = {
     {"sport",   "Source port",              FT_U64,  2,      0, NULL},
     {"dport",   "Destination port",         FT_U64,  2,      0, NULL},
     {"len",     "Length",                   FT_U64,  2,      0, "(auto)"},
     {"chksum",  "Checksum",                 FT_U64,  2,      0, "(auto)"},
-    {NULL,NULL,0}
+    {NULL, NULL, 0, 0, 0, NULL}
 };
 static const proto_field_info_t ether_fields[] = {
     {"dst",     "Destination MAC",          FT_MAC,  0,      0, "ff:ff:ff:ff:ff:ff"},
     {"src",     "Source MAC",               FT_MAC,  0,      0, "00:00:00:00:00:00"},
     {"type",    "EtherType (2048=IPv4)",     FT_U64,  2, 0x0800, NULL},
-    {NULL,NULL,0}
+    {NULL, NULL, 0, 0, 0, NULL}
 };
 static const proto_field_info_t icmp_fields[] = {
     {"type",    "ICMP type (8=echo req)",   FT_U64,  1,      8, NULL},
@@ -1047,11 +1075,11 @@ static const proto_field_info_t icmp_fields[] = {
     {"chksum",  "Checksum",                 FT_U64,  2,      0, "(auto)"},
     {"id",      "Identifier",               FT_U64,  2,      0, NULL},
     {"seq",     "Sequence number",          FT_U64,  2,      0, NULL},
-    {NULL,NULL,0}
+    {NULL, NULL, 0, 0, 0, NULL}
 };
 static const proto_field_info_t raw_fields[] = {
     {"load",    "Raw bytes payload",        FT_BYTES, 0,     0, NULL},
-    {NULL,NULL,0}
+    {NULL, NULL, 0, 0, 0, NULL}
 };
 static const proto_field_info_t dns_fields[] = {
     {"id",      "Transaction ID",               FT_U64,  2, 0, NULL},
@@ -1071,7 +1099,7 @@ static const proto_field_info_t dns_fields[] = {
     {"an",      "Answer    DNSRR(...)",         FT_BYTES, 0, 0, NULL},
     {"ns",      "Authority DNSRR(...)",         FT_BYTES, 0, 0, NULL},
     {"ar",      "Additional DNSRR(...)",        FT_BYTES, 0, 0, NULL},
-    {NULL,NULL,0}
+    {NULL, NULL, 0, 0, 0, NULL}
 };
 
 static const proto_info_t protos[] = {

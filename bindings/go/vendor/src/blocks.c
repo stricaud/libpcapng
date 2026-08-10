@@ -48,6 +48,7 @@ size_t libpcapng_section_header_block_size(void)
 
 pcapng_section_header_block_light_t *libpcapng_section_header_block_read(unsigned char *inbuf, size_t inbuf_len)
 {
+	(void)inbuf_len;
 	pcapng_section_header_block_t *raw;
 	pcapng_section_header_block_light_t *shb;
 
@@ -112,6 +113,7 @@ size_t libpcapng_interface_description_block_size(void)
 
 pcapng_interface_description_block_light_t *libpcapng_interface_description_block_read(unsigned char *inbuf, size_t inbuf_len)
 {
+	(void)inbuf_len;
 	pcapng_interface_description_block_t *idb;
 	pcapng_interface_description_block_light_t *light;
 
@@ -182,7 +184,11 @@ size_t libpcapng_enhanced_packet_block_size(const size_t packet_len)
 
 pcapng_enhanced_packet_block_light_t *libpcapng_enhanced_packet_block_read(unsigned char *inbuf, size_t inbuf_len)
 {
-
+	/* Not implemented yet. Returning nothing at all from a non-void function
+	   is undefined behaviour, and io.c does call this — so return NULL, as
+	   libpcapng_custom_data_block_read() already does. */
+	(void)inbuf; (void)inbuf_len;
+	return NULL;
 }
 
 size_t libpcapng_custom_data_block_write(const uint32_t pen, const unsigned char *data, const size_t data_len, unsigned char *outbuf)
@@ -245,6 +251,7 @@ uint32_t libpcapng_custom_data_block_data_length(uint32_t block_total_length)
 
 pcapng_custom_data_block_light_t *libpcapng_custom_data_block_read(unsigned char *inbuf, size_t inbuf_len)
 {
+    (void)inbuf; (void)inbuf_len;
 
 	return NULL;
 }
@@ -495,6 +502,7 @@ size_t libpcapng_nrb_record_write(uint16_t record_type, const void *addr, size_t
 
 size_t libpcapng_name_resolution_block_size(const unsigned char *records_buf, size_t records_len, const pcapng_option_t *opts, size_t nopt)
 {
+	(void)records_buf;
 	uint32_t padded;
 	PADDING(records_len, &padded, 4);
 	return sizeof(pcapng_name_resolution_block_t)

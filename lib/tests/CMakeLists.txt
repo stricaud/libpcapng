@@ -62,4 +62,8 @@ set_tests_properties(Pcapng-Spec PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
 add_executable(filter filter.c)
 target_link_libraries(filter ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(Filter filter)
+
+add_executable(posa posa.c)
+target_link_libraries(posa ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Posa posa)
 set_tests_properties(Filter PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")

@@ -30,6 +30,7 @@ size_t h2_hpack_encode_headers(
     const char *authority,
     const char *ua)
 {
+    (void)ctx;
     size_t off = 0;
 
     off += put_kv(out + off, max_len - off, ":method", method);

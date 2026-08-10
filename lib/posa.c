@@ -345,8 +345,14 @@ static void pf_mac(pcapng_field_t *f, const uint8_t m[6])
 { if (!f) return; f->vtype = PCAPNG_FT_MAC; memcpy(f->bytes, m, 6); f->blen = 6;
   snprintf(f->str, sizeof f->str, "%02x:%02x:%02x:%02x:%02x:%02x", m[0],m[1],m[2],m[3],m[4],m[5]); }
 static void pf_bytes(pcapng_field_t *f, const uint8_t *b, int n)
-{ int k; if (!f) return; f->vtype = PCAPNG_FT_BYTES; k = n < PCAPNG_FIELD_BYTES_MAX ? n : PCAPNG_FIELD_BYTES_MAX;
-  if (k > 0) memcpy(f->bytes, b, (size_t)k); f->blen = k; }
+{
+  int k;
+  if (!f) return;
+  f->vtype = PCAPNG_FT_BYTES;
+  k = n < PCAPNG_FIELD_BYTES_MAX ? n : PCAPNG_FIELD_BYTES_MAX;
+  if (k > 0) memcpy(f->bytes, b, (size_t)k);
+  f->blen = k;
+}
 static void pf_range(pcapng_field_t *f, int off, int len) { if (f) { f->off = off; f->len = len; } }
 
 /* ── parsing helpers ─────────────────────────────────────────────────────── */
@@ -356,6 +362,23 @@ static uint64_t parse_num(const char *s)
   while (*s == ' ' || *s == '\t') s++;
   if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) return (uint64_t)strtoull(s, NULL, 16);
   return (uint64_t)strtoull(s, NULL, 10);
+}
+
+/* True when the first `len` bytes are nothing but a number — decimal or 0x hex,
+   with surrounding space allowed. Used to tell `4 = "DATA"` (value on the left)
+   from `DATA = 4` (name on the left); see the enum parser. */
+static int all_digits(const char *s, int len)
+{
+  int i = 0, n = 0;
+  while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
+  while (len > i && (s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+  if (i >= len) return 0;
+  if (len - i > 2 && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+    for (i += 2; i < len; i++, n++) if (!isxdigit((unsigned char)s[i])) return 0;
+    return n > 0;
+  }
+  for (; i < len; i++, n++) if (!isdigit((unsigned char)s[i])) return 0;
+  return n > 0;
 }
 
 static int parse_type(const char *tok, pcapng_posa_fld_t *f)
@@ -862,9 +885,35 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
             }
             e->val = 0;
           } else {
-            /* numeric enum: Display Name = 0xNN */
-            snprintf(e->name, sizeof e->name, "%.*s", L, raw);
-            e->val = parse_num(eq + 1);
+            /* Numeric enum, written either way round — both read naturally and
+               both are used in the wild, so both are accepted:
+
+                 Display Name = 0xNN     name on the left, value on the right
+                 0xNN = "Display Name"   value on the left, label on the right
+
+               Which is which is decided by the sides themselves: a left side
+               that is *entirely* a number, paired with a right side that is
+               not, is the second form. When both sides are numbers the first
+               form wins, so nothing that parsed before parses differently now. */
+            const char *rhs = eq + 1;
+            while (*rhs == ' ' || *rhs == '\t') rhs++;
+            if (all_digits(raw, L) && !all_digits(rhs, (int)strlen(rhs))) {
+              int vlen;
+              const char *v1;
+              e->val = parse_num(raw);
+              if (*rhs == '"') {                       /* 4 = "Display Name" */
+                const char *v2;
+                v1 = rhs + 1; v2 = strchr(v1, '"');
+                vlen = v2 ? (int)(v2 - v1) : (int)strlen(v1);
+              } else {                                 /* 4 = Display Name   */
+                v1 = rhs; vlen = (int)strlen(rhs);
+                while (vlen > 0 && (v1[vlen - 1] == ' ' || v1[vlen - 1] == '\t')) vlen--;
+              }
+              snprintf(e->name, sizeof e->name, "%.*s", vlen, v1);
+            } else {
+              snprintf(e->name, sizeof e->name, "%.*s", L, raw);
+              e->val = parse_num(rhs);
+            }
           }
         }
       }
@@ -980,15 +1029,29 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
       lastfld = NULL;
       continue;
     }
+    /* `lookup NAME` alone on an indented line attaches the table to the field
+       above it. A `bits` line has no room for the reference — its five
+       positional arguments are followed straight by the label — so this is how
+       a bitfield names one, and it reads the same as the enum entries that
+       would otherwise sit there. */
+    if (!strcmp(toks[0], "lookup") && nt >= 2) {
+      if (lastfld) snprintf(lastfld->lookup_name, sizeof lastfld->lookup_name, "%s", toks[1]);
+      continue;
+    }
     /* bits <srcfield> <name> <shift> <width> ["Label"]   — enums may follow */
     if (!strcmp(toks[0], "bits") && nt >= 5) {
       pcapng_posa_fld_t *f = add_fld(cur, PCAPNG_POSA_BITS);
       if (f) {
+        int k;
         snprintf(f->src,  sizeof f->src,  "%s", toks[1]);
         snprintf(f->name, sizeof f->name, "%s", toks[2]);
         f->shift = (int)parse_num(toks[3]);
         f->width = (int)parse_num(toks[4]);
         if (f->width <= 0 || f->width > 64) f->width = 1;
+        /* `lookup NAME` is also accepted inline, after the width */
+        for (k = 5; k < nt; k++)
+          if (!strcmp(toks[k], "lookup") && k + 1 < nt) {
+            snprintf(f->lookup_name, sizeof f->lookup_name, "%s", toks[k + 1]); break; }
         quoted(raw, f->disp, sizeof f->disp);
       }
       lastfld = f;
@@ -1150,6 +1213,8 @@ static const char *enum_name_str(const pcapng_posa_fld_t *f, const char *text)
   }
   return NULL;
 }
+
+#define PCAPNG_POSA_ABBREV_JOIN (PCAPNG_POSA_NAME_MAX * 2 + 2)
 
 static int fld_fixed_size(const pcapng_posa_fld_t *f)
 {
@@ -1316,7 +1381,7 @@ typedef struct {
   pcapng_field_t *section;         /* optional titled section, else prev_node  */
   pcapng_field_t *item;            /* this record's subtree                    */
   const pcapng_posa_fld_t *lbl;    /* `label "..."` for the record, if any     */
-  char item_ab[PCAPNG_FIELD_ABBREV_MAX];
+  char item_ab[PCAPNG_POSA_ABBREV_JOIN];
 } blk_t;
 
 #define POSA_MAX_ITER 4096         /* runaway guard for `repeat until end` */
@@ -1339,7 +1404,7 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
 {
   int off = 0, i, nseen = 0, nfirst = 0, lim = len, skip = 0;
   seen_t seen[POSA_MAX_SEEN], first[POSA_MAX_SEEN];   /* live scope; first-of-each */
-  char ab[PCAPNG_FIELD_ABBREV_MAX], child_info[192] = "";
+  char ab[PCAPNG_POSA_ABBREV_JOIN], child_info[192] = "";
   const char *prefix = p->abbrev[0] ? p->abbrev : p->name;
   pcapng_field_t *cur = node;      /* where fields land — a repeat item, or the proto */
   blk_t bstack[32]; int nb = 0;
@@ -1374,7 +1439,8 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
     if (f->type == PCAPNG_POSA_SCOPE) {
       const seen_t *s = seen_get(seen, nseen, f->lenfield);
       int nl = s ? s->end_off + (int)s->val : lim;
-      if (nl > lim) nl = lim; if (nl < off) nl = off;
+      if (nl > lim) nl = lim;
+      if (nl < off) nl = off;
       if (nb < 32) { bstack[nb].type = PCAPNG_POSA_SCOPE; bstack[nb].prev_lim = lim; nb++;
                      taken[nb] = 0; }
       lim = nl;
@@ -1723,7 +1789,7 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
         if (val_len < 0) val_len = 0;
         int vl = val_len < (int)sizeof val_buf - 1 ? val_len : (int)sizeof val_buf - 2;
         memcpy(val_buf, data + sep_pos + seplen, (size_t)vl); val_buf[vl] = '\0';
-        char child_ab[PCAPNG_FIELD_ABBREV_MAX];
+        char child_ab[PCAPNG_POSA_ABBREV_JOIN + PCAPNG_POSA_NAME_MAX + 2];
         snprintf(child_ab, sizeof child_ab, "%s.%s", ab, key_norm);
         { pcapng_field_t *cfc = pf_add(cf, child_ab, PCAPNG_FT_STR);
           pf_str(cfc, val_buf);
@@ -1821,7 +1887,7 @@ int pcapng_posa_to_text(const pcapng_posa_proto_t *p, char *out, size_t sz)
   o += (size_t)snprintf(out + o, sz - o, "# %s decoder (.posa) — regenerated by libpcapng\n", p->name);
   o += (size_t)snprintf(out + o, sz - o, "Object<%s> %s\n", p->parent[0] ? p->parent : "main", p->name);
   for (i = 0; i < p->nflds && o < sz; i++) {
-    const pcapng_posa_fld_t *f = &p->flds[i]; char type[48];
+    const pcapng_posa_fld_t *f = &p->flds[i]; char type[PCAPNG_POSA_NAME_MAX + 16];
     if (f->type == PCAPNG_POSA_BYTES_FIXED)    snprintf(type, sizeof type, "bytes<%zu>", f->nbytes);
     else if (f->type == PCAPNG_POSA_STR_FIXED) snprintf(type, sizeof type, "str<%zu>", f->nbytes);
     else if (f->type == PCAPNG_POSA_BYTES_REF) snprintf(type, sizeof type, "bytes[%s]", f->lenfield);

@@ -65,6 +65,8 @@ int libpcapng_write_enhanced_packet_to_file(FILE *outfile, unsigned char *packet
 	libpcapng_enhanced_packet_block_write(packet, packet_size, buffer);
 	fwrite(buffer, buffer_size, 1, outfile);
 	free(buffer);
+
+	return 0;
 }
 
 int libpcapng_write_enhanced_packet_with_time_to_file(FILE *outfile, unsigned char *packet, size_t packet_size, uint32_t timestamp)

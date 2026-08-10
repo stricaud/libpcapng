@@ -28,8 +28,6 @@ int main() {
     uint16_t src_port = 123; 
     uint16_t dst_port = 123; 
 
-    uint32_t xid = 0x12345678; // transaction ID
-
     FILE *pcapout = fopen("ntp_example.pcapng", "wb");
     if (!pcapout) {
         perror("fopen");

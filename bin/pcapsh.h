@@ -146,10 +146,13 @@ typedef struct {
 
 typedef enum {
     PFT_U8, PFT_U16, PFT_U32, PFT_U64,
+    PFT_U24,           /* uint24 — 3-byte big-endian (NBSS, SMB framing) */
     PFT_LE_U16, PFT_LE_U32, PFT_LE_U64,
     PFT_BYTES, PFT_MAC, PFT_IP4, PFT_STR,
     PFT_PAYLOAD,
-    PFT_BYTES_REF
+    PFT_BYTES_REF,
+    PFT_QUIC_VARINT,   /* quic_varint — RFC 9000 §16, width in the top two bits */
+    PFT_LEB128         /* leb128 — 7 value bits per octet, low group first     */
 } pftype_t;
 
 typedef struct { char name[64]; uint64_t val; } peval_t;

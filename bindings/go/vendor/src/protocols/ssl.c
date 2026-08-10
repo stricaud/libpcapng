@@ -40,6 +40,7 @@ static size_t tls_record(uint8_t type,
 
 size_t tls_build_client_hello(uint8_t *out, size_t max_len)
 {
+    (void)max_len;
     uint8_t body[512];
     size_t off = 0;
 
@@ -226,6 +227,7 @@ size_t tls_build_certificate_with_cn(uint8_t *out, size_t max_len, const char *c
 
 size_t tls_build_server_hello(uint8_t *out, size_t max_len)
 {
+    (void)max_len;
     uint8_t body[256];
     size_t off = 0;
 
@@ -251,6 +253,7 @@ size_t tls_build_server_hello(uint8_t *out, size_t max_len)
 size_t tls_build_certificate(uint8_t *out, size_t max_len,
                              const uint8_t *cert, size_t cert_len)
 {
+    (void)max_len;
     uint8_t body[2048];
     size_t off = 0;
 
@@ -284,12 +287,14 @@ size_t tls_build_certificate(uint8_t *out, size_t max_len,
 
 size_t tls_build_change_cipher_spec(uint8_t *out, size_t max_len)
 {
+    (void)max_len;
     uint8_t ccs = 0x01;
     return tls_record(TLS_CONTENT_CCS, &ccs, 1, out);
 }
 
 size_t tls_build_finished(uint8_t *out, size_t max_len)
 {
+    (void)max_len;
     uint8_t verify[12];
     memset(verify, 0xaa, sizeof(verify));
 
@@ -306,6 +311,7 @@ size_t tls_build_finished(uint8_t *out, size_t max_len)
 size_t tls_build_application_data(uint8_t *out, size_t max_len,
                                   const uint8_t *data, size_t data_len)
 {
+    (void)max_len;
     return tls_record(TLS_CONTENT_APPDATA, data, data_len, out);
 }
 

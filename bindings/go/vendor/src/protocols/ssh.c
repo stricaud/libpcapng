@@ -45,6 +45,7 @@ static size_t ssh_packet(uint8_t *out, const uint8_t *payload, size_t plen)
 
 size_t ssh_build_kexinit(uint8_t *out, size_t max_len, int is_server)
 {
+    (void)max_len;
     /* Algorithm lists — realistic OpenSSH values. Server exposes what it
      * supports; client sends what it prefers (same set for simplicity). */
     const char *kex =
@@ -93,6 +94,7 @@ size_t ssh_build_kexinit(uint8_t *out, size_t max_len, int is_server)
 
 size_t ssh_build_newkeys(uint8_t *out, size_t max_len)
 {
+    (void)max_len;
     uint8_t body[1] = { SSH_MSG_NEWKEYS };
     return ssh_packet(out, body, 1);
 }

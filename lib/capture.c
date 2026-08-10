@@ -238,7 +238,7 @@ static fnode_t *parse_primary(lex_t *L)
     }
     if (L->cur.t == T_WORD || L->cur.t == T_STR) {
         char field[80];
-        snprintf(field, sizeof field, "%s", L->cur.s);
+        snprintf(field, sizeof field, "%.*s", (int)sizeof field - 1, L->cur.s);
         lex_next(L);
 
         /* named bitwise AND: tcp.flags & 0x02 — encode as "tcp.flags&0x02" */
@@ -246,8 +246,12 @@ static fnode_t *parse_primary(lex_t *L)
             lex_next(L);   /* consume '&' */
             if (L->cur.t == T_WORD || L->cur.t == T_STR) {
                 char masked[120];
-                snprintf(masked, sizeof masked, "%s&%s", field, L->cur.s);
-                snprintf(field, sizeof field, "%s", masked);
+                /* Bound the field so the "&mask" always survives: a filter that lost its
+   mask would silently mean something else. */
+                snprintf(masked, sizeof masked, "%.*s&%.*s",
+                         (int)(sizeof masked / 2 - 1), field,
+                         (int)(sizeof masked / 2 - 1), L->cur.s);
+                snprintf(field, sizeof field, "%.*s", (int)sizeof field - 1, masked);
                 lex_next(L);
             }
         }
@@ -1085,7 +1089,7 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
                 v->type = FV_UINT; v->u = n;
             } else {
                 v->type = FV_STR;
-                snprintf(v->str, sizeof v->str, "%s", val);
+                snprintf(v->str, sizeof v->str, "%.*s", (int)sizeof v->str - 1, val);
             }
             return 1;
         }
@@ -1409,7 +1413,7 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
                     v->type = FV_UINT; v->u = n;
                 } else {
                     v->type = FV_STR;
-                    snprintf(v->str, sizeof v->str, "%s", val);
+                    snprintf(v->str, sizeof v->str, "%.*s", (int)sizeof v->str - 1, val);
                 }
             }
             return 1;
