@@ -136,6 +136,8 @@ typedef struct {
   const uint8_t *base;
   const uint8_t *l3src, *l3dst;  /* L3 addrs for the L4 pseudo-header checksum  */
   int l3v6;                      /* 1 if l3src/l3dst are 16-byte IPv6 addresses */
+  char conv_id[32];              /* Community ID of this flow — the key posa's
+                                    `bind`/`recall` remember values under      */
 } dctx_t;
 
 static uint16_t be16(const uint8_t *p);
@@ -256,6 +258,9 @@ static int run_posa(dctx_t *c, const char *proto, const uint8_t *pl, int pll,
   char info[192] = "";
   if (!proto || pll <= 0) return 0;
   pcapng_posa_reset_col();
+  /* Which flow this payload belongs to, so a decoder's `bind`/`recall` can
+     remember across its packets. Empty for anything with no L4 flow. */
+  pcapng_posa_set_conversation(c->conv_id);
   /* 0 means the group matched no member (e.g. a mid-stream body segment on an
      HTTP port): let the caller fall through to the C dissector / TCP data. */
   if (!pcapng_posa_dissect(proto, pl, pll, root, c->base ? (int)(pl - c->base) : 0, info, sizeof info))
@@ -389,6 +394,7 @@ static uint64_t flow_annotate(dctx_t *c, pcapng_field_t *layer, uint8_t proto,
   if (!c->l3src || !c->l3dst) return 0;
   alen = c->l3v6 ? 16 : 4;
   pcapng_community_id(proto, c->l3src, c->l3dst, alen, sp, dp, 0, cid, sizeof cid);
+  snprintf(c->conv_id, sizeof c->conv_id, "%s", cid);
   if (cid[0]) {
     f = pf_add(layer, "communityid", PCAPNG_FT_STR);
     pf_set_str(f, cid);

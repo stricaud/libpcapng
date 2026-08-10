@@ -78,6 +78,33 @@ typedef enum {
                                 width (1, 2, 4 or 8 octets); the remaining 62 bits
                                 are the value, big-endian. Used by QUIC and by
                                 every field of HTTP/3.                           */
+  PCAPNG_POSA_BIND,          /* bind <table>[<key>] = <value> — remember a value
+                                for the rest of this *conversation*, keyed by the
+                                Community ID of the flow. What one PDU states and
+                                a later one only refers to: DCE/RPC agrees an
+                                interface once in its BIND and afterwards names it
+                                only by a small context id.               */
+  PCAPNG_POSA_RECALL,        /* recall <table>[<key>] as <name> ["Label"] — read
+                                back what `bind` stored. A miss is reported, not
+                                fatal: the field still appears, saying it was
+                                never bound, and a warning is recorded.   */
+  PCAPNG_POSA_LET,           /* let <name> = <expr> ["Label"] — a value computed
+                                from fields already parsed rather than read from
+                                the wire. Consumes no bytes, and is written with
+                                no type in front for exactly that reason. The
+                                name is then used like any other field's:
+                                bytes[x], scope x, seek x, when x > 0.
+                                The same arithmetic can be written directly in a
+                                length or offset position, which is usually
+                                shorter: bytes[total - hdr], seek (offset+3)&~3. */
+  PCAPNG_POSA_UUID,          /* uuid — a 16-byte DCE/RPC UUID (Microsoft GUID),
+                                rendered canonically as
+                                xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. The first
+                                three groups are little-endian on the wire and
+                                the last two big-endian; getting that wrong is
+                                the classic GUID bug. Because the value reaches
+                                the tree as text, string-keyed enums and Lookup
+                                tables resolve against it directly.           */
   PCAPNG_POSA_LEB128         /* leb128 — seven value bits per octet, least
                                 significant group first, high bit set on every
                                 octet but the last (protobuf, DWARF, Thrift
@@ -90,6 +117,7 @@ typedef enum {
 #define PCAPNG_POSA_DELIM_MAX  16
 #define PCAPNG_POSA_LABEL_MAX  96
 #define PCAPNG_POSA_MAX_LARGS   6
+#define PCAPNG_POSA_EXPR_MAX  128
 
 typedef struct {
   char     name[PCAPNG_POSA_NAME_MAX]; /* display label: "OK", "Ringing", … */
@@ -164,6 +192,11 @@ typedef struct {
   /* `lookup NAME` — reference to a named Lookup table for value-to-label
      resolution; "" means use inline enums only. */
   char                lookup_name[PCAPNG_POSA_NAME_MAX];
+  /* LET: the expression source, evaluated against the fields parsed so far
+     plus the built-ins `offset` and `remaining`. */
+  char                expr[PCAPNG_POSA_EXPR_MAX];
+  /* BIND/RECALL: `sub` holds the table name, `lenfield` the key field, and
+     `src` the value field (BIND only). */
 } pcapng_posa_fld_t;
 
 typedef struct {
@@ -196,6 +229,24 @@ int  pcapng_posa_load_file(const char *path, char *errbuf, size_t errlen);
 int  pcapng_posa_load_dir(const char *dir);
 int  pcapng_posa_load_text(const char *src, char *errbuf, size_t errlen);  /* parse from memory */
 void pcapng_posa_clear(void);
+
+/* ── Conversation memory (`bind` / `recall`) ─────────────────────────────────
+ * A decoder can remember a value for the life of a flow and read it back in a
+ * later packet. The key is the flow's Community ID, so it is the same in both
+ * directions and matches what the rest of the library, Zeek and Suricata use.
+ *
+ * The host sets the current conversation before dissecting; passing NULL (or
+ * never calling it) simply means `bind` stores nothing and `recall` always
+ * misses, which is what happens for a decoder run on a bare buffer. */
+void pcapng_posa_set_conversation(const char *community_id);
+void pcapng_posa_binds_clear(void);
+int  pcapng_posa_bind_count(void);
+
+/* Warnings raised by the last dissect — today, a `recall` that found nothing.
+ * They are informational: the dissection completes either way. Returns the
+ * number available; index 0 is the oldest. */
+int         pcapng_posa_warning_count(void);
+const char *pcapng_posa_warning_at(int index);
 
 int  pcapng_posa_count(void);
 const pcapng_posa_proto_t *pcapng_posa_at(int index);

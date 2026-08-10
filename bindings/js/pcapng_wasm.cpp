@@ -1106,6 +1106,32 @@ val loadPosaText(std::string src) {
   return r;
 }
 
+/* Tell the engine which flow the next dissect belongs to, so decoders using
+   `bind`/`recall` remember values per conversation. Pass the flow's Community
+   ID; "" means no conversation, under which `bind` stores nothing and `recall`
+   always misses. */
+void posaSetConversation(std::string communityId) {
+  pcapng_posa_set_conversation(communityId.empty() ? nullptr : communityId.c_str());
+}
+
+/* Forget every value remembered by `bind`. */
+void posaClearBinds() { pcapng_posa_binds_clear(); }
+
+/* How many values `bind` is currently remembering. */
+int posaBindCount() { return pcapng_posa_bind_count(); }
+
+/* Warnings from the last dissect — today, a `recall` that found nothing bound.
+   Informational: the dissection completed regardless. */
+val posaWarnings() {
+  val arr = val::array();
+  int n = pcapng_posa_warning_count();
+  for (int i = 0; i < n; i++) {
+    const char *w = pcapng_posa_warning_at(i);
+    if (w) arr.set(i, std::string(w));
+  }
+  return arr;
+}
+
 /* Names + metadata of the posa dissectors currently loaded. */
 val listPosa() {
   val arr = val::array();
@@ -1160,5 +1186,9 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("getCommentedPackets", &getCommentedPackets);
   emscripten::function("loadPosaText", &loadPosaText);
   emscripten::function("listPosa", &listPosa);
+  emscripten::function("posaSetConversation", &posaSetConversation);
+  emscripten::function("posaClearBinds", &posaClearBinds);
+  emscripten::function("posaBindCount", &posaBindCount);
+  emscripten::function("posaWarnings", &posaWarnings);
   emscripten::function("listProtocols", &listProtocols);
 }

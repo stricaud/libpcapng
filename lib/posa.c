@@ -381,6 +381,23 @@ static int all_digits(const char *s, int len)
   return n > 0;
 }
 
+/* The rest of a statement line after its leading keyword, trimmed. `scope` and
+   `seek` take a length or an offset that may now be written as arithmetic, and
+   tokenize() splits on spaces — so the argument is taken from the raw line. */
+static void rest_after_kw(const char *raw, const char *kw, char *out, size_t osz)
+{
+  const char *p = strstr(raw, kw);
+  size_t n;
+  out[0] = '\0';
+  if (!p) return;
+  p += strlen(kw);
+  while (*p == ' ' || *p == '\t') p++;
+  n = strlen(p);
+  while (n > 0 && (p[n-1] == ' ' || p[n-1] == '\t' || p[n-1] == '\r')) n--;
+  if (n >= osz) n = osz - 1;
+  memcpy(out, p, n); out[n] = '\0';
+}
+
 static int parse_type(const char *tok, pcapng_posa_fld_t *f)
 {
   if      (!strcmp(tok, "uint8"))      f->type = PCAPNG_POSA_U8;
@@ -398,6 +415,8 @@ static int parse_type(const char *tok, pcapng_posa_fld_t *f)
   else if (!strcmp(tok, "string"))     f->type = PCAPNG_POSA_CSTRING; /* until handled by caller */
   else if (!strcmp(tok, "payload"))    f->type = PCAPNG_POSA_PAYLOAD;
   else if (!strcmp(tok, "dnsname"))    f->type = PCAPNG_POSA_DNSNAME;
+  else if (!strcmp(tok, "uuid"))       f->type = PCAPNG_POSA_UUID;
+  else if (!strcmp(tok, "guid"))       f->type = PCAPNG_POSA_UUID;
   else if (!strcmp(tok, "quic_varint")) f->type = PCAPNG_POSA_QUIC_VARINT;
   else if (!strcmp(tok, "leb128"))     f->type = PCAPNG_POSA_LEB128;
   else if (!strncmp(tok, "bytes<", 6)) { f->type = PCAPNG_POSA_BYTES_FIXED; f->nbytes = (size_t)parse_num(tok + 6); }
@@ -425,7 +444,7 @@ static int is_kw(const char *t)
 {
   static const char *kw[] = { "required","optional","when","scope","repeat","label","bits",
                               "layer","include","seek","info","col","abbrev","rule","color",
-                              "protocol","Object","end","kvblock","Lookup","lookup", NULL };
+                              "protocol","Object","end","kvblock","Lookup","lookup","let","bind","recall", NULL };
   int i;
   if (!strncmp(t, "Object<", 7)) return 1;
   for (i = 0; kw[i]; i++) if (!strcmp(t, kw[i])) return 1;
@@ -927,9 +946,78 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     structural = 1;
     if (structural) while (nblk > 0 && blk_indent[nblk - 1] >= indent) { add_fld(cur, PCAPNG_POSA_END); nblk--; }
 
+    /* `let <name> = <expr> ["Label"]` — a value worked out from fields already
+       parsed, shown in the tree and usable afterwards like any other field.
+       Written without a type on purpose: nothing is read from the wire here, and
+       a `uint32` in front would have a reader counting four bytes that are not
+       there. */
+    if (!strcmp(toks[0], "let") && nt >= 2) {
+      pcapng_posa_fld_t *f = add_fld(cur, PCAPNG_POSA_LET);
+      if (f) {
+        const char *eq = strchr(raw, '=');
+        snprintf(f->name, sizeof f->name, "%s", toks[1]);
+        if (eq) {
+          const char *e = eq + 1, *q;
+          size_t n;
+          while (*e == ' ' || *e == '\t') e++;
+          q = strchr(e, '"');                    /* the label, if there is one */
+          n = q ? (size_t)(q - e) : strlen(e);
+          while (n > 0 && (e[n-1] == ' ' || e[n-1] == '\t' || e[n-1] == '\r')) n--;
+          if (n >= sizeof f->expr) n = sizeof f->expr - 1;
+          memcpy(f->expr, e, n); f->expr[n] = '\0';
+        }
+        quoted(raw, f->disp, sizeof f->disp);
+      }
+      lastfld = f;
+      continue;
+    }
+    /* `bind <table>[<key>] = <value>`   remember for this conversation
+       `recall <table>[<key>] as <name> ["Label"]`   read it back later */
+    if ((!strcmp(toks[0], "bind") || !strcmp(toks[0], "recall")) && nt >= 2) {
+      int is_bind = !strcmp(toks[0], "bind");
+      pcapng_posa_fld_t *f = add_fld(cur, is_bind ? PCAPNG_POSA_BIND : PCAPNG_POSA_RECALL);
+      if (f) {
+        const char *lb = strchr(raw, '[');
+        const char *rb = lb ? strchr(lb, ']') : NULL;
+        const char *tb = strstr(raw, toks[0]) + strlen(toks[0]);
+        while (*tb == ' ' || *tb == '\t') tb++;
+        { int k = 0;                                    /* table name */
+          while (tb < (lb ? lb : tb) && *tb && *tb != '[' && k < (int)sizeof f->sub - 1)
+            f->sub[k++] = *tb++;
+          f->sub[k] = '\0'; }
+        if (lb && rb && rb > lb + 1) {                  /* key field */
+          size_t n = (size_t)(rb - lb - 1);
+          if (n >= sizeof f->lenfield) n = sizeof f->lenfield - 1;
+          memcpy(f->lenfield, lb + 1, n); f->lenfield[n] = '\0';
+        }
+        if (is_bind) {                                  /* = <value field> */
+          const char *eq = strchr(raw, '=');
+          if (eq) {
+            int k = 0;
+            eq++;
+            while (*eq == ' ' || *eq == '\t') eq++;
+            while (*eq && *eq != ' ' && *eq != '\t' && k < (int)sizeof f->src - 1)
+              f->src[k++] = *eq++;
+            f->src[k] = '\0';
+          }
+        } else {                                        /* as <name> */
+          int k;
+          for (k = 1; k + 1 < nt; k++)
+            if (!strcmp(toks[k], "as")) {
+              snprintf(f->name, sizeof f->name, "%s", toks[k + 1]); break; }
+          if (!f->name[0]) snprintf(f->name, sizeof f->name, "%s", f->sub);
+          for (k = 1; k + 1 < nt; k++)
+            if (!strcmp(toks[k], "lookup")) {
+              snprintf(f->lookup_name, sizeof f->lookup_name, "%s", toks[k + 1]); break; }
+          quoted(raw, f->disp, sizeof f->disp);
+        }
+      }
+      lastfld = NULL;
+      continue;
+    }
     if (!strcmp(toks[0], "scope") && nt >= 2) {                 /* scope <field> */
       pcapng_posa_fld_t *f = add_fld(cur, PCAPNG_POSA_SCOPE);
-      if (f) snprintf(f->lenfield, sizeof f->lenfield, "%s", toks[1]);
+      if (f) rest_after_kw(raw, "scope", f->lenfield, sizeof f->lenfield);
       if (nblk < 32) blk_indent[nblk++] = indent;
       lastfld = NULL;
       continue;
@@ -1022,9 +1110,11 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     if (!strcmp(toks[0], "seek") && nt >= 2) {
       pcapng_posa_fld_t *f = add_fld(cur, PCAPNG_POSA_SEEK);
       if (f) {
-        if (toks[1][0] >= '0' && toks[1][0] <= '9') {   /* seek 0 — a literal offset */
-          f->defnum = parse_num(toks[1]); f->until_end = 1;
-        } else snprintf(f->lenfield, sizeof f->lenfield, "%s", toks[1]);
+        char arg[PCAPNG_POSA_NAME_MAX];
+        rest_after_kw(raw, "seek", arg, sizeof arg);
+        if (nt == 2 && arg[0] >= '0' && arg[0] <= '9') {  /* seek 0 — a literal */
+          f->defnum = parse_num(arg); f->until_end = 1;
+        } else snprintf(f->lenfield, sizeof f->lenfield, "%s", arg);
       }
       lastfld = NULL;
       continue;
@@ -1116,8 +1206,35 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     if (ti < nt && (is_type_tok(toks[ti]) || !strcmp(toks[ti], "string"))) {
       pcapng_posa_fld_t *f = add_fld(cur, PCAPNG_POSA_U8);
       if (!f) continue;
+      /* `eval(...)` was an earlier spelling of what `let` now does. Left alone
+         it would parse as a plain field of the stated width and quietly decode
+         the wrong bytes, so say so instead of misreading the packet. */
+      if (strstr(raw, "eval(")) {
+        if (errbuf) snprintf(errbuf, errlen,
+            "line %d: eval(...) is not a field type — write `let %s = <expr>`",
+            lineno, (ti + 1 < nt) ? toks[ti + 1] : "name");
+        return -1;
+      }
       parse_type(toks[ti], f);
-      if (ti + 1 < nt) snprintf(f->name, sizeof f->name, "%s", toks[ti + 1]);
+      /* bytes[…]/str[…]/utf16[…] may hold arithmetic, and tokenize() splits on
+         spaces — so `bytes[total - hdr]` reaches parse_type as three tokens.
+         Re-read the bracketed text from the raw line, and take the field name
+         from just after the closing bracket rather than from the token list. */
+      if (f->type == PCAPNG_POSA_BYTES_REF || f->type == PCAPNG_POSA_STR_REF ||
+          f->type == PCAPNG_POSA_UTF16) {
+        const char *lb = strchr(raw, '[');
+        const char *rb = lb ? strchr(lb, ']') : NULL;
+        if (lb && rb && rb > lb + 1) {
+          size_t n = (size_t)(rb - lb - 1);
+          if (n >= sizeof f->lenfield) n = sizeof f->lenfield - 1;
+          memcpy(f->lenfield, lb + 1, n); f->lenfield[n] = '\0';
+          { const char *nm = rb + 1; int k = 0;
+            while (*nm == ' ' || *nm == '\t') nm++;
+            while (*nm && *nm != ' ' && *nm != '\t' && k < (int)sizeof f->name - 1)
+              f->name[k++] = *nm++;
+            f->name[k] = '\0'; }
+        }
+      } else if (ti + 1 < nt) snprintf(f->name, sizeof f->name, "%s", toks[ti + 1]);
       if (!strcmp(toks[ti], "string") && ti + 3 < nt && !strcmp(toks[ti + 2], "until")) {
         /* the delimiter comes from the raw line, not from a token: HTTP splits on
            " ", and tokenize() would have torn that quoted space in half */
@@ -1227,6 +1344,7 @@ static int fld_fixed_size(const pcapng_posa_fld_t *f)
   case PCAPNG_POSA_MAC: return 6;
   case PCAPNG_POSA_IP4: return 4;
   case PCAPNG_POSA_IP6: return 16;
+  case PCAPNG_POSA_UUID: return 16;
   case PCAPNG_POSA_BYTES_FIXED: return (int)f->nbytes;
   case PCAPNG_POSA_STR_FIXED: return (int)f->nbytes;
   default: return -1;   /* variable-length, or consumes nothing (bits/label) */
@@ -1261,6 +1379,244 @@ static void seen_add(seen_t *seen, int *nseen, const char *name, uint64_t val, u
    an earlier iteration left behind. */
 static const seen_t *seen_get(const seen_t *seen, int nseen, const char *name)
 { int i; for (i = nseen - 1; i >= 0; i--) if (!strcmp(seen[i].name, name)) return &seen[i]; return NULL; }
+
+/* ── expressions: arithmetic over fields already parsed ────────────────────
+   A small recursive-descent evaluator with C's operators and precedence, over
+   integer literals, the names of fields parsed so far, and two built-ins:
+
+     offset      how far into this object the walk has reached
+     remaining   bytes left in the enclosing scope
+
+   Deliberately small. It exists so a decoder can express what a length implies
+   — a trailer at `frag_length - auth_length - 8`, a body of `length - header`,
+   the next 4-byte boundary at `(offset + 3) & ~3` — not to become a language.
+   No division by zero, no side effects, no calls. */
+typedef struct {
+  const char  *p;
+  const seen_t *seen;
+  int          nseen;
+  int          offset, remaining;
+  int          bad;            /* set on an unknown name or malformed input */
+} evalctx_t;
+
+static uint64_t ev_or(evalctx_t *e);
+
+static void ev_ws(evalctx_t *e) { while (*e->p == ' ' || *e->p == '\t') e->p++; }
+
+static uint64_t ev_primary(evalctx_t *e)
+{
+  uint64_t v = 0;
+  ev_ws(e);
+  if (*e->p == '(') {
+    e->p++; v = ev_or(e); ev_ws(e);
+    if (*e->p == ')') e->p++; else e->bad = 1;
+    return v;
+  }
+  if (*e->p == '~') { e->p++; return ~ev_primary(e); }
+  if (*e->p == '-') { e->p++; return (uint64_t)(-(int64_t)ev_primary(e)); }
+  if (isdigit((unsigned char)*e->p)) {
+    char *end = NULL;
+    int base = (e->p[0] == '0' && (e->p[1] == 'x' || e->p[1] == 'X')) ? 16 : 10;
+    v = (uint64_t)strtoull(e->p, &end, base);
+    e->p = end ? end : e->p;
+    return v;
+  }
+  if (isalpha((unsigned char)*e->p) || *e->p == '_') {
+    char nm[PCAPNG_POSA_NAME_MAX]; int n = 0;
+    while ((isalnum((unsigned char)*e->p) || *e->p == '_') && n < (int)sizeof nm - 1)
+      nm[n++] = *e->p++;
+    nm[n] = '\0';
+    if (!strcmp(nm, "offset"))    return (uint64_t)e->offset;
+    if (!strcmp(nm, "remaining")) return (uint64_t)e->remaining;
+    { const seen_t *s = seen_get(e->seen, e->nseen, nm);
+      if (!s) { e->bad = 1; return 0; }
+      return s->val; }
+  }
+  e->bad = 1;
+  return 0;
+}
+
+static uint64_t ev_mul(evalctx_t *e)
+{
+  uint64_t v = ev_primary(e);
+  for (;;) {
+    ev_ws(e);
+    if (*e->p == '*') { e->p++; v = v * ev_primary(e); }
+    else if (*e->p == '/') { uint64_t d; e->p++; d = ev_primary(e); v = d ? v / d : 0; }
+    else if (*e->p == '%') { uint64_t d; e->p++; d = ev_primary(e); v = d ? v % d : 0; }
+    else return v;
+  }
+}
+static uint64_t ev_add(evalctx_t *e)
+{
+  uint64_t v = ev_mul(e);
+  for (;;) {
+    ev_ws(e);
+    if (*e->p == '+') { e->p++; v = v + ev_mul(e); }
+    else if (*e->p == '-' ) { e->p++; v = v - ev_mul(e); }
+    else return v;
+  }
+}
+static uint64_t ev_shift(evalctx_t *e)
+{
+  uint64_t v = ev_add(e);
+  for (;;) {
+    ev_ws(e);
+    if (e->p[0] == '<' && e->p[1] == '<') { uint64_t s; e->p += 2; s = ev_add(e); v = (s < 64) ? v << s : 0; }
+    else if (e->p[0] == '>' && e->p[1] == '>') { uint64_t s; e->p += 2; s = ev_add(e); v = (s < 64) ? v >> s : 0; }
+    else return v;
+  }
+}
+static uint64_t ev_and(evalctx_t *e)
+{
+  uint64_t v = ev_shift(e);
+  for (;;) { ev_ws(e);
+    if (*e->p == '&' && e->p[1] != '&') { e->p++; v = v & ev_shift(e); } else return v; }
+}
+static uint64_t ev_xor(evalctx_t *e)
+{
+  uint64_t v = ev_and(e);
+  for (;;) { ev_ws(e); if (*e->p == '^') { e->p++; v = v ^ ev_and(e); } else return v; }
+}
+static uint64_t ev_or(evalctx_t *e)
+{
+  uint64_t v = ev_xor(e);
+  for (;;) { ev_ws(e);
+    if (*e->p == '|' && e->p[1] != '|') { e->p++; v = v | ev_xor(e); } else return v; }
+}
+
+/* Returns 0 and leaves *out untouched when the expression names something that
+   was never parsed — a decoder referring to a field inside a `when` arm that
+   did not run, say. The caller shows the field as unresolved rather than
+   inventing a number. */
+static int posa_eval(const char *expr, const seen_t *seen, int nseen,
+                     int offset, int remaining, uint64_t *out)
+{
+  evalctx_t e;
+  uint64_t v;
+  e.p = expr; e.seen = seen; e.nseen = nseen;
+  e.offset = offset; e.remaining = remaining; e.bad = 0;
+  v = ev_or(&e);
+  ev_ws(&e);
+  if (e.bad || *e.p) return 0;
+  *out = v;
+  return 1;
+}
+
+/* Resolve a length/offset argument. A bare field name behaves exactly as it
+   always has; anything containing an operator is evaluated. That is what lets
+   `bytes[length - 3]` and `seek (offset + 3) & ~3` be written where only a
+   field name used to fit, without a second spelling for the simple case.
+   Returns 0 when the text names nothing that has been parsed. */
+static int resolve_len(const char *text, const seen_t *seen, int nseen,
+                       int offset, int remaining, uint64_t *out)
+{
+  const seen_t *s;
+  if (!text || !*text) return 0;
+  if (!strpbrk(text, "+-*/%&|^<>~()")) {     /* a plain name — the common case */
+    s = seen_get(seen, nseen, text);
+    if (!s) return 0;
+    *out = s->val;
+    return 1;
+  }
+  return posa_eval(text, seen, nseen, offset, remaining, out);
+}
+
+/* ── conversation memory ───────────────────────────────────────────────────
+   `bind` remembers a value for the life of a flow; `recall` reads it back in a
+   later packet. Keyed by the flow's Community ID, so both directions of a TCP
+   connection share one table — a DCE/RPC BIND travels client-to-server and the
+   requests that depend on it travel the same way, but the responses do not, and
+   all of them are one conversation.
+
+   Open-addressed and fixed-size on purpose: a decoder must not be able to make
+   a capture allocate without bound. When it fills, the oldest-inserted entry
+   for the colliding slot is replaced rather than the insert failing silently. */
+#define POSA_BIND_SLOTS 4096
+typedef struct {
+  int      used;
+  char     conv[40];
+  char     table[PCAPNG_POSA_NAME_MAX];
+  uint64_t key;
+  uint64_t valnum;
+  char     val[96];
+} posa_bind_t;
+
+static posa_bind_t g_convmem[POSA_BIND_SLOTS];
+static int         g_nconvmem;
+static char        g_conv[40];
+
+#define POSA_WARN_MAX 16
+static char g_warn[POSA_WARN_MAX][160];
+static int  g_nwarn;
+
+void pcapng_posa_set_conversation(const char *community_id)
+{ snprintf(g_conv, sizeof g_conv, "%s", community_id ? community_id : ""); }
+
+void pcapng_posa_binds_clear(void)
+{ memset(g_convmem, 0, sizeof g_convmem); g_nconvmem = 0; }
+
+int pcapng_posa_bind_count(void) { return g_nconvmem; }
+
+int         pcapng_posa_warning_count(void) { return g_nwarn; }
+const char *pcapng_posa_warning_at(int i)
+{ return (i >= 0 && i < g_nwarn) ? g_warn[i] : NULL; }
+
+static void posa_warn(const char *fmt, const char *a, uint64_t b)
+{
+  if (g_nwarn >= POSA_WARN_MAX) return;
+  snprintf(g_warn[g_nwarn], sizeof g_warn[0], fmt, a, (unsigned long long)b);
+  g_nwarn++;
+}
+
+static unsigned posa_bind_hash(const char *conv, const char *table, uint64_t key)
+{
+  unsigned h = 2166136261u;
+  const char *p;
+  int i;
+  for (p = conv;  *p; p++) { h ^= (unsigned char)*p; h *= 16777619u; }
+  for (p = table; *p; p++) { h ^= (unsigned char)*p; h *= 16777619u; }
+  for (i = 0; i < 8; i++)  { h ^= (unsigned)((key >> (i * 8)) & 0xff); h *= 16777619u; }
+  return h & (POSA_BIND_SLOTS - 1);
+}
+
+static void posa_bind_put(const char *table, uint64_t key,
+                          uint64_t valnum, const char *val)
+{
+  unsigned i = posa_bind_hash(g_conv, table, key);
+  int probe;
+  if (!g_conv[0]) return;                 /* no conversation: nothing to key on */
+  for (probe = 0; probe < 64; probe++) {
+    posa_bind_t *b = &g_convmem[(i + (unsigned)probe) & (POSA_BIND_SLOTS - 1)];
+    if (b->used && (b->key != key || strcmp(b->conv, g_conv) || strcmp(b->table, table)))
+      continue;                            /* someone else's slot — keep probing */
+    if (!b->used) g_nconvmem++;
+    b->used = 1;
+    snprintf(b->conv,  sizeof b->conv,  "%s", g_conv);
+    snprintf(b->table, sizeof b->table, "%s", table);
+    b->key = key; b->valnum = valnum;
+    snprintf(b->val, sizeof b->val, "%s", val ? val : "");
+    return;
+  }
+  { posa_bind_t *b = &g_convmem[i];          /* full run: overwrite the head */
+    snprintf(b->conv,  sizeof b->conv,  "%s", g_conv);
+    snprintf(b->table, sizeof b->table, "%s", table);
+    b->key = key; b->valnum = valnum;
+    snprintf(b->val, sizeof b->val, "%s", val ? val : ""); }
+}
+
+static const posa_bind_t *posa_bind_get(const char *table, uint64_t key)
+{
+  unsigned i = posa_bind_hash(g_conv, table, key);
+  int probe;
+  if (!g_conv[0]) return NULL;
+  for (probe = 0; probe < 64; probe++) {
+    const posa_bind_t *b = &g_convmem[(i + (unsigned)probe) & (POSA_BIND_SLOTS - 1)];
+    if (!b->used) return NULL;
+    if (b->key == key && !strcmp(b->conv, g_conv) && !strcmp(b->table, table)) return b;
+  }
+  return NULL;
+}
 
 static int guard_eval1(pcapng_posa_cmp_t op, uint64_t lv, uint64_t mask, uint64_t rhs)
 {
@@ -1437,8 +1793,12 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       continue;
     }
     if (f->type == PCAPNG_POSA_SCOPE) {
+      uint64_t sv = 0;
       const seen_t *s = seen_get(seen, nseen, f->lenfield);
-      int nl = s ? s->end_off + (int)s->val : lim;
+      int have = resolve_len(f->lenfield, seen, nseen, off, lim - off, &sv);
+      /* A named length is counted from where that field ended — the historical
+         behaviour. An expression is a byte count from here. */
+      int nl = !have ? lim : (s ? s->end_off + (int)sv : off + (int)sv);
       if (nl > lim) nl = lim;
       if (nl < off) nl = off;
       if (nb < 32) { bstack[nb].type = PCAPNG_POSA_SCOPE; bstack[nb].prev_lim = lim; nb++;
@@ -1456,8 +1816,9 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       continue;
     }
     if (f->type == PCAPNG_POSA_REPEAT) {
-      const seen_t *s = f->until_end ? NULL : seen_get(seen, nseen, f->lenfield);
-      int cnt = f->until_end ? -1 : (s ? (int)s->val + f->count_bias : 0);
+      uint64_t rv = 0;
+      int have = f->until_end ? 0 : resolve_len(f->lenfield, seen, nseen, off, lim - off, &rv);
+      int cnt = f->until_end ? -1 : (have ? (int)rv + f->count_bias : 0);
       blk_t *b;
       if (nb >= 32 || off >= lim || (!f->until_end && cnt <= 0) ||
           at_delim(f, data, off, lim)) { skip = 1; continue; }
@@ -1535,9 +1896,47 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       }
       continue;
     }
+    if (f->type == PCAPNG_POSA_BIND) {
+      /* Remember key -> value for this conversation. Both are fields already
+         parsed in this packet; the value is stored as it displays, so what a
+         later `recall` shows is what the binding packet showed. */
+      const seen_t *k = seen_get(seen, nseen, f->lenfield);
+      const seen_t *v = seen_get(seen, nseen, f->src);
+      if (k && v) posa_bind_put(f->sub, k->val, v->val, v->disp);
+      continue;
+    }
+    if (f->type == PCAPNG_POSA_RECALL) {
+      const seen_t *k = seen_get(seen, nseen, f->lenfield);
+      const posa_bind_t *b = k ? posa_bind_get(f->sub, k->val) : NULL;
+      char rab[PCAPNG_POSA_ABBREV_JOIN];
+      pcapng_field_t *rf;
+      snprintf(rab, sizeof rab, "%s.%s", prefix, f->name);
+      if (b) {
+        const char *en = enum_name_str(f, b->val);
+        rf = pf_add(cur, rab, PCAPNG_FT_STR); pf_str(rf, b->val);
+        if (en) pf_label(rf, "%s: %s (%s)", fld_disp(f), en, b->val);
+        else    pf_label(rf, "%s: %s", fld_disp(f), b->val);
+        pf_range(rf, abs_off + off, 0);
+        seen_add(seen, &nseen, f->name, b->valnum, b->valnum, off, off, b->val);
+      } else if (k) {
+        /* Nothing bound. Say so in the tree and record a warning rather than
+           dropping the field: a capture that begins mid-connection never saw
+           the packet that would have bound it, and that is worth stating
+           instead of looking like the decoder simply gave up. */
+        rf = pf_add(cur, rab, PCAPNG_FT_STR);
+        pf_str(rf, "<not bound in this conversation>");
+        pf_label(rf, "%s: <not bound in this conversation> (%s=%llu)",
+                 fld_disp(f), f->lenfield, (unsigned long long)k->val);
+        pf_range(rf, abs_off + off, 0);
+        posa_warn("recall %s[%llu]: nothing bound in this conversation",
+                  f->sub, k->val);
+      }
+      continue;
+    }
     if (f->type == PCAPNG_POSA_SEEK) {   /* the protocol told us where to look */
-      const seen_t *s = f->until_end ? NULL : seen_get(seen, nseen, f->lenfield);
-      int to = f->until_end ? (int)f->defnum : (s ? (int)s->val : -1);
+      uint64_t sv = 0;
+      int have = f->until_end ? 0 : resolve_len(f->lenfield, seen, nseen, off, lim - off, &sv);
+      int to = f->until_end ? (int)f->defnum : (have ? (int)sv : -1);
       if (to >= 0 && to <= lim) off = to;
       continue;
     }
@@ -1592,6 +1991,20 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
         cf = pf_add(cur, ab, PCAPNG_FT_IPV6); pf_ipv6(cf, data + off);
         pf_label(cf, "%s: %s", fld_disp(f), cf->str);
         seen_add(seen, &nseen, f->name, 0, 0, off, off + sz, cf->str); break;
+      case PCAPNG_POSA_UUID: {
+        /* Mixed-endian by definition: time_low, time_mid and time_hi are
+           little-endian on the wire, clock_seq and node are big-endian. */
+        char u[40];
+        const uint8_t *b = data + off;
+        snprintf(u, sizeof u,
+                 "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                 b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6],
+                 b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+        cf = pf_add(cur, ab, PCAPNG_FT_STR); pf_str(cf, u);
+        { const char *en = enum_name_str(f, u);
+          if (en) pf_label(cf, "%s: %s (%s)", fld_disp(f), en, u);
+          else    pf_label(cf, "%s: %s", fld_disp(f), u); }
+        seen_add(seen, &nseen, f->name, 0, 0, off, off + sz, u); break; }
       case PCAPNG_POSA_BYTES_FIXED:
         cf = pf_add(cur, ab, PCAPNG_FT_BYTES); pf_bytes(cf, data + off, sz);
         pf_label(cf, "%s: %d bytes", fld_disp(f), sz);
@@ -1618,6 +2031,25 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       }
       if (cf) pf_range(cf, abs_off + off, sz);
       off += sz;
+    } else if (f->type == PCAPNG_POSA_LET) {
+      /* Derived, not read: the walk does not advance. */
+      uint64_t v = 0;
+      snprintf(ab, sizeof ab, "%s.%s", prefix, f->name);
+      if (posa_eval(f->expr, seen, nseen, off, lim - off, &v)) {
+        const char *en = enum_name(f, v);
+        char disp[96];
+        cf = pf_add(cur, ab, PCAPNG_FT_UINT); pf_uint(cf, v);
+        if (en) { pf_label(cf, "%s: %s (%llu)", fld_disp(f), en, (unsigned long long)v);
+                  snprintf(disp, sizeof disp, "%s", en); }
+        else if (f->hex) { pf_label(cf, "%s: 0x%llx", fld_disp(f), (unsigned long long)v);
+                  snprintf(disp, sizeof disp, "0x%llx", (unsigned long long)v); }
+        else    { pf_label(cf, "%s: %llu", fld_disp(f), (unsigned long long)v);
+                  snprintf(disp, sizeof disp, "%llu", (unsigned long long)v); }
+        pf_range(cf, abs_off + off, 0);
+        seen_add(seen, &nseen, f->name, v, v, off, off, disp);
+      }
+      /* An expression naming a field that was never parsed yields nothing at
+         all, rather than a made-up number standing in for it. */
     } else if (f->type == PCAPNG_POSA_QUIC_VARINT || f->type == PCAPNG_POSA_LEB128) {
       /* Variable-length integers. Both encodings are read here because both
          answer the same question — how many octets did this number take, and
@@ -1711,8 +2143,8 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
     } else if (f->type == PCAPNG_POSA_UTF16) {
       /* UTF-16LE, as SMB2 carries every name. Rendered as the ASCII subset —
          enough to read a share or file name in the tree. */
-      const seen_t *s = seen_get(seen, nseen, f->lenfield);
-      int start = off, n = s ? (int)s->val : 0, k, o2 = 0;
+      uint64_t lv = 0;
+      int start = off, n = resolve_len(f->lenfield, seen, nseen, off, lim - off, &lv) ? (int)lv : 0, k, o2 = 0;
       char tmp[256];
       if (n < 0) n = 0;
       if (off + n > lim) n = lim - off;
@@ -1729,8 +2161,8 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       seen_add(seen, &nseen, f->name, (uint64_t)n, (uint64_t)n, start, off + n, tmp);
       off += n;
     } else if (f->type == PCAPNG_POSA_BYTES_REF || f->type == PCAPNG_POSA_STR_REF) {
-      const seen_t *s = seen_get(seen, nseen, f->lenfield);
-      int start = off, n = s ? (int)s->val : 0;
+      uint64_t lv = 0;
+      int start = off, n = resolve_len(f->lenfield, seen, nseen, off, lim - off, &lv) ? (int)lv : 0;
       if (n < 0) n = 0;
       if (off + n > lim) n = lim - off;
       if (n < 0) n = 0;
@@ -1867,6 +2299,7 @@ int pcapng_posa_dissect(const char *proto_name, const uint8_t *data, int len,
 {
   const pcapng_posa_proto_t *p = pcapng_posa_find(proto_name);
   pcapng_field_t *node; int used;
+  g_nwarn = 0;                       /* warnings describe this dissect only */
   if (!proto_name || !data || len <= 0) return 0;
   if (!p) { p = resolve_group(proto_name, data, len); if (!p) return 0; }
   node = pf_add(parent, p->abbrev[0] ? p->abbrev : p->name, PCAPNG_FT_NONE);
@@ -1893,6 +2326,8 @@ int pcapng_posa_to_text(const pcapng_posa_proto_t *p, char *out, size_t sz)
     else if (f->type == PCAPNG_POSA_BYTES_REF) snprintf(type, sizeof type, "bytes[%s]", f->lenfield);
     else if (f->type == PCAPNG_POSA_QUIC_VARINT) snprintf(type, sizeof type, "quic_varint");
     else if (f->type == PCAPNG_POSA_LEB128)    snprintf(type, sizeof type, "leb128");
+    else if (f->type == PCAPNG_POSA_UUID)      snprintf(type, sizeof type, "uuid");
+    else if (f->type == PCAPNG_POSA_LET)      snprintf(type, sizeof type, "uint64");
     else snprintf(type, sizeof type, "%s", (f->type >= 0 && f->type <= PCAPNG_POSA_PAYLOAD) ? TN[f->type] : "uint8");
     o += (size_t)snprintf(out + o, sz - o, "    required %s %s", type, f->name);
     if (f->nenums > 0 || f->type <= PCAPNG_POSA_U64)

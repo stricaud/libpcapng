@@ -34,6 +34,7 @@ static int lib_type_to_pft(const pcapng_posa_fld_t *lf, size_t *nbytes_out)
     case PCAPNG_POSA_MAC:    return PFT_MAC;
     case PCAPNG_POSA_IP4:    return PFT_IP4;
     case PCAPNG_POSA_IP6:    *nbytes_out = 16; return PFT_BYTES;
+    case PCAPNG_POSA_UUID:   *nbytes_out = 16; return PFT_BYTES;
     case PCAPNG_POSA_CSTRING: return PFT_STR;
     case PCAPNG_POSA_PAYLOAD: return PFT_PAYLOAD;
     case PCAPNG_POSA_QUIC_VARINT: return PFT_QUIC_VARINT;
@@ -43,6 +44,7 @@ static int lib_type_to_pft(const pcapng_posa_fld_t *lf, size_t *nbytes_out)
     case PCAPNG_POSA_BYTES_REF:
     case PCAPNG_POSA_STR_REF:
     case PCAPNG_POSA_UTF16:       return PFT_BYTES_REF;
+    case PCAPNG_POSA_LET:        return -1;   /* computed, consumes no bytes */
     default:                      return -1;
     }
 }

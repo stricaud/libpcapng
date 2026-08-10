@@ -190,6 +190,47 @@ pub fn load_posa(src: &str) -> Result<usize, Error> {
     }
 }
 
+/// Tell the POSA engine which flow the next dissection belongs to, so decoders
+/// using `bind`/`recall` remember values per conversation.
+///
+/// Pass the flow's Community ID. `None` means "no conversation", under which
+/// `bind` stores nothing and `recall` always misses — what happens when a
+/// decoder is run over a bare buffer.
+pub fn posa_set_conversation(community_id: Option<&str>) -> Result<(), Error> {
+    match community_id {
+        None => unsafe { sys::pcapng_posa_set_conversation(std::ptr::null()) },
+        Some(id) => {
+            let c = CString::new(id).map_err(|e| err(e.to_string()))?;
+            unsafe { sys::pcapng_posa_set_conversation(c.as_ptr()) }
+        }
+    }
+    Ok(())
+}
+
+/// Forget every value remembered by `bind`.
+pub fn posa_clear_binds() {
+    unsafe { sys::pcapng_posa_binds_clear() }
+}
+
+/// How many values `bind` is currently remembering.
+pub fn posa_bind_count() -> usize {
+    unsafe { sys::pcapng_posa_bind_count() as usize }
+}
+
+/// Warnings raised by the last dissection — today, a `recall` that found
+/// nothing bound. Informational: the dissection completed regardless.
+pub fn posa_warnings() -> Vec<String> {
+    let n = unsafe { sys::pcapng_posa_warning_count() };
+    let mut out = Vec::with_capacity(n.max(0) as usize);
+    for i in 0..n {
+        let w = unsafe { sys::pcapng_posa_warning_at(i) };
+        if !w.is_null() {
+            out.push(unsafe { std::ffi::CStr::from_ptr(w) }.to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
 // ── TCP reassembly ─────────────────────────────────────────────────────────
 
 /// New bytes delivered to a reassembled TCP half-stream.

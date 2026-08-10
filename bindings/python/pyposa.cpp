@@ -109,6 +109,33 @@ void register_posa(py::module_ &m) {
 
   m.def("posa_clear", &pcapng_posa_clear, "Drop all loaded posa decoders.");
 
+  m.def("posa_set_conversation",
+        [](py::object id) {
+          if (id.is_none()) pcapng_posa_set_conversation(nullptr);
+          else pcapng_posa_set_conversation(id.cast<std::string>().c_str());
+        },
+        py::arg("community_id"),
+        "Set the flow that `bind`/`recall` remember values under. Pass the\n"
+        "flow's Community ID, or None for a buffer with no conversation.");
+
+  m.def("posa_binds_clear", &pcapng_posa_binds_clear,
+        "Forget every value remembered by `bind`.");
+
+  m.def("posa_bind_count", &pcapng_posa_bind_count,
+        "How many values `bind` is currently remembering.");
+
+  m.def("posa_warnings",
+        []() {
+          py::list out;
+          for (int i = 0; i < pcapng_posa_warning_count(); i++) {
+            const char *w = pcapng_posa_warning_at(i);
+            if (w) out.append(py::str(w));
+          }
+          return out;
+        },
+        "Warnings raised by the last posa_dissect() — today, a `recall` that\n"
+        "found nothing bound. Informational: the dissection completed anyway.");
+
   m.def("posa_count", &pcapng_posa_count, "Number of loaded posa decoders.");
 
   m.def("posa_list",

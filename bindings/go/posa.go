@@ -27,6 +27,39 @@ import (
 	"unsafe"
 )
 
+// SetConversation tells the posa engine which flow the next dissect belongs
+// to, so decoders using `bind`/`recall` remember values per conversation. Pass
+// a Community ID; an empty string means "no conversation", under which `bind`
+// stores nothing and `recall` always misses.
+func SetConversation(communityID string) {
+	if communityID == "" {
+		C.pcapng_posa_set_conversation(nil)
+		return
+	}
+	c := C.CString(communityID)
+	defer C.free(unsafe.Pointer(c))
+	C.pcapng_posa_set_conversation(c)
+}
+
+// ClearBinds forgets every value remembered by `bind`.
+func ClearBinds() { C.pcapng_posa_binds_clear() }
+
+// BindCount reports how many values `bind` is currently remembering.
+func BindCount() int { return int(C.pcapng_posa_bind_count()) }
+
+// Warnings returns what the last Dissect raised — today, a `recall` that found
+// nothing bound. They are informational; the dissection completed regardless.
+func Warnings() []string {
+	n := int(C.pcapng_posa_warning_count())
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		if w := C.pcapng_posa_warning_at(C.int(i)); w != nil {
+			out = append(out, C.GoString(w))
+		}
+	}
+	return out
+}
+
 // PosaFieldType mirrors pcapng_posa_ftype_t: the declared type of a field, or
 // one of the structural markers (scope/when/repeat/end) that carry nesting.
 type PosaFieldType int
@@ -62,6 +95,12 @@ const (
 	PosaSeek       PosaFieldType = C.PCAPNG_POSA_SEEK
 	PosaElse       PosaFieldType = C.PCAPNG_POSA_ELSE
 	PosaKVBlock    PosaFieldType = C.PCAPNG_POSA_KVBLOCK
+	PosaQuicVarint PosaFieldType = C.PCAPNG_POSA_QUIC_VARINT
+	PosaLEB128     PosaFieldType = C.PCAPNG_POSA_LEB128
+	PosaUUID       PosaFieldType = C.PCAPNG_POSA_UUID
+	PosaLet        PosaFieldType = C.PCAPNG_POSA_LET
+	PosaBind       PosaFieldType = C.PCAPNG_POSA_BIND
+	PosaRecall     PosaFieldType = C.PCAPNG_POSA_RECALL
 )
 
 // String gives the .posa keyword a field type is written with.
@@ -127,6 +166,18 @@ func (t PosaFieldType) String() string {
 		return "seek"
 	case PosaEnd:
 		return "end"
+	case PosaQuicVarint:
+		return "quic_varint"
+	case PosaLEB128:
+		return "leb128"
+	case PosaUUID:
+		return "uuid"
+	case PosaLet:
+		return "let"
+	case PosaBind:
+		return "bind"
+	case PosaRecall:
+		return "recall"
 	}
 	return "?"
 }

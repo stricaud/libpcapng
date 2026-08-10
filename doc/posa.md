@@ -71,9 +71,37 @@ New files should omit it.
 | `string … until "<delim>"` | until the delimiter | delimited text (HTTP lines) |
 | `kvblock <name> [sep "<sep>"]` | until `\r\n\r\n` | MIME-style header block (see §3) |
 | `dnsname` | one encoded name | DNS labels, following `0xc0` compression pointers |
+| `uuid` (`guid`) | 16 | DCE/RPC UUID / Microsoft GUID, rendered canonically |
 | `quic_varint` | 1, 2, 4 or 8 | variable-length integer, width self-describing (QUIC, HTTP/3) |
 | `leb128` | 1–10 | variable-length integer, 7 bits per octet (protobuf, DWARF, Thrift compact) |
 | `payload` | all that is left | the rest of the enclosing scope |
+
+### `uuid` — DCE/RPC UUIDs and Microsoft GUIDs
+
+Sixteen bytes, rendered as `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`. The first
+three groups are little-endian on the wire and the last two big-endian — the
+mixed layout that GUID code gets wrong in one direction or the other.
+
+The value reaches the tree as *text*, so string-keyed enums and Lookup tables
+resolve against it with no extra machinery:
+
+```posa
+Lookup DcerpcInterfaces
+    "367abb81-9844-35f1-ad32-98f038001003" = "SVCCTL - Service Control"
+    "12345778-1234-abcd-ef00-0123456789ac" = "SAMR"
+
+required uuid abstract_syntax lookup DcerpcInterfaces "Abstract Syntax"
+```
+
+Matching the whole 128-bit value is the point, not thoroughness for its own
+sake. DCE/RPC interface UUIDs are deliberately near-identical: LSARPC ends
+`…789ab` and SAMR `…789ac`, while SPOOLSS shares LSARPC's entire second half
+and differs only in the first four bytes. Keying on any single 32- or 64-bit
+slice of the UUID conflates at least two of SAMR, LSARPC and SPOOLSS.
+
+As with every string-typed field, `when` compares against the wire value
+(`when abstract_syntax == "367abb81-…"`), while the tree label shows the
+resolved name.
 
 ### Variable-length integers
 
@@ -113,6 +141,91 @@ required le_uint32 flags hex "Flags"
 required uint16 qclass mask 0x7fff "Class"
 required utf16[name_length] filename "Filename"
 ```
+
+---
+
+## 2b. Expressions — lengths that must be worked out
+
+Wherever a length or an offset is written, it may be arithmetic instead of a
+single field name:
+
+```posa
+required bytes[total - hdr] body "Body"     # a body the header only implies
+scope length - 3                            # length counts its own header
+seek frag_length - auth_length - 8          # a trailer at the end of the PDU
+seek (offset + 3) & ~3                      # the next 4-byte boundary
+repeat count - 1 as item "Items"
+```
+
+A bare name behaves exactly as it always has, so nothing that already works
+changes; text containing an operator is evaluated. Available inside an
+expression:
+
+* **integer literals**, decimal or `0x` hex
+* **field names** already parsed in this object
+* **`offset`** — how far into the object the walk has reached
+* **`remaining`** — bytes left in the enclosing scope
+* **operators** `+ - * / % & | ^ << >> ~` and parentheses, with C's precedence
+
+When the value is worth showing in the tree, or is used more than once, name it
+with **`let`**:
+
+```posa
+let payload_len = total_length - header_length "Payload Length"
+required bytes[payload_len] payload "Payload"
+```
+
+`let` deliberately has no type in front of it. Nothing is read from the wire —
+the field consumes zero bytes — and writing `uint32` there would have a reader
+counting four bytes that do not exist.
+
+An expression naming a field that was never parsed — one inside a `when` arm
+that did not run, say — produces no field at all, rather than a zero standing in
+for a length nobody computed.
+
+---
+
+## 2c. `bind` / `recall` — what one packet states and a later one assumes
+
+Some protocols say a thing once and afterwards refer to it by a small number.
+DCE/RPC is the clearest case: the BIND agrees an interface by UUID, and every
+Request after it names that interface only by a context id. Read a Request on
+its own and `ctx_id=1 opnum=12` means nothing.
+
+`bind` remembers a value for the life of the flow; `recall` reads it back:
+
+```posa
+# in the packet that establishes it
+bind interface[ctx_id] = abstract_syntax
+
+# in every packet that assumes it
+recall interface[cn_ctx_id] as iface lookup DcerpcInterfaces "Interface"
+```
+
+The key is the flow's **Community ID**, so both directions of a connection share
+one table and nothing bleeds between flows. Neither statement consumes bytes.
+
+`recall` takes an optional `lookup`, because what comes back is text and often
+wants naming — above, a stored UUID displays as `SVCCTL - Service Control`.
+
+**A miss is reported, not fatal.** A capture that begins after the BIND never saw
+the packet that would have bound anything, which is a fact about the capture
+rather than an error. The field still appears, saying so:
+
+```
+Interface: <not bound in this conversation> (cn_ctx_id=1)
+```
+
+and a warning is recorded, readable afterwards through
+`pcapng_posa_warning_count()` / `pcapng_posa_warning_at()` (`posa_warnings()` in
+Python, `Warnings()` in Go, `posaWarnings()` in JS). Dissection completes either
+way — a decoder cannot fail a capture by asking for something that was never
+there.
+
+The host says which flow is being decoded with
+`pcapng_posa_set_conversation()`; libpcapng's own dissector does this
+automatically. A decoder run over a bare buffer has no conversation, so `bind`
+stores nothing and `recall` always misses — which is the honest outcome.
 
 ---
 
