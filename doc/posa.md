@@ -71,7 +71,33 @@ New files should omit it.
 | `string … until "<delim>"` | until the delimiter | delimited text (HTTP lines) |
 | `kvblock <name> [sep "<sep>"]` | until `\r\n\r\n` | MIME-style header block (see §3) |
 | `dnsname` | one encoded name | DNS labels, following `0xc0` compression pointers |
+| `quic_varint` | 1, 2, 4 or 8 | variable-length integer, width self-describing (QUIC, HTTP/3) |
+| `leb128` | 1–10 | variable-length integer, 7 bits per octet (protobuf, DWARF, Thrift compact) |
 | `payload` | all that is left | the rest of the enclosing scope |
+
+### Variable-length integers
+
+Two encodings, both read as a plain number once decoded — so a varint can drive
+`bytes[…]`, `scope` and `when` exactly like a fixed-width field:
+
+* **`quic_varint`** (RFC 9000 §16). The top two bits of the first octet give the
+  width — `00`→1, `01`→2, `10`→4, `11`→8 octets — and the remaining 62 bits are
+  the value, big-endian. Every field of an HTTP/3 frame is one of these.
+* **`leb128`**. Seven value bits per octet, least significant group first, with
+  the high bit set on every octet but the last.
+
+```posa
+required quic_varint frame_type "Frame Type"
+    0x0 = DATA
+    0x1 = HEADERS
+required quic_varint length "Length"
+required bytes[length] body "Frame Payload"
+```
+
+The width is read from the wire, never guessed. That matters more than it looks:
+a decoder that assumed one octet would step past the wrong number of bytes and
+read every following field at the wrong offset — and the resulting tree still
+looks plausible, which is worse than showing nothing.
 
 Modifiers:
 

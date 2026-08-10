@@ -375,6 +375,8 @@ static int parse_type(const char *tok, pcapng_posa_fld_t *f)
   else if (!strcmp(tok, "string"))     f->type = PCAPNG_POSA_CSTRING; /* until handled by caller */
   else if (!strcmp(tok, "payload"))    f->type = PCAPNG_POSA_PAYLOAD;
   else if (!strcmp(tok, "dnsname"))    f->type = PCAPNG_POSA_DNSNAME;
+  else if (!strcmp(tok, "quic_varint")) f->type = PCAPNG_POSA_QUIC_VARINT;
+  else if (!strcmp(tok, "leb128"))     f->type = PCAPNG_POSA_LEB128;
   else if (!strncmp(tok, "bytes<", 6)) { f->type = PCAPNG_POSA_BYTES_FIXED; f->nbytes = (size_t)parse_num(tok + 6); }
   else if (!strncmp(tok, "str<", 4))   { f->type = PCAPNG_POSA_STR_FIXED;   f->nbytes = (size_t)parse_num(tok + 4); }
   else if (!strncmp(tok, "bytes[", 6)) {
@@ -1550,6 +1552,52 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       }
       if (cf) pf_range(cf, abs_off + off, sz);
       off += sz;
+    } else if (f->type == PCAPNG_POSA_QUIC_VARINT || f->type == PCAPNG_POSA_LEB128) {
+      /* Variable-length integers. Both encodings are read here because both
+         answer the same question — how many octets did this number take, and
+         what is it worth — and both feed `seen`, so the value drives the rest
+         of the grammar exactly like a fixed-width one does: `bytes[length]`,
+         `when frame_type == 4:` and `scope length` all work on it.
+
+         Getting the *width* right is the whole point. A decoder that guesses
+         it walks off the number and reads every following field from the wrong
+         offset, which is worse than not decoding at all: the tree still looks
+         plausible. */
+      int start = off, k, n;
+      uint64_t raw = 0, v;
+      if (off >= lim) break;
+      if (f->type == PCAPNG_POSA_QUIC_VARINT) {
+        /* RFC 9000 §16: the first octet's top two bits are log2 of the total
+           length, so 00→1, 01→2, 10→4, 11→8 octets. The value is what is left
+           after those two bits, big-endian — 62 bits at most. */
+        n = 1 << (data[off] >> 6);
+        if (off + n > lim) break;
+        raw = (uint64_t)(data[off] & 0x3f);
+        for (k = 1; k < n; k++) raw = (raw << 8) | data[off + k];
+        off += n;
+      } else {
+        /* LEB128: seven value bits per octet, least significant group first,
+           high bit set on every octet but the last. Ten octets carry 70 bits,
+           which is every value a uint64 can hold, so the cap both bounds the
+           shift and stops a run of 0x80 padding from walking the buffer. */
+        for (k = 0; off < lim && k < 10; k++) {
+          uint8_t b = data[off++];
+          raw |= (uint64_t)(b & 0x7f) << (7 * k);
+          if (!(b & 0x80)) break;
+        }
+      }
+      v = f->mask ? (raw & f->mask) : raw;
+      { const char *en = enum_name(f, v);
+        char disp[96];
+        cf = pf_add(cur, ab, PCAPNG_FT_UINT); pf_uint(cf, v);
+        if (en) { pf_label(cf, "%s: %s (%llu)", fld_disp(f), en, (unsigned long long)v);
+                  snprintf(disp, sizeof disp, "%s", en); }
+        else if (f->hex) { pf_label(cf, "%s: 0x%llx", fld_disp(f), (unsigned long long)v);
+                  snprintf(disp, sizeof disp, "0x%llx", (unsigned long long)v); }
+        else    { pf_label(cf, "%s: %llu", fld_disp(f), (unsigned long long)v);
+                  snprintf(disp, sizeof disp, "%llu", (unsigned long long)v); }
+        pf_range(cf, abs_off + start, off - start);
+        seen_add(seen, &nseen, f->name, v, raw, start, off, disp); }
     } else if (f->type == PCAPNG_POSA_DNSNAME) {
       /* pointers may aim anywhere in the message, so resolve against `len`, not
          the enclosing scope's `lim` */
@@ -1777,6 +1825,8 @@ int pcapng_posa_to_text(const pcapng_posa_proto_t *p, char *out, size_t sz)
     if (f->type == PCAPNG_POSA_BYTES_FIXED)    snprintf(type, sizeof type, "bytes<%zu>", f->nbytes);
     else if (f->type == PCAPNG_POSA_STR_FIXED) snprintf(type, sizeof type, "str<%zu>", f->nbytes);
     else if (f->type == PCAPNG_POSA_BYTES_REF) snprintf(type, sizeof type, "bytes[%s]", f->lenfield);
+    else if (f->type == PCAPNG_POSA_QUIC_VARINT) snprintf(type, sizeof type, "quic_varint");
+    else if (f->type == PCAPNG_POSA_LEB128)    snprintf(type, sizeof type, "leb128");
     else snprintf(type, sizeof type, "%s", (f->type >= 0 && f->type <= PCAPNG_POSA_PAYLOAD) ? TN[f->type] : "uint8");
     o += (size_t)snprintf(out + o, sz - o, "    required %s %s", type, f->name);
     if (f->nenums > 0 || f->type <= PCAPNG_POSA_U64)
