@@ -806,6 +806,12 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
       if (!nm) nm = pcapng_posa_bound_port(6, sp);
       if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }
 
+    /* Only now the weak signatures — a couple of octets that plenty of
+       unrelated traffic also begins with. Asking them last is what stops a
+       guess from outranking a port binding that actually knew the answer. */
+    { const char *cn = pcapng_posa_bound_content_weak(6, pl, pll);
+      if (cn && dispatch_named(c, cn, pl, pll, root)) { flow_record(fkey, cn); return; } }
+
 #define TP(x) (sp == (x) || dp == (x))
     if      (TP(80) || TP(8080) || TP(8000) || TP(8888) || TP(3128))
                                      dissect_http(c, pl, pll, root);
@@ -877,6 +883,10 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     { const char *nm = pcapng_posa_bound_port(17, dp);
       if (!nm) nm = pcapng_posa_bound_port(17, sp);
       if (nm && run_posa(c, nm, pl, pll, root)) { flow_record(fkey, nm); return; } }
+
+    /* weak signatures last — see the TCP path */
+    { const char *cn = pcapng_posa_bound_content_weak(17, pl, pll);
+      if (cn && dispatch_named(c, cn, pl, pll, root)) { flow_record(fkey, cn); return; } }
 
 #define UP(x) (sp == (x) || dp == (x))
     if      (UP(53))                 dissect_dns(c, pl, pll, root, "dns");

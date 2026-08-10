@@ -127,6 +127,15 @@ a decoder that assumed one octet would step past the wrong number of bytes and
 read every following field at the wrong offset — and the resulting tree still
 looks plausible, which is worse than showing nothing.
 
+Fields are required by default, so no keyword is needed:
+
+```posa
+uint16 frag_length "Fragment Length"
+```
+
+`optional` still marks a field that may be absent. `required` was accepted as a
+synonym for the default and carried no meaning, so it is not written any more.
+
 Modifiers:
 
 * `mask 0x7fff` — the value is masked before it is shown, matched against enums,
@@ -134,7 +143,11 @@ Modifiers:
   class is `class mask 0x7fff` and the flag is a `bits` field (§5).
 * `hex` — show the number as `0x…` rather than decimal.
 * `= N` — a default. On the **first** field of a group member it is also the
-  magic used to dispatch (§7).
+  magic used to dispatch (§7). It is *not* a constraint: `priority = 100` in
+  hsrp.posa is a sensible starting value, not grounds to reject a packet.
+* `matches N` — a constraint. If the wire value differs, the whole dissection is
+  abandoned and the caller falls through to the next candidate decoder. This is
+  what makes a `weak rule` safe (§9).
 
 ```posa
 required le_uint32 flags hex "Flags"
@@ -632,6 +645,41 @@ rule eth.type == 0x88cc => LLDP      # ethertype
 `tcp.port` and `udp.port` match when **either** the source or destination port
 equals the value. Use `tcp.srcport` / `tcp.dstport` (or the UDP equivalents) to
 restrict to one direction.
+
+### `weak rule` — signatures that are a hint, not proof
+
+Content rules are matched at a fixed offset — `rule tcp.content "S5"` means the
+first two octets, and `content@4` means the four after them. There is no search
+form. Strong signatures are tried **before** port rules, which is what lets a
+protocol on a non-standard port be recognised at all.
+
+That ordering is exactly why a short signature is dangerous. Two octets of ASCII
+will match plenty of unrelated traffic, and matching first means outranking the
+port binding of whatever that connection really was. Mark those `weak`:
+
+```posa
+rule tcp.port == 102 => H1
+
+# a hint: consulted only after the strong signatures and the ports
+weak rule tcp.content "S5" => H1
+```
+
+Weak rules are asked **last** — after strong signatures, CIDR rules and port
+bindings have all failed — and can be switched off wholesale
+(`pcapng_posa_weak_rules_enable(0)`; `posa_weak_rules_enable` in Python,
+`SetWeakRules` in Go, `posa_set_weak_rules` in Rust, `posaSetWeakRules` in JS).
+
+Pair one with `matches` so a coincidence is rejected rather than decoded:
+
+```posa
+Object<main> H1
+    uint16 header matches 0x5335 hex "H1-Header"
+```
+
+The rule gets the decoder a hearing; the magic number decides whether it keeps
+it. A payload that only looked like H1 consumes nothing and falls through.
+
+As a rule of thumb, a signature of two octets or fewer belongs behind `weak`.
 
 ### Content signatures — protocol without a fixed port
 

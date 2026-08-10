@@ -1114,6 +1114,13 @@ void posaSetConversation(std::string communityId) {
   pcapng_posa_set_conversation(communityId.empty() ? nullptr : communityId.c_str());
 }
 
+/* Enable or disable `weak rule` signatures. Weak rules are consulted only after
+   strong signatures and port bindings. */
+void posaSetWeakRules(bool on) { pcapng_posa_weak_rules_enable(on ? 1 : 0); }
+
+/* Whether `weak rule` signatures are currently consulted. */
+bool posaWeakRulesEnabled() { return pcapng_posa_weak_rules_enabled() != 0; }
+
 /* Forget every value remembered by `bind`. */
 void posaClearBinds() { pcapng_posa_binds_clear(); }
 
@@ -1187,6 +1194,8 @@ EMSCRIPTEN_BINDINGS(libpcapng) {
   emscripten::function("loadPosaText", &loadPosaText);
   emscripten::function("listPosa", &listPosa);
   emscripten::function("posaSetConversation", &posaSetConversation);
+  emscripten::function("posaSetWeakRules", &posaSetWeakRules);
+  emscripten::function("posaWeakRulesEnabled", &posaWeakRulesEnabled);
   emscripten::function("posaClearBinds", &posaClearBinds);
   emscripten::function("posaBindCount", &posaBindCount);
   emscripten::function("posaWarnings", &posaWarnings);

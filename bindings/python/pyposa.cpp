@@ -118,6 +118,17 @@ void register_posa(py::module_ &m) {
         "Set the flow that `bind`/`recall` remember values under. Pass the\n"
         "flow's Community ID, or None for a buffer with no conversation.");
 
+  m.def("posa_weak_rules_enable",
+        [](bool on) { pcapng_posa_weak_rules_enable(on ? 1 : 0); },
+        py::arg("on"),
+        "Enable or disable `weak rule` signatures. Weak rules are consulted\n"
+        "only after strong signatures and port bindings; turning them off\n"
+        "leaves only signatures strong enough to stand alone.");
+
+  m.def("posa_weak_rules_enabled",
+        []() { return pcapng_posa_weak_rules_enabled() != 0; },
+        "Whether `weak rule` signatures are currently consulted.");
+
   m.def("posa_binds_clear", &pcapng_posa_binds_clear,
         "Forget every value remembered by `bind`.");
 

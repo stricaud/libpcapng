@@ -41,6 +41,20 @@ func SetConversation(communityID string) {
 	C.pcapng_posa_set_conversation(c)
 }
 
+// SetWeakRules enables or disables `weak rule` signatures. Weak rules are
+// consulted only after strong signatures and port bindings; turning them off
+// leaves only signatures strong enough to stand on their own.
+func SetWeakRules(on bool) {
+	v := C.int(0)
+	if on {
+		v = 1
+	}
+	C.pcapng_posa_weak_rules_enable(v)
+}
+
+// WeakRulesEnabled reports whether `weak rule` signatures are consulted.
+func WeakRulesEnabled() bool { return C.pcapng_posa_weak_rules_enabled() != 0 }
+
 // ClearBinds forgets every value remembered by `bind`.
 func ClearBinds() { C.pcapng_posa_binds_clear() }
 

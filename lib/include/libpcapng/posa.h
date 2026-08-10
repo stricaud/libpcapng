@@ -178,6 +178,14 @@ typedef struct {
   uint64_t            mask;                          /* `mask 0x7fff` — value shown
                                                         and matched after masking */
   int                 hex;                           /* `hex` — show the value as 0x… */
+  /* `matches <N>` — a constraint, not a default. If the wire value differs the
+     whole dissection is abandoned and the caller falls through to the next
+     candidate decoder. This is what lets a `weak rule` be safe: the signature
+     gets the decoder a hearing, and the magic number decides whether it keeps
+     it. Distinct from `= N`, which is only a default (hsrp's `priority = 100`
+     is a sensible starting value, not something to reject a packet over). */
+  int                 has_match;
+  uint64_t            match_val;
   /* BITS: value = (<src> >> shift) & ((1 << width) - 1) */
   char                src[PCAPNG_POSA_NAME_MAX];
   int                 shift, width;
@@ -278,6 +286,18 @@ const char *pcapng_posa_bound_ethertype(uint16_t ethertype);
 /* Decoder claimed by a `rule content "…"` signature the payload starts with.
    ip_proto is the transport (6/17); tried after port binding fails. */
 const char *pcapng_posa_bound_content(int ip_proto, const uint8_t *data, int len);
+
+/* Signatures declared `weak rule …`: suggestive rather than conclusive, and so
+ * consulted only after both the strong signatures and the port bindings have
+ * failed. A two-octet prefix that a lot of unrelated traffic also begins with
+ * belongs here — it should never outrank the real binding of a connection. */
+const char *pcapng_posa_bound_content_weak(int ip_proto, const uint8_t *data, int len);
+
+/* Weak rules are on by default. Turning them off leaves only signatures strong
+ * enough to stand on their own, which is what a capture full of unrelated
+ * traffic wants. */
+void pcapng_posa_weak_rules_enable(int on);
+int  pcapng_posa_weak_rules_enabled(void);
 /* Decoder claimed by a `rule ip4.addr/src/dst in A.B.C.D/N => Proto` CIDR rule.
    src and dst are 4-byte IPv4 addresses in network byte order (may be NULL). */
 const char *pcapng_posa_bound_ip4cidr(const uint8_t *src, const uint8_t *dst);

@@ -76,6 +76,7 @@ typedef struct {
   int offset;                               /* byte offset the sig must appear at */
   int ipproto;                              /* 0 = any, 6 = tcp, 17 = udp */
   char proto[PCAPNG_POSA_NAME_MAX]; int used;
+  int weak;                                 /* `weak rule …` — a hint, not proof */
 } content_bind_t;
 static content_bind_t g_cbinds[MAX_CONTENT_BINDS]; static int g_ncbinds;
 
@@ -244,30 +245,48 @@ static void bind_add(int ipproto, uint16_t port, const char *proto)
     g_nbinds++;
   }
 }
-static void content_add(int ipproto, int offset, const uint8_t *sig, int n, const char *proto)
+static void content_add(int ipproto, int offset, const uint8_t *sig, int n, const char *proto, int weak)
 {
   if (n <= 0 || n > CONTENT_SIG_MAX || offset < 0 || g_ncbinds >= MAX_CONTENT_BINDS) return;
   g_cbinds[g_ncbinds].used = 1; g_cbinds[g_ncbinds].ipproto = ipproto;
   g_cbinds[g_ncbinds].offset = offset;
   g_cbinds[g_ncbinds].siglen = n; memcpy(g_cbinds[g_ncbinds].sig, sig, (size_t)n);
+  g_cbinds[g_ncbinds].weak = weak;
   snprintf(g_cbinds[g_ncbinds].proto, sizeof g_cbinds[g_ncbinds].proto, "%s", proto);
   g_ncbinds++;
 }
 /* Name of the decoder whose content signature this payload starts with, if any.
    `ipproto` is the transport carrying it (6/17); a rule with ipproto 0 matches
    either. Tried by the dispatcher only after port binding fails. */
-const char *pcapng_posa_bound_content(int ipproto, const uint8_t *data, int len)
+static int g_weak_enabled = 1;
+
+void pcapng_posa_weak_rules_enable(int on) { g_weak_enabled = on ? 1 : 0; }
+int  pcapng_posa_weak_rules_enabled(void)  { return g_weak_enabled; }
+
+/* `want_weak` picks which half of the rule set to consult. The caller asks for
+   the strong ones first, then falls back to ports, and only then asks for the
+   weak ones — so a two-octet guess can no longer outrank the real binding of a
+   connection. */
+static const char *content_match(int ipproto, const uint8_t *data, int len, int want_weak)
 {
   int i;
   if (!data || len <= 0) return NULL;
+  if (want_weak && !g_weak_enabled) return NULL;
   for (i = 0; i < g_ncbinds; i++) {
     const content_bind_t *b = &g_cbinds[i];
     if (!b->used || (b->ipproto && b->ipproto != ipproto)) continue;
+    if (!b->weak != !want_weak) continue;
     if (b->offset + b->siglen <= len &&
         memcmp(data + b->offset, b->sig, (size_t)b->siglen) == 0) return b->proto;
   }
   return NULL;
 }
+
+const char *pcapng_posa_bound_content(int ipproto, const uint8_t *data, int len)
+{ return content_match(ipproto, data, len, 0); }
+
+const char *pcapng_posa_bound_content_weak(int ipproto, const uint8_t *data, int len)
+{ return content_match(ipproto, data, len, 1); }
 
 /* Add an IPv4 CIDR binding and implement the public lookup. */
 static void ip4cidr_add(uint32_t addr, uint32_t mask, int msrc, int mdst, const char *proto)
@@ -320,6 +339,23 @@ static pcapng_field_t *pf_add(pcapng_field_t *parent, const char *abbrev, pcapng
   }
   return f;
 }
+/* Unlink and free a child and everything below it. Used when a decoder rejects
+   the payload after having already attached part of a subtree — the caller is
+   about to try another decoder and must not be handed the leftovers. */
+static void pf_remove_child(pcapng_field_t *parent, pcapng_field_t *child)
+{
+  pcapng_field_t *c, *prev = NULL;
+  if (!parent || !child) return;
+  for (c = parent->children; c; prev = c, c = c->next) {
+    if (c != child) continue;
+    if (prev) prev->next = c->next; else parent->children = c->next;
+    if (parent->last_child == c) parent->last_child = prev;
+    c->next = NULL;
+    pcapng_field_free(c);
+    return;
+  }
+}
+
 static void pf_label(pcapng_field_t *f, const char *fmt, ...)
 { va_list ap; if (!f) return; va_start(ap, fmt); vsnprintf(f->label, sizeof f->label, fmt, ap); va_end(ap); }
 static void pf_uint(pcapng_field_t *f, uint64_t v) { if (f) { f->vtype = PCAPNG_FT_UINT; f->u = v; } }
@@ -468,11 +504,20 @@ static int tokenize(char *line, char *toks[], int max)
      tcp.port == 3389     udp.dstport == 69      (transport ports)
      ip.proto == 2        eth.type == 0x88cc     (below the transport layer)
      content "GET "       tcp.content "\x16\x03"  (payload signature, any port) */
-static void parse_rule(const char *rest)
+static void parse_rule(const char *rest, int weak)
 {
   char t[16] = "", field[24] = "", num[24] = "";
   const char *arrow;
   char proto[PCAPNG_POSA_NAME_MAX] = "";
+
+  /* `weak rule …` marks a signature that is suggestive rather than conclusive —
+     a couple of octets that a lot of unrelated traffic also begins with. It is
+     still a rule and still fires; it is simply asked last. */
+  while (*rest == ' ' || *rest == '\t') rest++;
+  if (!strncmp(rest, "weak", 4) && (rest[4] == ' ' || rest[4] == '\t')) {
+    weak = 1; rest += 4;
+    while (*rest == ' ' || *rest == '\t') rest++;
+  }
 
   /* content signature: rule [tcp.|udp.]content[@offset] "<bytes>" => Proto */
   { const char *cw = strstr(rest, "content");
@@ -486,7 +531,7 @@ static void parse_rule(const char *rest)
       if (q && arrow && sscanf(arrow + 2, " %63s", proto) == 1) {
         char sig[PCAPNG_POSA_DELIM_MAX]; int n = 0;
         parse_delim(q, sig, &n);
-        content_add(ipproto, offset, (const uint8_t *)sig, n, proto);
+        content_add(ipproto, offset, (const uint8_t *)sig, n, proto, weak);
       }
       return;
     }
@@ -742,12 +787,18 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     if (!*tl) continue;
     snprintf(raw, sizeof raw, "%s", tl);   /* tokenize() chops buf in place */
 
-    /* rule <condition> => Proto  (parsed from raw text, before tokenizing) */
-    if (!strncmp(tl, "rule", 4) && (tl[4] == ' ' || tl[4] == '\t')) {
-      char *r = tl + 4; while (*r == ' ' || *r == '\t') r++;
-      parse_rule(r);
-      continue;
-    }
+    /* rule <condition> => Proto  (parsed from raw text, before tokenizing)
+       `weak rule …` is the same thing, asked last — see parse_rule(). */
+    { const char *rl = tl; int wk = 0;
+      if (!strncmp(rl, "weak", 4) && (rl[4] == ' ' || rl[4] == '\t')) {
+        const char *r2 = rl + 4; while (*r2 == ' ' || *r2 == '\t') r2++;
+        if (!strncmp(r2, "rule", 4) && (r2[4] == ' ' || r2[4] == '\t')) { wk = 1; rl = r2; }
+      }
+      if (!strncmp(rl, "rule", 4) && (rl[4] == ' ' || rl[4] == '\t')) {
+        const char *r = rl + 4; while (*r == ' ' || *r == '\t') r++;
+        parse_rule(r, wk);
+        continue;
+      } }
 
     /* color <display filter> => <fg> <bg>  — how the front end should paint a
        matching packet. File-scoped like `rule`, not tied to the current proto. */
@@ -1247,6 +1298,8 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
           f->defnum = parse_num(toks[k + 1]); break; } }
       { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "mask") && k + 1 < nt) {
           f->mask = parse_num(toks[k + 1]); break; } }
+      { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "matches") && k + 1 < nt) {
+          f->has_match = 1; f->match_val = parse_num(toks[k + 1]); break; } }
       { int k; for (k = ti + 1; k < nt; k++) if (!strcmp(toks[k], "hex")) { f->hex = 1; break; } }
       { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "lookup") && k + 1 < nt) {
           snprintf(f->lookup_name, sizeof f->lookup_name, "%s", toks[k + 1]); break; } }
@@ -1758,7 +1811,7 @@ static int at_delim(const pcapng_posa_fld_t *f, const uint8_t *d, int off, int l
 static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int len,
                        pcapng_field_t *node, int abs_off, char *info, size_t infolen)
 {
-  int off = 0, i, nseen = 0, nfirst = 0, lim = len, skip = 0;
+  int off = 0, i, nseen = 0, nfirst = 0, lim = len, skip = 0, rejected = 0;
   seen_t seen[POSA_MAX_SEEN], first[POSA_MAX_SEEN];   /* live scope; first-of-each */
   char ab[PCAPNG_POSA_ABBREV_JOIN], child_info[192] = "";
   const char *prefix = p->abbrev[0] ? p->abbrev : p->name;
@@ -1968,8 +2021,13 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
         int le = (f->type == PCAPNG_POSA_LE16 || f->type == PCAPNG_POSA_LE32 || f->type == PCAPNG_POSA_LE64);
         uint64_t raw = le ? rd_le(data + off, sz) : rd_be(data + off, sz);
         uint64_t v = f->mask ? (raw & f->mask) : raw;
-        const char *en = enum_name(f, v);
+        const char *en;
         char disp[96];
+        /* A failed `matches` means this decoder was handed the wrong payload.
+           Abandon the whole dissection so the caller can try the next
+           candidate, rather than emit a tree that looks plausible. */
+        if (f->has_match && v != f->match_val) { rejected = 1; break; }
+        en = enum_name(f, v);
         cf = pf_add(cur, ab, PCAPNG_FT_UINT); pf_uint(cf, v);
         if (en) { pf_label(cf, "%s: %s (%llu)", fld_disp(f), en, (unsigned long long)v);
                   snprintf(disp, sizeof disp, "%s", en); }
@@ -2029,6 +2087,9 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
         seen_add(seen, &nseen, f->name, num, num, off, off + sz, tmp); break; }
       default: break;
       }
+      /* `break` inside the switch above only leaves the switch — leave the
+         field loop too, so a failed `matches` really does stop the walk. */
+      if (rejected) break;
       if (cf) pf_range(cf, abs_off + off, sz);
       off += sz;
     } else if (f->type == PCAPNG_POSA_LET) {
@@ -2246,6 +2307,10 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
       fmt_expand(p->info_fmt, p->info_args, p->info_nargs, first, nfirst, seen, nseen,
                  info, infolen);
   }
+  /* A `matches` constraint failed: this decoder is not what the payload is.
+     Distinct from returning 0, which several header-only decoders legitimately
+     do and which the caller reads as "mine, nothing consumed". */
+  if (rejected) return -1;
   return off;
 }
 
@@ -2306,6 +2371,13 @@ int pcapng_posa_dissect(const char *proto_name, const uint8_t *data, int len,
   pf_label(node, "%s", p->name);
   if (p->display[0]) snprintf(g_last_col, sizeof g_last_col, "%s", p->display);
   used = dissect_one(p, data, len, node, abs_off, info, infolen);   /* nests via `layer` */
+  if (used < 0) {
+    /* Rejected by a `matches` constraint. Take the half-built subtree back out
+       so the next candidate decoder starts from a clean parent, and report
+       nothing consumed. */
+    pf_remove_child(parent, node);
+    return 0;
+  }
   pf_range(node, abs_off, used > 0 ? used : len);
   return used > 0 ? used : len;
 }

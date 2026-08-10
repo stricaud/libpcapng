@@ -207,6 +207,18 @@ pub fn posa_set_conversation(community_id: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Enable or disable `weak rule` signatures. Weak rules are consulted only
+/// after strong signatures and port bindings; turning them off leaves only
+/// signatures strong enough to stand on their own.
+pub fn posa_set_weak_rules(on: bool) {
+    unsafe { sys::pcapng_posa_weak_rules_enable(if on { 1 } else { 0 }) }
+}
+
+/// Whether `weak rule` signatures are currently consulted.
+pub fn posa_weak_rules_enabled() -> bool {
+    unsafe { sys::pcapng_posa_weak_rules_enabled() != 0 }
+}
+
 /// Forget every value remembered by `bind`.
 pub fn posa_clear_binds() {
     unsafe { sys::pcapng_posa_binds_clear() }

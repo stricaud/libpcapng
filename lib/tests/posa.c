@@ -350,6 +350,44 @@ int main(void)
         }
     }
 
+    /* ── matches ─────────────────────────────────────────────────────────
+       The other half of `weak rule`: a signature gets a decoder a hearing, and
+       a magic number decides whether it keeps it. Without the rejection a weak
+       rule would decode whatever it was handed. */
+    SUITE("matches");
+    {
+        static const char *SRC =
+            "Object<main> T\n    abbrev \"t\"\n"
+            "    uint16 header matches 0x5335 hex \"Magic\"\n"
+            "    uint8 v \"V\"\n";
+        static const uint8_t GOOD[] = { 0x53, 0x35, 0x07 };
+        static const uint8_t BAD[]  = { 0x41, 0x42, 0x07 };
+        char err[256] = "";
+        pcapng_field_t *root;
+        char info[256] = "";
+        int used_good, used_bad, kids;
+        pcapng_field_t *c;
+
+        pcapng_posa_clear();
+        pcapng_posa_load_text(SRC, err, sizeof err);
+
+        root = (pcapng_field_t *)calloc(1, sizeof *root);
+        used_good = pcapng_posa_dissect("T", GOOD, 3, root, 0, info, sizeof info);
+        CHECK(used_good > 0);
+        CHECK(label_has(root, "t.v", "7"));
+        pcapng_field_free(root);
+
+        /* A mismatch must consume nothing, so the caller tries the next
+           decoder — and must leave no half-built subtree behind. */
+        root = (pcapng_field_t *)calloc(1, sizeof *root);
+        used_bad = pcapng_posa_dissect("T", BAD, 3, root, 0, info, sizeof info);
+        CHECK(used_bad == 0);
+        kids = 0;
+        for (c = root->children; c; c = c->next) kids++;
+        CHECK(kids == 0);
+        pcapng_field_free(root);
+    }
+
     printf("\n=== Results: %d/%d passed", g_passed, g_tests);
     if (g_failed) printf(", %d FAILED", g_failed);
     printf(" ===\n");
