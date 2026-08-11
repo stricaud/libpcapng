@@ -22,6 +22,8 @@ jobs:
   publish:
     name: Build & publish @stricaud/libpcapng
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for npm provenance publishing
     steps:
       - uses: actions/checkout@v5
 
@@ -91,7 +93,7 @@ jobs:
         working-directory: bindings/js
         run: |
           set -uo pipefail
-          if npm publish --access public; then
+          if npm publish --access public --provenance; then
             echo "published"
           elif npm view "@stricaud/libpcapng@$(node -p 'require("./package.json").version')" version >/dev/null 2>&1; then
             echo "this version is already on npm — nothing to do"
