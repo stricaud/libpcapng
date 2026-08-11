@@ -55,13 +55,32 @@ for f in "$LIB"/protocols/*.c; do SOURCES+=("$f"); done
 echo "em++: $(em++ --version | head -1)"
 echo "building ${#SOURCES[@]} C sources + embind binding -> $OUT/libpcapng.mjs"
 
-# em++, not emcc: pcapng_wasm.cpp is C++ (embind, std::string), and linking the
-# mixed set with emcc leaves operator new/delete and std::string undefined.
+# Compile per language, then link with em++.
+#
+# One command cannot do this: handing the whole mixed set to emcc compiles the
+# C++ as C and the link comes up short of operator new/delete and std::string;
+# handing it to em++ compiles the C as C++, where `void *` no longer converts
+# implicitly and objects.c fails on every realloc(). So each source is compiled
+# by the driver for its own language, and only the link is C++.
+OBJDIR="$(mktemp -d)"
+trap 'rm -rf "$OBJDIR"' EXIT
+OBJECTS=()
+
+for f in "${SOURCES[@]}"; do
+  # Flatten the path into the object name so lib/x.c and lib/protocols/x.c
+  # could never collide.
+  rel="${f#$ROOT/}"
+  obj="$OBJDIR/${rel//\//_}.o"
+  emcc -O3 -I"$LIB/include" -c "$f" -o "$obj"
+  OBJECTS+=("$obj")
+done
+
+em++ -O3 -I"$LIB/include" -c "$HERE/pcapng_wasm.cpp" -o "$OBJDIR/pcapng_wasm.o"
+OBJECTS+=("$OBJDIR/pcapng_wasm.o")
+
 em++ \
   -O3 \
-  -I"$LIB/include" \
-  "${SOURCES[@]}" \
-  "$HERE/pcapng_wasm.cpp" \
+  "${OBJECTS[@]}" \
   -lembind \
   -s MODULARIZE=1 \
   -s EXPORT_ES6=1 \

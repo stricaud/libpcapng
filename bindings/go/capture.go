@@ -160,7 +160,7 @@ func (c *Capture) Loop(count int, fn PacketHandler) (int, error) {
 	defer cbDelete(h)
 
 	n := C.pcapng_capture_loop(c.cc, C.int(count),
-		C.pcapng_packet_cb(C.cPacketCallback), unsafe.Pointer(h))
+		C.pcapng_packet_cb(C.cPacketCallback), C.cHandleToPtr(C.uintptr_t(h)))
 	if n < 0 {
 		return 0, errors.New("pcapng: Loop: capture error")
 	}
@@ -175,7 +175,7 @@ func (c *Capture) Dispatch(count int, fn PacketHandler) (int, error) {
 	defer cbDelete(h)
 
 	n := C.pcapng_capture_dispatch(c.cc, C.int(count),
-		C.pcapng_packet_cb(C.cPacketCallback), unsafe.Pointer(h))
+		C.pcapng_packet_cb(C.cPacketCallback), C.cHandleToPtr(C.uintptr_t(h)))
 	if n < 0 {
 		return 0, errors.New("pcapng: Dispatch: capture error")
 	}

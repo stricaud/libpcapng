@@ -17,3 +17,8 @@ void cPacketCallback(const pcapng_packet_info_t *pkt, void *userdata)
 {
     goPacketCallback((uintptr_t)userdata, pkt);
 }
+
+void *cHandleToPtr(uintptr_t h)
+{
+    return (void *)h;
+}

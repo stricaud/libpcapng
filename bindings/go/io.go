@@ -29,7 +29,7 @@ func ReadFile(path string, cb BlockCallback) error {
 	defer cbDelete(h)
 
 	rc := C.libpcapng_file_read(cs, C.foreach_pcapng_block_cb(C.cBlockCallback),
-		unsafe.Pointer(h))
+		C.cHandleToPtr(C.uintptr_t(h)))
 	if rc < 0 {
 		return fmt.Errorf("pcapng: ReadFile(%q) failed (rc=%d)", path, rc)
 	}
@@ -46,7 +46,7 @@ func ReadMemory(buf []byte, cb BlockCallback) error {
 	defer cbDelete(h)
 
 	rc := C.libpcapng_mem_read((*C.uchar)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)),
-		C.foreach_pcapng_block_cb(C.cBlockCallback), unsafe.Pointer(h))
+		C.foreach_pcapng_block_cb(C.cBlockCallback), C.cHandleToPtr(C.uintptr_t(h)))
 	if rc < 0 {
 		return fmt.Errorf("pcapng: ReadMemory failed (rc=%d)", rc)
 	}

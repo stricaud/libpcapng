@@ -20,4 +20,11 @@ cp "$ROOT/lib/protocols/"*.c          "$VENDOR_SRC/protocols/"
 # Headers (full tree)
 cp -R "$ROOT/lib/include/libpcapng"   "$VENDOR_INC/"
 
+# dissect.c does #include "builtin_protos.h" — the .posa decoders embedded as C
+# string literals. In the normal build it sits beside dissect.c in lib/; in the
+# vendored tree there is no such sibling, so it has to be on the include path
+# cc-rs is given. Without it `cargo publish` fails when it builds the packaged
+# tarball to verify it. (bindings/go/scripts/sync-sources.sh copies it too.)
+cp "$ROOT/lib/builtin_protos.h"       "$VENDOR_INC/"
+
 echo "Vendored into $SYS/vendor/"
