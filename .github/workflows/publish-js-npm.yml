@@ -39,6 +39,31 @@ jobs:
       # into it before publishing. Not committed back: the tag is the source of
       # truth for what was released, and a commit here would need write access
       # and would race with the other publish jobs on the same tag.
+      # Checked before the four-minute wasm build, not after it. npm feeds this
+      # straight into an Authorization header, so a stray newline from copy and
+      # paste surfaces as "*** is not a legal HTTP header value" — masked, and
+      # from npm rather than from us. Nothing derived from the token is printed.
+      - name: Check npm credentials
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -uo pipefail
+          tok="${NODE_AUTH_TOKEN:-}"
+          if [ -z "$tok" ]; then
+            echo "::error::secret NPM_TOKEN is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          if [ "$(printf %s "$tok" | tr -d '[:space:]' | wc -c)" -ne "$(printf %s "$tok" | wc -c)" ]; then
+            echo "::error::NPM_TOKEN contains whitespace (most often a trailing newline from pasting). Re-add it with no leading or trailing whitespace."
+            exit 1
+          fi
+          if printf %s "$tok" | LC_ALL=C grep -q '[^[:print:]]'; then
+            echo "::error::NPM_TOKEN contains non-printable characters. Re-add it."
+            exit 1
+          fi
+          echo "NPM_TOKEN looks well-formed."
+
       - name: Set version from tag
         working-directory: bindings/js
         run: |

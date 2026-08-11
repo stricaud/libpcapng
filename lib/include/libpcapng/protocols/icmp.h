@@ -1,6 +1,7 @@
 #ifndef _LIBPCAPNG_ICMP_H_
 #define _LIBPCAPNG_ICMP_H_
 
+#include <stddef.h>
 
 #include <libpcapng/packed.h>
 #include <stdint.h>

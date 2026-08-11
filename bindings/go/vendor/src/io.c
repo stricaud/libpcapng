@@ -249,7 +249,7 @@ int libpcapng_fp_read(FILE *fp, foreach_pcapng_block_cb pcapng_block_cb, void *u
 
 	read_length = fread(&block_info, 1, PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH, fp);
 	if (read_length != PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH) {
-		fprintf(stderr, "Could not read expected data: got %lu expected %u. Stopping.\n", read_length, PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH);
+		fprintf(stderr, "Could not read expected data: got %zu expected %u. Stopping.\n", read_length, PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH);
 		return -1;
 	}
 	block_total_length = block_info[1];
@@ -260,7 +260,7 @@ int libpcapng_fp_read(FILE *fp, foreach_pcapng_block_cb pcapng_block_cb, void *u
 		}
 		read_length = fread(&data, 1, block_total_length - PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH, fp);
 		if (read_length != block_info[1] - PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH) {
-			fprintf(stderr, "Could not read expected (%u) block_size; Got %lu. Stopping.\n", block_info[1], read_length);
+			fprintf(stderr, "Could not read expected (%u) block_size; Got %zu. Stopping.\n", block_info[1], read_length);
 			return -1;
 		}
 
@@ -271,7 +271,7 @@ int libpcapng_fp_read(FILE *fp, foreach_pcapng_block_cb pcapng_block_cb, void *u
 			break;
 		}
 		if (read_length != PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH) {
-			fprintf(stderr, "Could not read expected (%d) data; Got %lu. Stopping.\n", PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH, read_length);
+			fprintf(stderr, "Could not read expected (%d) data; Got %zu. Stopping.\n", PCAPNG_BLOCK_TYPE_AND_SIZE_LENGTH, read_length);
 			return -1;
 		}
 		block_total_length = block_info[1];

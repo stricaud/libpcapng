@@ -6,7 +6,6 @@
 #ifndef _LIBPCAPNG_BLOCKS_H_
 #define _LIBPCAPNG_BLOCKS_H_
 
-
 #include <libpcapng/packed.h>
 #ifdef __cplusplus
 extern "C" {

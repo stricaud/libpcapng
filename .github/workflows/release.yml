@@ -92,4 +92,10 @@ jobs:
           pattern: "*"
           merge-multiple: true  # collect all wheels + sdist into dist/
 
+      # skip-existing: one tag drives five workflows, and any of them can fail
+      # on its own. Re-pushing the tag to finish the others would otherwise die
+      # here, because PyPI refuses a filename it has already seen — permanently,
+      # even after deletion. With this, an already-published file is a no-op.
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

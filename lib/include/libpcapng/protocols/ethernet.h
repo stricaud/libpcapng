@@ -1,7 +1,6 @@
 #ifndef _LIBPCAPNG_ETHERNET_H_
 #define _LIBPCAPNG_ETHERNET_H_
 
-
 #include <libpcapng/packed.h>
 #include <stdint.h>
 

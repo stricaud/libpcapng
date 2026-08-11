@@ -1,6 +1,8 @@
 #ifndef _LIBPCAPNG_DHCP_H_
 #define _LIBPCAPNG_DHCP_H_
 
+#include <stddef.h>
+
 #include <stdint.h>
 
 #include "ipv4.h"

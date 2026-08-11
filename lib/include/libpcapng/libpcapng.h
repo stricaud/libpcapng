@@ -6,6 +6,8 @@
 #ifndef _LIBPCAPNG_H_
 #define _LIBPCAPNG_H_
 
+#include <stdio.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -5,6 +5,10 @@
 #ifndef _LIBPCAPNG_EASYAPI_H_
 #define _LIBPCAPNG_EASYAPI_H_
 
+#include <stdio.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif

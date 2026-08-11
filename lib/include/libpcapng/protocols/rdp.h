@@ -1,7 +1,6 @@
 #ifndef _LIBPCAPNG_RDP_H_
 #define _LIBPCAPNG_RDP_H_
 
-
 #include <libpcapng/packed.h>
 #include <stdint.h>
 #include <stddef.h>
