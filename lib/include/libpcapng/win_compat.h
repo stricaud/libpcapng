@@ -66,6 +66,13 @@ typedef SSIZE_T ssize_t;
 #ifndef strncasecmp
 #define strncasecmp(a, b, n) _strnicmp((a), (b), (n))
 #endif
+/* strtok_s takes the same three arguments as strtok_r and behaves identically.
+   Without this the compiler falls back to an implicit declaration returning
+   int, which shows up first as C4047 "differs in levels of indirection" and
+   then as an unresolved external at link time. */
+#ifndef strtok_r
+#define strtok_r strtok_s
+#endif
 
 /* inet_aton is POSIX-only; Windows has inet_pton (from ws2tcpip.h). */
 static __inline int inet_aton(const char *str, struct in_addr *addr) {
