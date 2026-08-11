@@ -8,9 +8,14 @@ name: Publish JS bindings to npm
 #   (Settings → Secrets and variables → Actions).
 #   Or configure npm Trusted Publishing (OIDC) and drop NODE_AUTH_TOKEN.
 
+# A plain release tag (v0.18.0) publishes every binding. `js-v*` still works
+# for publishing the JS package alone, out of step with the others.
+#
+# `v*.*.*` and not `v*`: the repo also carries build tags like `v0.1-887d3a1`,
+# which have only one dot and must not trigger a publish.
 on:
   push:
-    tags: ["js-v*"]
+    tags: ["v*.*.*", "js-v*"]
   workflow_dispatch:
 
 jobs:
@@ -30,6 +35,22 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
+      # npm takes the version from package.json, so the tag has to be written
+      # into it before publishing. Not committed back: the tag is the source of
+      # truth for what was released, and a commit here would need write access
+      # and would race with the other publish jobs on the same tag.
+      - name: Set version from tag
+        working-directory: bindings/js
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#js-}"; VERSION="${VERSION#v}"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::'$GITHUB_REF_NAME' is not a release tag (want vX.Y.Z)"; exit 1 ;;
+          esac
+          echo "Publishing @stricaud/libpcapng $VERSION"
+          npm version --no-git-tag-version --allow-same-version "$VERSION"
+
       - name: Build bindings
         working-directory: bindings/js
         run: ./build.sh
@@ -38,8 +59,19 @@ jobs:
         working-directory: bindings/js
         run: node test/smoke.mjs
 
+      # npm rejects re-publishing a version, so a re-run of the same tag would
+      # fail the job for an already-successful publish. Treat that as success.
       - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
         working-directory: bindings/js
-        run: npm publish --access public
+        run: |
+          set -uo pipefail
+          if npm publish --access public; then
+            echo "published"
+          elif npm view "@stricaud/libpcapng@$(node -p 'require("./package.json").version')" version >/dev/null 2>&1; then
+            echo "this version is already on npm — nothing to do"
+          else
+            echo "::error::npm publish failed"; exit 1
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

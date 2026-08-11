@@ -3,9 +3,18 @@ name: Go bindings
 # Validates the Go bindings on every tag of the form bindings/go/vX.Y.Z.
 # Publishing is automatic — once the tag is pushed, proxy.golang.org and
 # pkg.go.dev pick it up within minutes. No registry push step needed.
+# A plain release tag (v0.18.0) publishes every binding. Go is the odd one out:
+# a module in a subdirectory is versioned by a tag that repeats its path, so
+# `go get ...@v0.18.0` only resolves once `bindings/go/v0.18.0` exists. There is
+# no registry to push to — the tag *is* the publish. So on a release tag this
+# workflow builds, tests, and then creates that companion tag.
+#
+# `v*.*.*` and not `v*`: the repo also carries build tags like `v0.1-887d3a1`,
+# which have only one dot and must not trigger a publish.
 on:
   push:
     tags:
+      - 'v*.*.*'
       - 'bindings/go/v*'
   pull_request:
     paths:
@@ -42,6 +51,41 @@ jobs:
       - name: Vet
         working-directory: bindings/go
         run: go vet ./...
+
+  # Reached only from a plain release tag: mint the path-qualified tag the Go
+  # module proxy needs. A tag pushed with GITHUB_TOKEN does not start another
+  # workflow run, so this cannot loop back into itself.
+  tag_go_module:
+    name: Tag bindings/go for the module proxy
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Create bindings/go/<version> tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::'$GITHUB_REF_NAME' is not a release tag (want vX.Y.Z)"; exit 1 ;;
+          esac
+          GOTAG="bindings/go/v${VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${GOTAG}" >/dev/null 2>&1; then
+            echo "${GOTAG} already exists — nothing to do."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Point it at the same commit the release tag names, not at HEAD.
+          git tag "${GOTAG}" "${GITHUB_SHA}"
+          git push origin "${GOTAG}"
+          echo "Published: go get github.com/stricaud/libpcapng/bindings/go@v${VERSION}"
 
   release:
     name: Create GitHub release
