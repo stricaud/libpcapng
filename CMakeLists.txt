@@ -79,7 +79,12 @@ if (APPLE)
   set(CMAKE_MACOSX_RPATH ON)
 endif()
 
-add_definitions(-g)
+# Debug symbols. `-g` is a GCC/Clang spelling; MSVC rejects it with D9002 and
+# gets its symbols from the build type instead. add_compile_options, not
+# add_definitions — this is a flag, not a preprocessor define.
+if(NOT MSVC)
+  add_compile_options(-g)
+endif()
 
 add_subdirectory(lib)
 if(NOT WIN32)

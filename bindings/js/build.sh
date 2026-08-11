@@ -8,7 +8,7 @@
 # works from any path, including a GitHub Pages sub-directory.
 #
 # Usage:
-#   ./build.sh                       # needs emcc on PATH, or EMSDK set
+#   ./build.sh                       # needs em++ on PATH, or EMSDK set
 #   EMSDK=~/emsdk ./build.sh
 set -euo pipefail
 
@@ -17,8 +17,8 @@ ROOT="$(cd "$HERE/../.." && pwd)"        # libpcapng repository root
 LIB="$ROOT/lib"
 OUT="$HERE/dist"
 
-# Bring emcc onto PATH if it isn't already (local dev convenience).
-if ! command -v emcc >/dev/null 2>&1; then
+# Bring em++ onto PATH if it is not already (local dev convenience).
+if ! command -v em++ >/dev/null 2>&1; then
   if [ -n "${EMSDK:-}" ] && [ -f "$EMSDK/emsdk_env.sh" ]; then
     # shellcheck disable=SC1091
     source "$EMSDK/emsdk_env.sh" >/dev/null 2>&1
@@ -27,8 +27,8 @@ if ! command -v emcc >/dev/null 2>&1; then
     source "$HOME/emsdk/emsdk_env.sh" >/dev/null 2>&1
   fi
 fi
-command -v emcc >/dev/null 2>&1 || {
-  echo "error: emcc not found. Install Emscripten (https://emscripten.org) or set EMSDK." >&2
+command -v em++ >/dev/null 2>&1 || {
+  echo "error: em++ not found. Install Emscripten (https://emscripten.org) or set EMSDK." >&2
   exit 1
 }
 
@@ -52,10 +52,12 @@ SOURCES=(
 )
 for f in "$LIB"/protocols/*.c; do SOURCES+=("$f"); done
 
-echo "emcc: $(emcc --version | head -1)"
+echo "em++: $(em++ --version | head -1)"
 echo "building ${#SOURCES[@]} C sources + embind binding -> $OUT/libpcapng.mjs"
 
-emcc \
+# em++, not emcc: pcapng_wasm.cpp is C++ (embind, std::string), and linking the
+# mixed set with emcc leaves operator new/delete and std::string undefined.
+em++ \
   -O3 \
   -I"$LIB/include" \
   "${SOURCES[@]}" \

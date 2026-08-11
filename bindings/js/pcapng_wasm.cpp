@@ -420,7 +420,7 @@ std::string fmt_ipv6(const uint8_t *b) {
   return s;
 }
 
-/* Returns 1 and sets *ip_off/*v6 if an IP header is located for this linktype. */
+/* Returns 1 and sets ip_off / v6 if an IP header is located for this linktype. */
 int ip_offset(const uint8_t *f, size_t n, uint16_t linktype, size_t *ip_off,
               int *v6) {
   if (linktype == PCAPNG_LINKTYPE_ETHERNET) {

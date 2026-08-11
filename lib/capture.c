@@ -19,7 +19,12 @@
 #include <string.h>
 #include <stdint.h>
 #include <ctype.h>
-#include <regex.h>
+/* POSIX regex for the `matches` operator. MSVC has no <regex.h>, so on Windows
+   `matches` degrades to a substring test — the same trade dfilter.c makes. */
+#ifndef _WIN32
+#  include <regex.h>
+#  define PCAPNG_HAVE_REGEX 1
+#endif
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
@@ -1576,11 +1581,15 @@ static int fval_matches(const fval_t *fv, op_t op, const char *val)
     case FV_STR: {
         if (op == OP_CONTAINS) return strstr(fv->str, val) != NULL;
         if (op == OP_MATCHES) {
+#ifdef PCAPNG_HAVE_REGEX
             regex_t re;
             if (regcomp(&re, val, REG_EXTENDED | REG_NOSUB) != 0) return 0;
             int r = (regexec(&re, fv->str, 0, NULL, 0) == 0);
             regfree(&re);
             return r;
+#else
+            return strstr(fv->str, val) != NULL; /* no POSIX regex (MSVC) */
+#endif
         }
         return cmp_sign(op, (long long)strcmp(fv->str, val));
     }
