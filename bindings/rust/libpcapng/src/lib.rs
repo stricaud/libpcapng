@@ -413,7 +413,7 @@ pub fn load_posa(src: &str) -> Result<usize, Error> {
     let c_src = CString::new(src).map_err(|e| err(e.to_string()))?;
     let mut errbuf = [0i8; 256];
     let n = unsafe {
-        sys::pcapng_posa_load_text(c_src.as_ptr(), errbuf.as_mut_ptr(), 256)
+        sys::pcapng_posa_load_text(c_src.as_ptr(), errbuf.as_mut_ptr() as *mut _, 256)
     };
     if n < 0 {
         Err(err(cstr_to_str(&errbuf).to_owned()))
@@ -486,7 +486,7 @@ pub mod posa {
         let c_src = CString::new(src).map_err(|e| err(e.to_string()))?;
         let mut errbuf = [0i8; 256];
         let n = unsafe {
-            sys::pcapng_posa_load_text(c_src.as_ptr(), errbuf.as_mut_ptr(), 256)
+            sys::pcapng_posa_load_text(c_src.as_ptr(), errbuf.as_mut_ptr() as *mut _, 256)
         };
         if n < 0 { Err(err(cstr_to_str(&errbuf).to_owned())) } else { Ok(n) }
     }
@@ -500,7 +500,7 @@ pub mod posa {
         let c_path = CString::new(path_str).map_err(|e| err(e.to_string()))?;
         let mut errbuf = [0i8; 256];
         let n = unsafe {
-            sys::pcapng_posa_load_file(c_path.as_ptr(), errbuf.as_mut_ptr(), 256)
+            sys::pcapng_posa_load_file(c_path.as_ptr(), errbuf.as_mut_ptr() as *mut _, 256)
         };
         if n < 0 { Err(err(cstr_to_str(&errbuf).to_owned())) } else { Ok(n) }
     }
@@ -927,7 +927,7 @@ impl Capture {
     pub fn open(device: &str) -> Result<Self, Error> {
         let c_dev = CString::new(device).map_err(|e| err(e.to_string()))?;
         let mut errbuf = [0i8; sys::PCAPNG_CAPTURE_ERRBUF_SIZE as usize];
-        let ptr = unsafe { sys::pcapng_capture_open(c_dev.as_ptr(), errbuf.as_mut_ptr()) };
+        let ptr = unsafe { sys::pcapng_capture_open(c_dev.as_ptr(), errbuf.as_mut_ptr() as *mut _) };
         if ptr.is_null() {
             Err(err(cstr_to_str(&errbuf).to_owned()))
         } else {
@@ -940,7 +940,7 @@ impl Capture {
         let c_expr = CString::new(expr).map_err(|e| err(e.to_string()))?;
         let mut errbuf = [0i8; sys::PCAPNG_CAPTURE_ERRBUF_SIZE as usize];
         let ret = unsafe {
-            sys::pcapng_capture_set_filter(self.0, c_expr.as_ptr(), errbuf.as_mut_ptr())
+            sys::pcapng_capture_set_filter(self.0, c_expr.as_ptr(), errbuf.as_mut_ptr() as *mut _)
         };
         if ret < 0 { Err(err(cstr_to_str(&errbuf).to_owned())) } else { Ok(()) }
     }
@@ -992,7 +992,7 @@ impl Capture {
         let flt_ptr = c_flt.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
         let mut errbuf = [0i8; sys::PCAPNG_CAPTURE_ERRBUF_SIZE as usize];
         let ret = unsafe {
-            sys::pcapng_capture_to_file(c_dev.as_ptr(), c_out.as_ptr(), flt_ptr, count, errbuf.as_mut_ptr())
+            sys::pcapng_capture_to_file(c_dev.as_ptr(), c_out.as_ptr(), flt_ptr, count, errbuf.as_mut_ptr() as *mut _)
         };
         if ret < 0 { Err(err(cstr_to_str(&errbuf).to_owned())) } else { Ok(()) }
     }
@@ -1015,7 +1015,7 @@ impl Drop for Capture {
 /// Return the name of the first suitable non-loopback interface, or `None`.
 pub fn default_device() -> Option<String> {
     let mut errbuf = [0i8; sys::PCAPNG_CAPTURE_ERRBUF_SIZE as usize];
-    let ptr = unsafe { sys::pcapng_capture_default_device(errbuf.as_mut_ptr()) };
+    let ptr = unsafe { sys::pcapng_capture_default_device(errbuf.as_mut_ptr() as *mut _) };
     if ptr.is_null() { None }
     else { Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()) }
 }
@@ -1033,7 +1033,7 @@ pub struct Device {
 pub fn list_devices() -> Result<Vec<Device>, Error> {
     let mut count = 0i32;
     let mut errbuf = [0i8; sys::PCAPNG_CAPTURE_ERRBUF_SIZE as usize];
-    let devs = unsafe { sys::pcapng_capture_list_devices(&mut count, errbuf.as_mut_ptr()) };
+    let devs = unsafe { sys::pcapng_capture_list_devices(&mut count, errbuf.as_mut_ptr() as *mut _) };
     if devs.is_null() {
         return Err(err(cstr_to_str(&errbuf).to_owned()));
     }
