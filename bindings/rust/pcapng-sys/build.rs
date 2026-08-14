@@ -23,6 +23,7 @@ const C_SOURCES: &[&str] = &[
     "protocols/http2_stream.c",
     "protocols/tls_stream.c",
     "protocols/tcp_mss.c",
+    "community_id.c",
     "reassembly.c",
     "reassembly_tcp.c",
     "capture.c",

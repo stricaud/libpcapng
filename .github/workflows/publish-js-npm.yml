@@ -62,7 +62,22 @@ jobs:
             echo "::error::NPM_TOKEN contains non-printable characters. Re-add it."
             exit 1
           fi
-          echo "NPM_TOKEN looks well-formed."
+          echo "NPM_TOKEN is well-formed."
+
+          # Which account does it authenticate as? npm answers a PUT it is not
+          # allowed to make with 404, not 403, so that an unauthorised caller
+          # cannot use the error to discover that a package exists. That makes
+          # "not in this registry" indistinguishable from "not your package" at
+          # publish time — but whoami separates them here.
+          if ! who="$(npm whoami 2>&1)"; then
+            echo "::error::NPM_TOKEN is not accepted by the registry: $who"
+            exit 1
+          fi
+          echo "Authenticated as: $who"
+          if ! npm access list packages "$who" 2>/dev/null | grep -q 'libpcapng'; then
+            echo "::warning::$who may not have write access to @stricaud/libpcapng."
+            echo "::warning::A granular token needs Read *and write*, with @stricaud (or the package) selected."
+          fi
 
       - name: Set version from tag
         working-directory: bindings/js
