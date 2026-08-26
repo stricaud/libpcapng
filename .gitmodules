@@ -1,0 +1,4 @@
+[submodule "bin/protos"]
+	path = bin/protos
+	url = https://github.com/stricaud/network.protos.posa.git
+	branch = main

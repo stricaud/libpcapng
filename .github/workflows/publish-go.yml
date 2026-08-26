@@ -66,6 +66,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          submodules: true
 
       - name: Create bindings/go/<version> tag
         run: |
