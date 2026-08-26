@@ -10,26 +10,34 @@
 Object<main> DText
     abbrev "dtext"
     col "DTEXT"
-    str<8>  tag    = "hello" "Tag"
-    cstring name   = "carcal" "Name"
-    uint16  port   = 8080 "Port"
+    str<8>  tag "Tag" defaults("hello")
+    cstring name "Name" defaults("carcal")
+    uint16  port "Port" defaults(8080)
+
+# The spelling that predates defaults(…), kept readable so files written
+# before it are not silently stripped of their defaults.
+Object<main> DLegacy
+    abbrev "dlegacy"
+    col "DLEGACY"
+    uint16 port = 8080 "Port"
+    bytes<4> magic = "AMQP" "Protocol Magic"
 
 # A request line, the way the text protocols are written: text closed by a
 # delimiter, which the builder has to emit as well or the line runs together.
 Object<main> DReq
     abbrev "dreq"
     col "DREQ"
-    string method until " "    = "GET" "Method"
-    string uri    until " "    = "/index.html" "URI"
-    string proto  until "\r\n" = "HTTP/1.1" "Version"
+    string method until " " "Method" defaults("GET")
+    string uri    until " " "URI" defaults("/index.html")
+    string proto  until "\r\n" "Version" defaults("HTTP/1.1")
 
 # Escapes make a literal binary, and an address keeps the shape it is read in.
 Object<main> DBin
     abbrev "dbin"
     col "DBIN"
-    bytes<4> magic  = "\xfeSMB" "Magic"
-    ip4      server = 10.0.0.1 "Server"
-    mac      hwaddr = 01:80:c2:00:00:00 "Hardware"
+    bytes<4> magic "Magic" defaults("\xfeSMB")
+    ip4      server "Server" defaults(10.0.0.1)
+    mac      hwaddr "Hardware" defaults(01:80:c2:00:00:00)
 
 # Group dispatch on a literal, the AMQP/SMB shape: the member is chosen by the
 # bytes its first field defaults to, with no `starts` line involved.
@@ -38,11 +46,11 @@ Object<GROUP> DGroup
 Object<DGroup> DGroupAMQP
     abbrev "dgroup"
     col "DGROUP"
-    bytes<4> magic = "AMQP" "Protocol Magic"
-    uint8    proto_id = 0 "Protocol ID"
+    bytes<4> magic "Protocol Magic" defaults("AMQP")
+    uint8    proto_id "Protocol ID" defaults(0)
 
 Object<DGroup> DGroupSMB
     abbrev "dgroup"
     col "DGROUP"
-    bytes<4> magic = "\xfeSMB" "Protocol Magic"
-    uint8    cmd = 0 "Command"
+    bytes<4> magic "Protocol Magic" defaults("\xfeSMB")
+    uint8    cmd "Command" defaults(0)

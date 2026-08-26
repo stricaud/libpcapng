@@ -142,9 +142,9 @@ Define a protocol directly inside a script or the REPL without a separate `.posa
 
 ```
 protocol NAME
-    required TYPE fieldname = default
+    TYPE fieldname defaults(<value>)
         ENUM_NAME = value
-    required TYPE field2 = default
+    TYPE field2 defaults(<value>)
 end
 ```
 
@@ -152,12 +152,12 @@ The protocol is immediately available as `NAME(...)` and visible in `ls()`.
 
 ```
 protocol MyHdr
-    required uint8  version = 1
-    required uint8  flags = 0
+    uint8 version defaults(1)
+    uint8 flags defaults(0)
         FLAG_URGENT = 0x01
         FLAG_RETRY  = 0x02
-    required uint16 length = 0
-    required uint32 session_id = 0
+    uint16 length defaults(0)
+    uint32 session_id defaults(0)
 end
 
 hexdump(IP()/UDP(dport=9000)/MyHdr(flags=FLAG_URGENT, session_id=0xdeadbeef))
@@ -1017,10 +1017,25 @@ show up in `ls()` with their name, color, and fields without any code changes.
 
 ```
 Object<main> PROTOCOLNAME
-    required TYPE fieldname = default_value
+    TYPE fieldname "Label" defaults(<value>)
         ENUM_NAME = value
         ENUM_NAME2 = value2
-    required TYPE field2 = default_value
+    TYPE field2 "Label" defaults(<value>)
+```
+
+`defaults(…)` closes a field line and says what the field holds in a packet
+built without naming it, so `PROTOCOLNAME()` on its own produces a plausible
+packet rather than a run of zeroes. Numbers are written as they are
+(`defaults(4)`, `defaults(0x1F90)`); text and byte literals are quoted
+(`defaults("GET")`, `defaults("\xfeSMB")`, escapes `\r \n \t \0 \xNN`); an
+address is written the way it reads (`defaults(10.0.0.1)`,
+`defaults(01:80:c2:00:00:00)`). The older `field = value` spelling is still
+read, but new files should use `defaults(…)`:
+
+```
+load("http.posa")
+hexdump(HTTP())          # GET / HTTP/1.1\r\n… — every field from its default
+HTTP(method="POST")      # override the ones you care about
 ```
 
 ### Field types
@@ -1034,10 +1049,12 @@ Object<main> PROTOCOLNAME
 | `le_uint16`   | 2 bytes | **little-endian** | for Windows protocols |
 | `le_uint32`   | 4 bytes | **little-endian** | |
 | `le_uint64`   | 8 bytes | **little-endian** | |
-| `mac`         | 6 bytes | —                 | default: "00:00:00:00:00:00" |
-| `ip4`         | 4 bytes | network           | default: "0.0.0.0" |
-| `string`      | variable| —                 | null-terminated |
-| `bytes<N>`    | N bytes | —                 | fixed-width, zero-padded |
+| `mac`         | 6 bytes | —                 | `defaults(01:80:c2:00:00:00)`; else "00:00:00:00:00:00" |
+| `ip4`         | 4 bytes | network           | `defaults(10.0.0.1)`; else "0.0.0.0" |
+| `cstring`     | variable| —                 | null-terminated; `defaults("carcal")` |
+| `string x until "\r\n"` | variable | —     | text plus its delimiter; `defaults("GET")` |
+| `str<N>`      | N bytes | —                 | fixed-width text, zero-padded; `defaults("hello")` |
+| `bytes<N>`    | N bytes | —                 | fixed-width, zero-padded; `defaults("\xfeSMB")` |
 | `enum<uint8>` | 1 byte  | —                 | uint8-backed enum |
 | `enum<uint16>`| 2 bytes | big-endian        | |
 | `enum<uint32>`| 4 bytes | big-endian        | |
@@ -1046,13 +1063,13 @@ Object<main> PROTOCOLNAME
 
 ```
 Object<main> MyTLV
-    required uint8  type = 0
+    uint8 type defaults(0)
         DATA      = 1
         CONTROL   = 2
         KEEPALIVE = 3
-    required uint8  flags = 0
-    required uint16 length = 0
-    required uint32 sequence = 0
+    uint8 flags defaults(0)
+    uint16 length defaults(0)
+    uint32 sequence defaults(0)
 ```
 
 Usage:
@@ -1066,28 +1083,28 @@ hexdump(IP()/UDP(dport=9000)/MyTLV(type=CONTROL))
 
 ```
 Object<main> MyWinProto
-    required le_uint32 magic = 0xDEADBEEF
-    required le_uint16 version = 1
-    required le_uint16 flags = 0
+    le_uint32 magic defaults(0xDEADBEEF)
+    le_uint16 version defaults(1)
+    le_uint16 flags defaults(0)
         FLAG_COMPRESSED = 0x0001
         FLAG_ENCRYPTED  = 0x0002
-    required le_uint32 length = 0
-    required le_uint32 checksum = 0
-    required bytes<16> session_id
+    le_uint32 length defaults(0)
+    le_uint32 checksum defaults(0)
+    bytes<16> session_id
 ```
 
 ### Example: custom tunnel encapsulation
 
 ```
 Object<main> MyTunnel
-    required uint32 magic = 0x4D594E4C
-    required uint8  version = 1
-    required uint8  type = 0
+    uint32 magic defaults(0x4D594E4C)
+    uint8 version defaults(1)
+    uint8 type defaults(0)
         DATA    = 0
         CONTROL = 1
-    required uint16 payload_len = 0
-    required uint32 src_node = 0
-    required uint32 dst_node = 0
+    uint16 payload_len defaults(0)
+    uint32 src_node defaults(0)
+    uint32 dst_node defaults(0)
 ```
 
 Usage in a script:
@@ -1310,13 +1327,13 @@ Define the protocol in pcapsh, then paste the hex bytes directly:
 
 ```
 protocol IoTReading
-    required uint8  sensor_type = 0
+    uint8 sensor_type defaults(0)
         TEMP     = 1
         HUMIDITY = 2
         PRESSURE = 3
-    required uint16 value = 0
-    required uint8  battery_pct = 0
-    required uint32 timestamp = 0
+    uint16 value defaults(0)
+    uint8 battery_pct defaults(0)
+    uint32 timestamp defaults(0)
 end
 
 # Paste hex from Wireshark (or any capture tool) — just the payload bytes
@@ -1350,12 +1367,12 @@ Parse bytes from Wireshark, tweak a field, and write a modified packet:
 
 ```
 protocol WinHdr
-    required le_uint32 magic = 0xDEADBEEF
-    required le_uint16 version = 0
-    required le_uint16 flags = 0
+    le_uint32 magic defaults(0xDEADBEEF)
+    le_uint16 version defaults(0)
+    le_uint16 flags defaults(0)
         COMPRESSED = 1
         ENCRYPTED  = 2
-    required le_uint32 length = 0
+    le_uint32 length defaults(0)
 end
 
 # Bytes from Wireshark capture

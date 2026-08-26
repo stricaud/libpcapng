@@ -149,6 +149,9 @@ typedef enum {
     PFT_U24,           /* uint24 — 3-byte big-endian (NBSS, SMB framing) */
     PFT_LE_U16, PFT_LE_U32, PFT_LE_U64,
     PFT_BYTES, PFT_MAC, PFT_IP4, PFT_STR,
+    PFT_STR_DELIM,     /* `string x until "\r\n"` — text closed by a delimiter
+                          rather than by NUL: how the text protocols (HTTP,
+                          SIP, FTP, …) are written                            */
     PFT_PAYLOAD,
     PFT_BYTES_REF,
     PFT_QUIC_VARINT,   /* quic_varint — RFC 9000 §16, width in the top two bits */
@@ -161,7 +164,11 @@ typedef struct {
     char     fname[64];
     pftype_t ftype;
     uint64_t defnum;
-    char     defstr[256];
+    char     defstr[256];   /* `= "…"` literal default, or the dotted form of
+                               an ip4/mac default; may hold binary            */
+    size_t   ndefstr;       /* its length — 0 when the field has none         */
+    char     delim[16];     /* PFT_STR_DELIM: what closes the text            */
+    size_t   ndelim;
     size_t   nbytes;
     char     lenfield[64];
     peval_t  evals[MAX_PEVALS];
@@ -295,6 +302,7 @@ size_t      serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t m
 layer_t    *make_dynamic_layer(pdef_t *def);
 void        resolve_dynamic_enums(pdef_t *def, layer_t *l);
 const char *pftype_name(pftype_t t);
+void        pfld_default_str(const pfld_t *f, char *out, size_t sz);
 
 /* ─── pcapsh_io.c ───────────────────────────────────────────────────────────── */
 size_t   fromhex_parse(const char *s, uint8_t *out, size_t max);

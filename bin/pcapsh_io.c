@@ -477,6 +477,20 @@ void dissect_pdef_layer(pdef_t *def, const uint8_t *data, size_t len) {
                 if (off > len) off = len;
                 continue;
             }
+            case PFT_STR_DELIM: {
+                /* text up to (and including) its delimiter — the delimiter is
+                   part of the field on the wire, so step over it too */
+                size_t avail_str = len - off, sl = avail_str;
+                if (f->ndelim) {
+                    for (size_t k = 0; k + f->ndelim <= avail_str; k++)
+                        if (!memcmp(data + off + k, f->delim, f->ndelim)) { sl = k; break; }
+                }
+                int print_len = (sl > (size_t)INT_MAX) ? INT_MAX : (int)sl;
+                printf(CWHT "%s" CR "='%.*s' ", f->fname, print_len, (const char *)(data + off));
+                off += sl + (sl < avail_str ? f->ndelim : 0);
+                if (off > len) off = len;
+                continue;
+            }
             case PFT_PAYLOAD: {
                 size_t remaining = len - off;
                 int is_text = (remaining > 0);
@@ -671,8 +685,23 @@ size_t show_dns_layer(const uint8_t *d, size_t avail) {
 /* Dispatch to a sub-protocol by reading the first field value. */
 int dispatch_by_parent(const char *parent, const uint8_t *data, size_t len) {
     size_t field_width = 2;
+    /* A fixed-width literal magic (`magic = "AMQP"`) is compared as bytes — the
+       same rule the library's group dispatch applies, so both agree on the
+       member. A delimited string's default is a typical value, not a magic. */
     for (int i = 0; i < npdefs; i++) {
-        if (pdefs[i].parent[0] && !strcasecmp(pdefs[i].parent, parent) && pdefs[i].nflds > 0) {
+        pdef_t *sub = &pdefs[i];
+        pfld_t *f0;
+        if (!sub->parent[0] || strcasecmp(sub->parent, parent) != 0 || sub->nflds == 0) continue;
+        f0 = &sub->flds[0];
+        if (f0->ftype == PFT_BYTES && f0->ndefstr && f0->ndefstr <= len &&
+            !memcmp(data, f0->defstr, f0->ndefstr)) {
+            dissect_pdef_layer(sub, data, len);
+            return 1;
+        }
+    }
+    for (int i = 0; i < npdefs; i++) {
+        if (pdefs[i].parent[0] && !strcasecmp(pdefs[i].parent, parent) && pdefs[i].nflds > 0 &&
+            !(pdefs[i].flds[0].ftype == PFT_BYTES && pdefs[i].flds[0].ndefstr)) {
             switch (pdefs[i].flds[0].ftype) {
                 case PFT_U8:  field_width = 1; break;
                 case PFT_U32: field_width = 4; break;
@@ -693,6 +722,7 @@ int dispatch_by_parent(const char *parent, const uint8_t *data, size_t len) {
         pdef_t *sub = &pdefs[i];
         if (!sub->parent[0] || strcasecmp(sub->parent, parent) != 0) continue;
         if (sub->nflds == 0) continue;
+        if (sub->flds[0].ftype == PFT_BYTES && sub->flds[0].ndefstr) continue;  /* literal, above */
         if (sub->flds[0].defnum == v) {
             dissect_pdef_layer(sub, data, len);
             return 1;
@@ -717,11 +747,15 @@ size_t show_layer_by_name(const char *proto, const uint8_t *d, size_t avail) {
     if (!strcasecmp(proto,"ICMP"))                                     return show_icmp_layer(d, avail);
     if (!strcasecmp(proto,"DNS"))                                      return show_dns_layer(d, avail);
     pdef_t *def = find_pdef_by_name(proto);
-    if (def) { dissect_pdef_layer(def, d, avail); return avail; }
+    /* `Object<GROUP> NAME` declares the group itself, so a pdef by that name
+       exists but carries no fields; dispatch to a member rather than showing
+       an empty layer. */
+    if (def && def->nflds > 0) { dissect_pdef_layer(def, d, avail); return avail; }
     if (has_sub_protocols(proto)) {
         dispatch_by_parent(proto, d, avail);
         return avail;
     }
+    if (def) { dissect_pdef_layer(def, d, avail); return avail; }
     fprintf(stderr, CBRED "show: unknown protocol '%s' — use ls() to see all\n" CR, proto);
     return 0;
 }
@@ -1159,6 +1193,11 @@ void do_ls(const char *proto_arg) {
                                          snprintf(typebuf,sizeof(typebuf),"bytes[%s]",f->lenfield);
             else strncpy(typebuf, pftype_name(f->ftype), sizeof(typebuf)-1);
             printf("  " CCYN "%-12s" CR " %-12s", f->fname, typebuf);
+            /* the value the field starts out with, which is what a packet
+               built without naming this field will carry */
+            { char defbuf[72];
+              pfld_default_str(f, defbuf, sizeof defbuf);
+              printf(" %-14s", defbuf); }
             if (f->nevals > 0) {
                 printf(" [");
                 for (int k = 0; k < f->nevals; k++)
@@ -1195,9 +1234,11 @@ void do_ls(const char *proto_arg) {
             if (pdefs[i].parent[0] && !strcasecmp(pdefs[i].parent, proto_arg)) {
                 pdef_t *sub = &pdefs[i];
                 printf("  " CCYN "%-20s" CR, sub->pname);
-                if (sub->nflds > 0)
-                    printf(" (first field %s = %llu)", sub->flds[0].fname,
-                           (unsigned long long)sub->flds[0].defnum);
+                if (sub->nflds > 0) {
+                    char defbuf[72];
+                    pfld_default_str(&sub->flds[0], defbuf, sizeof defbuf);
+                    printf(" (first field %s = %s)", sub->flds[0].fname, defbuf);
+                }
                 printf("\n");
             }
         }

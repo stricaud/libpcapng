@@ -5,32 +5,32 @@
 #   show("…/TFTP_ACK", data)
 
 Object<TFTP> TFTP_RRQ
-    required uint16  opcode   = 1
+    required uint16  opcode defaults(1)
         RRQ = 1
     required cstring filename
     required cstring mode
 
 Object<TFTP> TFTP_WRQ
-    required uint16  opcode   = 2
+    required uint16  opcode defaults(2)
         WRQ = 2
     required cstring filename
     required cstring mode
 
 Object<TFTP> TFTP_DATA
-    required uint16  opcode = 3
+    required uint16  opcode defaults(3)
         DATA = 3
-    required uint16  block  = 1
+    required uint16  block defaults(1)
     required payload data
 
 Object<TFTP> TFTP_ACK
-    required uint16 opcode = 4
+    required uint16 opcode defaults(4)
         ACK = 4
-    required uint16 block  = 0
+    required uint16 block defaults(0)
 
 Object<TFTP> TFTP_ERROR
-    required uint16  opcode = 5
+    required uint16  opcode defaults(5)
         ERROR = 5
-    required uint16  code   = 0
+    required uint16  code defaults(0)
         ERR_UNDEFINED        = 0
         ERR_FILE_NOT_FOUND   = 1
         ERR_ACCESS_VIOLATION = 2

@@ -282,23 +282,24 @@ type PosaGuard struct {
 // PosaField is one declared line of a decoder: a data field, or a structural
 // marker whose Type reports which block it opens or closes.
 type PosaField struct {
-	Name     string
-	Type     PosaFieldType
-	Default  uint64 // `= N`; also the dispatch magic on a group member's first field
-	NBytes   int    // bytes<N> / str<N>
-	LenField string // bytes[len]/str[len]/utf16[len]; on repeat, the count field
-	Delim    string // `until "…"`, and the kvblock end sentinel
-	Sub      string // layer: sub-protocol name; kvblock: key/value separator
-	Enums    []PosaEnum
-	Guard    PosaGuard
-	ScopeLen int    // >= 0: index of the field bounding this scope
-	Display  string // the "Label" shown in the tree; also a label/info format
-	Mask     uint64 // `mask 0x7fff`
-	Hex      bool   // `hex`
-	Src      string // bits: the field the value is carved out of
-	Shift    int    // bits: shift
-	Width    int    // bits: width
-	UntilEnd bool   // repeat until end
+	Name       string
+	Type       PosaFieldType
+	Default    uint64 // `= N`; also the dispatch magic on a group member's first field
+	DefaultStr string // `= "GET"` / `= 0.0.0.0`; may hold binary, "" when unset
+	NBytes     int    // bytes<N> / str<N>
+	LenField   string // bytes[len]/str[len]/utf16[len]; on repeat, the count field
+	Delim      string // `until "…"`, and the kvblock end sentinel
+	Sub        string // layer: sub-protocol name; kvblock: key/value separator
+	Enums      []PosaEnum
+	Guard      PosaGuard
+	ScopeLen   int    // >= 0: index of the field bounding this scope
+	Display    string // the "Label" shown in the tree; also a label/info format
+	Mask       uint64 // `mask 0x7fff`
+	Hex        bool   // `hex`
+	Src        string // bits: the field the value is carved out of
+	Shift      int    // bits: shift
+	Width      int    // bits: width
+	UntilEnd   bool   // repeat until end
 	// CountBias adjusts a repeat's count: `repeat objects-2 as object` for a
 	// format that counts more records than it stores.
 	CountBias int
@@ -538,21 +539,23 @@ func convPosaProto(cp *C.pcapng_posa_proto_t) *PosaProto {
 
 func convPosaField(cf *C.pcapng_posa_fld_t) PosaField {
 	f := PosaField{
-		Name:      cstr(&cf.name[0]),
-		Type:      PosaFieldType(cf._type),
-		Default:   uint64(cf.defnum),
-		NBytes:    int(cf.nbytes),
-		LenField:  cstr(&cf.lenfield[0]),
-		Sub:       cstr(&cf.sub[0]),
-		ScopeLen:  int(cf.scope_len_field),
-		Display:   cstr(&cf.disp[0]),
-		Mask:      uint64(cf.mask),
-		Hex:       cf.hex != 0,
-		Src:       cstr(&cf.src[0]),
-		Shift:     int(cf.shift),
-		Width:     int(cf.width),
-		UntilEnd:  cf.until_end != 0,
-		CountBias: int(cf.count_bias),
+		Name:    cstr(&cf.name[0]),
+		Type:    PosaFieldType(cf._type),
+		Default: uint64(cf.defnum),
+		// `= "\xfeSMB"` may hold NUL, so take the recorded length.
+		DefaultStr: C.GoStringN(&cf.defstr[0], C.int(cf.ndefstr)),
+		NBytes:     int(cf.nbytes),
+		LenField:   cstr(&cf.lenfield[0]),
+		Sub:        cstr(&cf.sub[0]),
+		ScopeLen:   int(cf.scope_len_field),
+		Display:    cstr(&cf.disp[0]),
+		Mask:       uint64(cf.mask),
+		Hex:        cf.hex != 0,
+		Src:        cstr(&cf.src[0]),
+		Shift:      int(cf.shift),
+		Width:      int(cf.width),
+		UntilEnd:   cf.until_end != 0,
+		CountBias:  int(cf.count_bias),
 		Guard: PosaGuard{
 			Op:   PosaCmp(cf.guard.op),
 			LHS:  cstr(&cf.guard.lhs[0]),

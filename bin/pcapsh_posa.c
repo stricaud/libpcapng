@@ -36,6 +36,7 @@ static int lib_type_to_pft(const pcapng_posa_fld_t *lf, size_t *nbytes_out)
     case PCAPNG_POSA_IP6:    *nbytes_out = 16; return PFT_BYTES;
     case PCAPNG_POSA_UUID:   *nbytes_out = 16; return PFT_BYTES;
     case PCAPNG_POSA_CSTRING: return PFT_STR;
+    case PCAPNG_POSA_STR_DELIM: return PFT_STR_DELIM;
     case PCAPNG_POSA_PAYLOAD: return PFT_PAYLOAD;
     case PCAPNG_POSA_QUIC_VARINT: return PFT_QUIC_VARINT;
     case PCAPNG_POSA_LEB128:      return PFT_LEB128;
@@ -80,6 +81,23 @@ static void adopt_lib_proto(const pcapng_posa_proto_t *lp)
         f->ftype  = (pftype_t)pft;
         f->nbytes = nb;
         f->defnum = lf->defnum;
+        /* `defaults("…")` — the literal the field starts out holding. Copied
+           as bytes (it may contain NUL, e.g. `defaults("\xfeSMB")`), so
+           builders that need a C string still get one from the NUL added
+           here. */
+        if (lf->ndefstr > 0) {
+            size_t n = (size_t)lf->ndefstr;
+            if (n > sizeof f->defstr - 1) n = sizeof f->defstr - 1;
+            memcpy(f->defstr, lf->defstr, n);
+            f->defstr[n] = '\0';
+            f->ndefstr = n;
+        }
+        if (lf->ndelim > 0) {
+            size_t n = (size_t)lf->ndelim;
+            if (n > sizeof f->delim) n = sizeof f->delim;
+            memcpy(f->delim, lf->delim, n);
+            f->ndelim = n;
+        }
         snprintf(f->lenfield, sizeof f->lenfield, "%s", lf->lenfield);
 
         for (j = 0; j < lf->nenums && f->nevals < MAX_PEVALS; j++) {
@@ -265,7 +283,11 @@ size_t serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t max) {
                 break;
             }
             case PFT_IP4: {
-                uint32_t ip = htonl((uint32_t)v);
+                /* `= 10.0.0.1` reaches us as text, so fall back to it when the
+                   caller did not set the field itself. */
+                uint32_t ip;
+                if (!find_field(l, f->fname) && f->defstr[0]) ip = inet_addr(f->defstr);
+                else                                          ip = htonl((uint32_t)v);
                 if (off+4 <= max) { memcpy(out+off,&ip,4); off+=4; }
                 break;
             }
@@ -285,6 +307,18 @@ size_t serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t max) {
                 if (off+sl <= max) { memcpy(out+off,sv,sl); off+=sl; }
                 break;
             }
+            case PFT_STR_DELIM: {
+                /* the text, then whatever closes it — a space between an HTTP
+                   method and its URI, CRLF at the end of the request line */
+                field_t *lf = find_field(l, f->fname);
+                const char *sv = (lf && lf->s[0]) ? lf->s : f->defstr;
+                size_t sl = strlen(sv);
+                if (off+sl+f->ndelim <= max) {
+                    memcpy(out+off, sv, sl); off += sl;
+                    if (f->ndelim) { memcpy(out+off, f->delim, f->ndelim); off += f->ndelim; }
+                }
+                break;
+            }
             case PFT_BYTES: {
                 size_t nb = f->nbytes;
                 if (off+nb > max) break;
@@ -293,7 +327,11 @@ size_t serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t max) {
                     size_t cp = lf->raw_len < nb ? lf->raw_len : nb;
                     memcpy(out+off, lf->raw, cp);
                     if (cp < nb) memset(out+off+cp, 0, nb-cp);
-                } else memset(out+off, 0, nb);
+                } else {
+                    size_t cp = f->ndefstr < nb ? f->ndefstr : nb;
+                    memset(out+off, 0, nb);
+                    if (cp) memcpy(out+off, f->defstr, cp);
+                }
                 off += nb;
                 break;
             }
@@ -306,6 +344,8 @@ size_t serialize_pdef_layer(pdef_t *def, layer_t *l, uint8_t *out, size_t max) {
                 } else if (lf && lf->type==FT_STR && lf->s[0]) {
                     size_t sl = strlen(lf->s);
                     if (off+sl <= max) { memcpy(out+off, lf->s, sl); off += sl; }
+                } else if (!lf && f->ndefstr) {
+                    if (off+f->ndefstr <= max) { memcpy(out+off, f->defstr, f->ndefstr); off += f->ndefstr; }
                 }
                 break;
             }
@@ -327,16 +367,24 @@ layer_t *make_dynamic_layer(pdef_t *def) {
                 set_u64(l, f->fname, f->defnum); break;
             case PFT_IP4: set_ip4(l, f->fname, f->defstr[0]?f->defstr:"0.0.0.0"); break;
             case PFT_MAC: set_mac(l, f->fname, f->defstr[0]?f->defstr:"00:00:00:00:00:00"); break;
-            case PFT_STR: set_str(l, f->fname, f->defstr); break;
+            case PFT_STR: case PFT_STR_DELIM: set_str(l, f->fname, f->defstr); break;
             case PFT_BYTES:
+                /* A fixed-width field starts as its literal default, padded
+                   with zeroes to the field's width (`bytes<4> magic =
+                   "\xfeSMB"`); zeroes throughout when it has no default. */
                 if (f->nbytes) {
                     uint8_t *z = calloc(1, f->nbytes);
-                    if (z) { set_bytes(l, f->fname, z, f->nbytes); free(z); }
+                    if (z) {
+                        if (f->ndefstr)
+                            memcpy(z, f->defstr, f->ndefstr < f->nbytes ? f->ndefstr : f->nbytes);
+                        set_bytes(l, f->fname, z, f->nbytes);
+                        free(z);
+                    }
                 }
                 break;
             case PFT_PAYLOAD:
             case PFT_BYTES_REF:
-                set_bytes(l, f->fname, (const uint8_t*)"", 0);
+                set_bytes(l, f->fname, (const uint8_t*)f->defstr, f->ndefstr);
                 break;
         }
     }
@@ -361,6 +409,34 @@ void resolve_dynamic_enums(pdef_t *def, layer_t *l) {
     }
 }
 
+/* Render a field's default the way it is written in .posa — a quoted literal
+   for `= "GET"` (escaping what is not printable), the dotted text for an
+   ip4/mac, a number otherwise. Used by ls(). */
+void pfld_default_str(const pfld_t *f, char *out, size_t sz) {
+    if (!sz) return;
+    out[0] = '\0';
+    if (f->ndefstr) {
+        size_t o = 0;
+        int quote = (f->ftype != PFT_IP4 && f->ftype != PFT_MAC);
+        if (quote && o + 1 < sz) out[o++] = '"';
+        for (size_t i = 0; i < f->ndefstr && o + 5 < sz; i++) {
+            unsigned char c = (unsigned char)f->defstr[i];
+            if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') out[o++] = (char)c;
+            else o += (size_t)snprintf(out + o, sz - o, "\\x%02x", c);
+        }
+        if (quote && o + 1 < sz) out[o++] = '"';
+        out[o] = '\0';
+        return;
+    }
+    switch (f->ftype) {
+        case PFT_IP4:  snprintf(out, sz, "0.0.0.0"); break;
+        case PFT_MAC:  snprintf(out, sz, "00:00:00:00:00:00"); break;
+        case PFT_STR: case PFT_STR_DELIM:
+        case PFT_BYTES: case PFT_PAYLOAD: case PFT_BYTES_REF: break;
+        default:       snprintf(out, sz, "%llu", (unsigned long long)f->defnum); break;
+    }
+}
+
 const char *pftype_name(pftype_t t) {
     switch(t) {
         case PFT_U8:        return "uint8";
@@ -374,6 +450,7 @@ const char *pftype_name(pftype_t t) {
         case PFT_MAC:       return "mac";
         case PFT_IP4:       return "ip4";
         case PFT_STR:       return "cstring";
+        case PFT_STR_DELIM: return "string";
         case PFT_PAYLOAD:   return "payload";
         case PFT_BYTES_REF: return "bytes[N]";
         default:            return "?";
@@ -384,83 +461,83 @@ const char *pftype_name(pftype_t t) {
 
 const char BUILTIN_POSA[] =
 "Object<main> ARP\n"
-"    required uint16 htype = 1\n"
+"    uint16 htype defaults(1)\n"
 "        ETHERNET = 1\n"
-"    required uint16 ptype = 0x0800\n"
+"    uint16 ptype defaults(0x0800)\n"
 "        IPV4 = 0x0800\n"
-"    required uint8  hlen = 6\n"
-"    required uint8  plen = 4\n"
-"    required uint16 op = 1\n"
+"    uint8 hlen defaults(6)\n"
+"    uint8 plen defaults(4)\n"
+"    uint16 op defaults(1)\n"
 "        REQUEST = 1\n"
 "        REPLY = 2\n"
-"    required mac sha = 00:00:00:00:00:00\n"
-"    required ip4 spa = 0.0.0.0\n"
-"    required mac tha = 00:00:00:00:00:00\n"
-"    required ip4 tpa = 0.0.0.0\n"
+"    mac sha defaults(00:00:00:00:00:00)\n"
+"    ip4 spa defaults(0.0.0.0)\n"
+"    mac tha defaults(00:00:00:00:00:00)\n"
+"    ip4 tpa defaults(0.0.0.0)\n"
 "\n"
 "Object<main> NTP\n"
-"    required uint8 li_vn_mode = 0x1b\n"
+"    uint8 li_vn_mode defaults(0x1b)\n"
 "        CLIENT = 0x1b\n"
 "        SERVER = 0x1c\n"
-"    required uint8  stratum = 0\n"
-"    required uint8  poll = 4\n"
-"    required uint8  precision = 0xfa\n"
-"    required uint32 root_delay = 0\n"
-"    required uint32 root_dispersion = 0\n"
-"    required uint32 ref_id = 0\n"
-"    required uint32 ref_ts_s = 0\n"
-"    required uint32 ref_ts_f = 0\n"
-"    required uint32 orig_ts_s = 0\n"
-"    required uint32 orig_ts_f = 0\n"
-"    required uint32 recv_ts_s = 0\n"
-"    required uint32 recv_ts_f = 0\n"
-"    required uint32 tx_ts_s = 0\n"
-"    required uint32 tx_ts_f = 0\n"
+"    uint8 stratum defaults(0)\n"
+"    uint8 poll defaults(4)\n"
+"    uint8 precision defaults(0xfa)\n"
+"    uint32 root_delay defaults(0)\n"
+"    uint32 root_dispersion defaults(0)\n"
+"    uint32 ref_id defaults(0)\n"
+"    uint32 ref_ts_s defaults(0)\n"
+"    uint32 ref_ts_f defaults(0)\n"
+"    uint32 orig_ts_s defaults(0)\n"
+"    uint32 orig_ts_f defaults(0)\n"
+"    uint32 recv_ts_s defaults(0)\n"
+"    uint32 recv_ts_f defaults(0)\n"
+"    uint32 tx_ts_s defaults(0)\n"
+"    uint32 tx_ts_f defaults(0)\n"
 "\n"
 "Object<main> DHCP\n"
-"    required uint8  op = 1\n"
+"    uint8 op defaults(1)\n"
 "        BOOTREQUEST = 1\n"
 "        BOOTREPLY = 2\n"
-"    required uint8  htype = 1\n"
-"    required uint8  hlen = 6\n"
-"    required uint8  hops = 0\n"
-"    required uint32 xid = 0\n"
-"    required uint16 secs = 0\n"
-"    required uint16 flags = 0\n"
-"    required ip4    ciaddr = 0.0.0.0\n"
-"    required ip4    yiaddr = 0.0.0.0\n"
-"    required ip4    siaddr = 0.0.0.0\n"
-"    required ip4    giaddr = 0.0.0.0\n"
-"    required bytes<16> chaddr\n"
-"    required bytes<64> sname\n"
-"    required bytes<128> file\n"
+"    uint8 htype defaults(1)\n"
+"    uint8 hlen defaults(6)\n"
+"    uint8 hops defaults(0)\n"
+"    uint32 xid defaults(0)\n"
+"    uint16 secs defaults(0)\n"
+"    uint16 flags defaults(0)\n"
+"    ip4 ciaddr defaults(0.0.0.0)\n"
+"    ip4 yiaddr defaults(0.0.0.0)\n"
+"    ip4 siaddr defaults(0.0.0.0)\n"
+"    ip4 giaddr defaults(0.0.0.0)\n"
+"    bytes<16> chaddr\n"
+"    bytes<64> sname\n"
+"    bytes<128> file\n"
 "\n"
 "Object<main> GRE\n"
-"    required uint16 flags_ver = 0\n"
-"    required uint16 proto = 0x0800\n"
+"    uint16 flags_ver defaults(0)\n"
+"    uint16 proto defaults(0x0800)\n"
 "        IPV4 = 0x0800\n"
 "        IPV6 = 0x86DD\n"
 "        MPLS = 0x8847\n"
 "\n"
 "Object<main> VXLAN\n"
-"    required uint8  flags = 0x08\n"
-"    required bytes<3> reserved1\n"
-"    required bytes<3> vni\n"
-"    required uint8  reserved2 = 0\n"
+"    uint8 flags defaults(0x08)\n"
+"    bytes<3> reserved1\n"
+"    bytes<3> vni\n"
+"    uint8 reserved2 defaults(0)\n"
 "\n"
 "Object<main> RADIUS\n"
-"    required uint8  code = 1\n"
+"    uint8 code defaults(1)\n"
 "        ACCESS_REQUEST = 1\n"
 "        ACCESS_ACCEPT = 2\n"
 "        ACCESS_REJECT = 3\n"
 "        ACCOUNTING_REQUEST = 4\n"
 "        ACCOUNTING_RESPONSE = 5\n"
-"    required uint8  identifier = 0\n"
-"    required uint16 length = 20\n"
-"    required bytes<16> authenticator\n"
+"    uint8 identifier defaults(0)\n"
+"    uint16 length defaults(20)\n"
+"    bytes<16> authenticator\n"
 "\n"
 "Object<main> SYSLOG\n"
-"    required uint8  severity = 6\n"
+"    uint8 severity defaults(6)\n"
 "        EMERGENCY = 0\n"
 "        ALERT = 1\n"
 "        CRITICAL = 2\n"
@@ -469,26 +546,26 @@ const char BUILTIN_POSA[] =
 "        NOTICE = 5\n"
 "        INFO = 6\n"
 "        DEBUG = 7\n"
-"    required uint8  facility = 1\n"
-"    required string message\n"
+"    uint8 facility defaults(1)\n"
+"    string message\n"
 "\n"
 "Object<main> NBT\n"
-"    required uint8  type = 0\n"
+"    uint8 type defaults(0)\n"
 "        SESSION_MESSAGE = 0\n"
 "        SESSION_REQUEST = 0x81\n"
 "        POSITIVE_SESSION_RESPONSE = 0x82\n"
 "        NEGATIVE_SESSION_RESPONSE = 0x83\n"
 "        RETARGET_SESSION_RESPONSE = 0x84\n"
 "        SESSION_KEEPALIVE = 0x85\n"
-"    required uint8  flags = 0\n"
-"    required uint16 length = 0\n"
+"    uint8 flags defaults(0)\n"
+"    uint16 length defaults(0)\n"
 "\n"
 "Object<main> SMB2\n"
-"    required uint32    magic = 0xFE534D42\n"
-"    required le_uint16 structure_size = 64\n"
-"    required le_uint16 credit_charge = 0\n"
-"    required le_uint32 status = 0\n"
-"    required le_uint16 command = 0\n"
+"    uint32 magic defaults(0xFE534D42)\n"
+"    le_uint16 structure_size defaults(64)\n"
+"    le_uint16 credit_charge defaults(0)\n"
+"    le_uint32 status defaults(0)\n"
+"    le_uint16 command defaults(0)\n"
 "        NEGOTIATE = 0\n"
 "        SESSION_SETUP = 1\n"
 "        LOGOFF = 2\n"
@@ -505,19 +582,19 @@ const char BUILTIN_POSA[] =
 "        QUERY_DIRECTORY = 14\n"
 "        QUERY_INFO = 16\n"
 "        SET_INFO = 17\n"
-"    required le_uint16 credit_request = 0\n"
-"    required le_uint32 flags = 0\n"
-"    required le_uint32 next_command = 0\n"
-"    required le_uint64 message_id = 0\n"
-"    required le_uint32 process_id = 0\n"
-"    required le_uint32 tree_id = 0\n"
-"    required le_uint64 session_id = 0\n"
-"    required bytes<16> signature\n"
+"    le_uint16 credit_request defaults(0)\n"
+"    le_uint32 flags defaults(0)\n"
+"    le_uint32 next_command defaults(0)\n"
+"    le_uint64 message_id defaults(0)\n"
+"    le_uint32 process_id defaults(0)\n"
+"    le_uint32 tree_id defaults(0)\n"
+"    le_uint64 session_id defaults(0)\n"
+"    bytes<16> signature\n"
 "\n"
 "Object<main> DCERPC\n"
-"    required uint8     ver_major = 5\n"
-"    required uint8     ver_minor = 0\n"
-"    required uint8     type = 0\n"
+"    uint8 ver_major defaults(5)\n"
+"    uint8 ver_minor defaults(0)\n"
+"    uint8 type defaults(0)\n"
 "        REQUEST = 0\n"
 "        RESPONSE = 2\n"
 "        FAULT = 3\n"
@@ -527,19 +604,19 @@ const char BUILTIN_POSA[] =
 "        ALTER_CONTEXT = 14\n"
 "        ALTER_CONTEXT_RESP = 15\n"
 "        AUTH3 = 16\n"
-"    required uint8     flags = 0x03\n"
-"    required le_uint32 data_rep = 0x10000000\n"
-"    required le_uint16 frag_len = 0\n"
-"    required le_uint16 auth_len = 0\n"
-"    required le_uint32 call_id = 1\n"
+"    uint8 flags defaults(0x03)\n"
+"    le_uint32 data_rep defaults(0x10000000)\n"
+"    le_uint16 frag_len defaults(0)\n"
+"    le_uint16 auth_len defaults(0)\n"
+"    le_uint32 call_id defaults(1)\n"
 "\n"
 "Object<main> LDAP\n"
-"    required uint8  seq_tag = 0x30\n"
-"    required uint8  seq_len = 0\n"
-"    required uint8  msgid_tag = 0x02\n"
-"    required uint8  msgid_len = 0x01\n"
-"    required uint8  message_id = 1\n"
-"    required uint8  op_tag = 0x60\n"
+"    uint8 seq_tag defaults(0x30)\n"
+"    uint8 seq_len defaults(0)\n"
+"    uint8 msgid_tag defaults(0x02)\n"
+"    uint8 msgid_len defaults(0x01)\n"
+"    uint8 message_id defaults(1)\n"
+"    uint8 op_tag defaults(0x60)\n"
 "        BIND_REQUEST = 0x60\n"
 "        BIND_RESPONSE = 0x61\n"
 "        UNBIND_REQUEST = 0x42\n"
@@ -552,7 +629,7 @@ const char BUILTIN_POSA[] =
 "        ADD_RESPONSE = 0x69\n"
 "        DEL_REQUEST = 0x4A\n"
 "        DEL_RESPONSE = 0x6B\n"
-"    required uint8  op_len = 0\n"
+"    uint8 op_len defaults(0)\n"
 "\n";
 
 /* Default content written to ~/.pcapsh_protos.posa on first run. */

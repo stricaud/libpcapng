@@ -20,10 +20,10 @@ Object<main> TFTP_RRQ
     abbrev "tftp"
     col "TFTP"
 
-    required uint16  opcode = 1 "Opcode"
+    uint16  opcode "Opcode" defaults(1)
         RRQ = 1
-    required cstring filename "Filename"
-    required cstring mode "Mode"
+    cstring filename "Filename"
+    cstring mode "Mode"
 
     info "Read request: %s" filename
 
@@ -41,7 +41,7 @@ rule udp.port == 69 => TFTP_RRQ
 Field lines are:
 
 ```
-[type] <name> [until "<delim>"] [mask N] [hex] [= default] ["Label"]
+[type] <name> [until "<delim>"] [mask N] [hex] ["Label"] [defaults(<value>)]
 ```
 
 `"Label"` is the display text in the tree (`Opcode: RRQ (1)`); without it the
@@ -142,18 +142,36 @@ Modifiers:
   and used by `when`. mDNS packs a flag into the top bit of the DNS class; the
   class is `class mask 0x7fff` and the flag is a `bits` field (§5).
 * `hex` — show the number as `0x…` rather than decimal.
-* `= N` — a default. On the **first** field of a group member it is also the
-  magic used to dispatch (§7). It is *not* a constraint: `priority = 100` in
-  hsrp.posa is a sensible starting value, not grounds to reject a packet.
+* `defaults(N)` — the value the field starts out with, written **last** on the
+  line, after the label. On the **first** field of a group member it is also
+  the magic used to dispatch (§7). It is *not* a constraint: `priority
+  defaults(100)` in hsrp.posa is a sensible starting value, not grounds to
+  reject a packet.
+* `defaults("text")` — the same thing for a field that is not a number. A
+  string field starts out holding that text (`method … defaults("GET")`), a
+  fixed-width field holds those bytes zero-padded to its width
+  (`magic … defaults("\xfeSMB")`), and the escapes `\r \n \t \0 \xNN` are
+  understood, so a literal may be binary. An `ip4` or `mac` default is written
+  the way the address is (`defaults(0.0.0.0)`,
+  `defaults(01:80:c2:00:00:00)`); quoting it means the same.
+  Defaults are what a *builder* starts from — `pcapsh`'s `HTTP_REQUEST()`
+  emits `GET / HTTP/1.1` because that is what the fields default to — and, on
+  a group member's first field, a fixed-width literal dispatches the same way
+  a numeric magic does.
 * `matches N` — a constraint. If the wire value differs, the whole dissection is
   abandoned and the caller falls through to the next candidate decoder. This is
   what makes a `weak rule` safe (§9).
 
 ```posa
-required le_uint32 flags hex "Flags"
-required uint16 qclass mask 0x7fff "Class"
-required utf16[name_length] filename "Filename"
+le_uint32 flags hex "Flags" defaults(0)
+uint16 qclass mask 0x7fff "Class" defaults(1)
+bytes<4> magic "Protocol Magic" defaults("AMQP")
+string method until " " "Method" defaults("GET")
+utf16[name_length] filename "Filename"
 ```
+
+`field = <value>` is the older spelling of a default and is still read, so
+files written before `defaults(…)` keep working; new ones should not use it.
 
 ---
 
@@ -558,15 +576,16 @@ Object<main> NBSS
 ```
 
 **`Object<GROUP> NAME`** makes the object a member of a group. Dissecting the
-group name picks the member whose **first field's value** equals its `= default`
-— the magic. `Object<GROUP> NAME default` marks the member to use when nothing
-matched:
+group name picks the member whose **first field's value** equals its
+`defaults(…)` — the magic, numeric (`defaults(0xFE534D42)`) or a fixed-width
+literal (`defaults("AMQP")`, compared as bytes). `Object<GROUP> NAME default`
+marks the member to use when nothing matched:
 
 ```posa
 Object<SMB> SMB2
-    required uint32 protocol_id = 0xFE534D42 hex "Protocol ID"
+    uint32 protocol_id hex "Protocol ID" defaults(0xFE534D42)
 Object<SMB> SMB1
-    required uint32 protocol_id = 0xFF534D42 hex "Protocol ID"
+    uint32 protocol_id hex "Protocol ID" defaults(0xFF534D42)
 ```
 
 An HTTP response starts with the magic `HTTP`; a request starts with a method, so
@@ -877,7 +896,7 @@ Object<main> MyRPC
     abbrev "myrpc"
     col "MyRPC"
 
-    required uint32 magic = 0xDEADBEEF hex "Magic"
+    uint32 magic hex "Magic" defaults(0xDEADBEEF)
     required uint8  version "Version"
     required uint8  msg_type "Message Type"
         Request  = 1

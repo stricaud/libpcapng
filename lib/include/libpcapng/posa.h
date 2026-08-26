@@ -115,6 +115,7 @@ typedef enum {
 #define PCAPNG_POSA_MAX_FLDS   512   /* SMB2 dispatches ~20 commands in one object */
 #define PCAPNG_POSA_MAX_ENUMS  32
 #define PCAPNG_POSA_DELIM_MAX  16
+#define PCAPNG_POSA_DEFSTR_MAX 64   /* `= "…"` literal default (see defstr) */
 #define PCAPNG_POSA_LABEL_MAX  96
 #define PCAPNG_POSA_MAX_LARGS   6
 #define PCAPNG_POSA_EXPR_MAX  128
@@ -162,6 +163,15 @@ typedef struct {
   char                name[PCAPNG_POSA_NAME_MAX];
   pcapng_posa_ftype_t type;
   uint64_t            defnum;
+  /* `= "…"` — the default for a field that is not a number: the text a string
+     field starts with (`method = "GET"`), the bytes of a fixed magic
+     (`magic = "\xfeSMB"`), or the dotted/colon form of an ip4 or mac. Escapes
+     (\r \n \t \0 \xNN) are unescaped here, so the value may hold binary and
+     NUL — ndefstr is its length, 0 when the field has no literal default.
+     Like `= N` it is a starting value for building a packet, never a
+     constraint on what may be decoded. */
+  char                defstr[PCAPNG_POSA_DEFSTR_MAX];
+  int                 ndefstr;
   size_t              nbytes;                       /* BYTES_FIXED             */
   char                lenfield[PCAPNG_POSA_NAME_MAX];/* BYTES_REF/STR_REF, and
                                                         REPEAT: the count field */

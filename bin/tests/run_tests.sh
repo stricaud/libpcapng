@@ -398,6 +398,50 @@ check_v "enum value-first"           'show("VEnumValueFirst", fromhex("04"))'   
 check_v "lookup on numeric field"    'show("VEnumLookup",     fromhex("04"))'          'a=SETTINGS'
 check_v "lookup on varint field"     'show("VVarintLookup",   fromhex("04"))'          'a=SETTINGS'
 
+# ── `= "text"` defaults ──────────────────────────────────────────────────────
+echo ""
+echo "-- literal defaults --"
+
+DP=bin/tests/defstr_protos.posa
+
+check_d() {
+    local desc="$1"; local expr="$2"; local expected="$3"
+    local out
+    out=$("$PCAPSH" -p "$DP" -e "$expr" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+    if echo "$out" | grep -q "$expected"; then
+        ok "$desc"
+    else
+        fail "$desc — expected '$expected', got: $out"
+    fi
+}
+
+# str<N> pads its literal to the field width; cstring adds its terminator.
+check_d "str<N> literal padded"      'hexdump(DText())'  '68 65 6C 6C 6F 00 00 00'
+check_d "cstring literal terminated" 'hexdump(DText())'  '63 61 72 63 61 6C 00'
+check_d "number beside literals"     'show("DText", fromhex("68656c6c6f00000063617263616c001f90"))' 'port=8080'
+
+# A delimited string emits its delimiter too, so the request line reads as one.
+check_d "delimited literals build a request line" 'hexdump(DReq())' 'GET /index.html'
+check_d "delimiter emitted after text"            'hexdump(DReq())' '48 54 54 50 2F 31 2E 31  0D 0A'
+check_d "literal default is overridable"          'hexdump(DReq(method="POST"))' '50 4F 53 54 20'
+
+# \xNN in a literal, and addresses written the way they read.
+check_d "binary escape in literal" 'hexdump(DBin())' 'FE 53 4D 42'
+check_d "ip4 literal default"      'hexdump(DBin())' '0A 00 00 01'
+check_d "mac literal default"      'hexdump(DBin())' '01 80 C2 00 00 00'
+
+# The label must survive a quoted default — the quoted string before it is the
+# default, not the display text.
+check_d "label read past quoted default" 'ls("DBin")' 'magic'
+
+# The older `field = value` spelling still carries its default.
+check_d "legacy numeric default"  'hexdump(DLegacy())' '1F 90'
+check_d "legacy literal default"  'hexdump(DLegacy())' '41 4D 51 50'
+
+# Group dispatch picks the member whose first field's literal matches.
+check_d "group dispatches on literal magic"   'show("DGroup", fromhex("414d515000"))'   'DGroupAMQP'
+check_d "group literal magic is exact"        'show("DGroup", fromhex("fe534d4200"))'   'DGroupSMB'
+
 # ── cstring / bytes[N] / payload security ────────────────────────────────────
 echo ""
 echo "-- cstring / bytes[N] / payload security --"

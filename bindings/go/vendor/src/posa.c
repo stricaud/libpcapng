@@ -667,14 +667,18 @@ static int hexdig(int ch)
   return -1;
 }
 
-/* Unescape a quoted delimiter/signature ("\r\n", "\x16\x03", …) into raw bytes.
-   Supports \r \n \t \0 and \xNN (a byte in hex) — the latter lets content
-   signatures name binary magic like a TLS record header. */
-static void parse_delim(const char *tok, char *out, int *nout)
+/* Unescape a quoted literal ("\r\n", "\x16\x03", "GET", …) into raw bytes,
+   writing at most `max`. Supports \r \n \t \0 and \xNN (a byte in hex) — the
+   latter lets content signatures and defaults name binary magic like a TLS
+   record header. Returns the first character after the closing quote, so a
+   caller that has to keep reading the line (the label follows a `= "…"`
+   default) knows where the literal ended. */
+static const char *parse_lit(const char *tok, char *out, int max, int *nout)
 {
   int n = 0; const char *p = tok;
   if (*p == '"') p++;
-  while (*p && *p != '"' && n < PCAPNG_POSA_DELIM_MAX) {
+  while (*p && *p != '"') {
+    if (n >= max) { p++; continue; }        /* keep scanning for the quote */
     if (*p == '\\' && p[1]) {
       p++;
       if (*p == 'x' && hexdig((unsigned char)p[1]) >= 0 && hexdig((unsigned char)p[2]) >= 0) {
@@ -689,6 +693,45 @@ static void parse_delim(const char *tok, char *out, int *nout)
     } else out[n++] = *p++;
   }
   *nout = n;
+  return *p == '"' ? p + 1 : p;
+}
+
+/* The `= ` that introduces a field's default in the older spelling: a
+   standalone token outside any quoted string, so a delimiter or label that
+   itself contains '=' (`until "="`, "Type = 5") is not mistaken for one.
+   NULL when the line has no default. */
+static const char *default_at(const char *raw)
+{
+  int inq = 0; const char *p;
+  for (p = raw; *p; p++) {
+    if (inq && *p == '\\' && p[1]) { p++; continue; }
+    if (*p == '"') { inq = !inq; continue; }
+    if (!inq && *p == '=' && p != raw && (p[-1] == ' ' || p[-1] == '\t') &&
+        (p[1] == ' ' || p[1] == '\t')) return p;
+  }
+  return NULL;
+}
+
+/* `defaults(<value>)` — the current spelling, and always the last thing on a
+   field line. Returns where the keyword starts (so the caller can cut it off
+   the line before anything else reads it), or NULL. Only matches outside a
+   quoted string, so a label or delimiter containing the word is left alone. */
+static char *defaults_at(char *raw)
+{
+  int inq = 0; char *p;
+  for (p = raw; *p; p++) {
+    if (inq && *p == '\\' && p[1]) { p++; continue; }
+    if (*p == '"') { inq = !inq; continue; }
+    if (!inq && *p == 'd' && !strncmp(p, "defaults(", 9) &&
+        (p == raw || p[-1] == ' ' || p[-1] == '\t')) return p;
+  }
+  return NULL;
+}
+
+/* A delimiter or signature is a quoted literal capped at DELIM_MAX. */
+static void parse_delim(const char *tok, char *out, int *nout)
+{
+  parse_lit(tok, out, PCAPNG_POSA_DELIM_MAX, nout);
 }
 
 /* Copy the first "..." of a line into out. Returns 1 if there was one. */
@@ -772,6 +815,9 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
 
   while (*line) {
     char buf[1024], raw[1024], *toks[32], *hash, *tl;
+    char dflt[PCAPNG_POSA_DEFSTR_MAX];     /* `defaults(…)` on this line */
+    int have_dflt, dflt_n;
+    uint64_t dflt_num;
     const char *eol = strchr(line, '\n');
     size_t llen = eol ? (size_t)(eol - line) : strlen(line);
     int nt, indent, ti, structural;
@@ -786,6 +832,32 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     tl = buf + indent;
     if (!*tl) continue;
     snprintf(raw, sizeof raw, "%s", tl);   /* tokenize() chops buf in place */
+
+    /* `defaults(<value>)` closes a field line. Read it — and cut it off the
+       line — before anything else looks at the text, so a literal holding
+       spaces cannot be torn apart by tokenize() and the label scan can go on
+       taking the last quoted string it sees. */
+    have_dflt = 0; dflt_num = 0; dflt_n = 0; dflt[0] = '\0';
+    { char *d = defaults_at(tl);
+      if (d) {
+        const char *v = d + 9;
+        while (*v == ' ' || *v == '\t') v++;
+        have_dflt = 1;
+        if (*v == '"') {
+          parse_lit(v, dflt, PCAPNG_POSA_DEFSTR_MAX, &dflt_n);
+        } else {
+          int n = (int)strcspn(v, " \t)");
+          if (!all_digits(v, n) && (int)strcspn(v, ".:") < n) {   /* 0.0.0.0, 01:80:… */
+            int c = n > PCAPNG_POSA_DEFSTR_MAX - 1 ? PCAPNG_POSA_DEFSTR_MAX - 1 : n;
+            memcpy(dflt, v, (size_t)c); dflt[c] = '\0'; dflt_n = c;
+          }
+          dflt_num = parse_num(v);
+        }
+        { size_t cut = (size_t)(d - tl);
+          while (cut > 0 && (tl[cut - 1] == ' ' || tl[cut - 1] == '\t')) cut--;
+          tl[cut] = '\0'; raw[cut] = '\0'; }
+        if (!*tl) continue;                /* nothing but a default: not a line */
+      } }
 
     /* rule <condition> => Proto  (parsed from raw text, before tokenizing)
        `weak rule …` is the same thing, asked last — see parse_rule(). */
@@ -1256,6 +1328,8 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
 
     if (ti < nt && (is_type_tok(toks[ti]) || !strcmp(toks[ti], "string"))) {
       pcapng_posa_fld_t *f = add_fld(cur, PCAPNG_POSA_U8);
+      const char *def_end = NULL;   /* end of a quoted `= "…"`, so the label
+                                       scan below does not read the default */
       if (!f) continue;
       /* `eval(...)` was an earlier spelling of what `let` now does. Left alone
          it would parse as a plain field of the stated width and quietly decode
@@ -1294,8 +1368,32 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
         f->type = PCAPNG_POSA_STR_DELIM;
         if (q) parse_delim(q, f->delim, &f->ndelim);
       }
-      { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "=") && k + 1 < nt) {
-          f->defnum = parse_num(toks[k + 1]); break; } }
+      /* `defaults(<value>)`, already read off the end of the line. */
+      if (have_dflt) {
+        f->defnum = dflt_num;
+        if (dflt_n > 0) { memcpy(f->defstr, dflt, (size_t)dflt_n); f->ndefstr = dflt_n; }
+      }
+      /* `= <default>` — the older spelling, still read so files written before
+         `defaults(…)` keep working. A quoted literal comes from the raw line,
+         because tokenize() splits `= "BitTorrent protocol"` in half, and it is
+         kept as bytes so `= "\xfeSMB"` works as well as `= "GET"`. A dotted or
+         colon-separated value keeps its text too — that is how an ip4 or mac
+         default is written (`= 0.0.0.0`, `= 01:80:c2:00:00:00`). Anything else
+         is a number. */
+      else { const char *d = default_at(raw);
+        if (d) {
+          const char *v = d + 1;
+          while (*v == ' ' || *v == '\t') v++;
+          if (*v == '"') {
+            def_end = parse_lit(v, f->defstr, PCAPNG_POSA_DEFSTR_MAX, &f->ndefstr);
+          } else if (!all_digits(v, (int)strcspn(v, " \t")) &&
+                     strcspn(v, ".:") < strcspn(v, " \t")) {
+            int n = (int)strcspn(v, " \t");
+            if (n > PCAPNG_POSA_DEFSTR_MAX - 1) n = PCAPNG_POSA_DEFSTR_MAX - 1;
+            memcpy(f->defstr, v, (size_t)n); f->defstr[n] = '\0'; f->ndefstr = n;
+            f->defnum = parse_num(v);
+          } else f->defnum = parse_num(v);
+        } }
       { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "mask") && k + 1 < nt) {
           f->mask = parse_num(toks[k + 1]); break; } }
       { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "matches") && k + 1 < nt) {
@@ -1303,8 +1401,9 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
       { int k; for (k = ti + 1; k < nt; k++) if (!strcmp(toks[k], "hex")) { f->hex = 1; break; } }
       { int k; for (k = ti + 2; k < nt; k++) if (!strcmp(toks[k], "lookup") && k + 1 < nt) {
           snprintf(f->lookup_name, sizeof f->lookup_name, "%s", toks[k + 1]); break; } }
-      /* the label is the quoted string — but on a `string … until "\r\n"` line the
-         first quoted string is the delimiter, so the label is the one after it */
+      /* the label is the quoted string — but a `string … until "\r\n"` line
+         opens with the delimiter and a `= "GET"` default is quoted too, so the
+         label is whichever quoted string comes after both */
       { const char *q = raw;
         if (f->type == PCAPNG_POSA_STR_DELIM) {
           const char *u = strstr(raw, "until");
@@ -1312,6 +1411,7 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
           const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
           q = q2 ? q2 + 1 : raw + strlen(raw);
         }
+        if (def_end && def_end > q) q = def_end;
         quoted(q, f->disp, sizeof f->disp); }
       lastfld = f;
       continue;
@@ -2326,10 +2426,27 @@ static const pcapng_posa_proto_t *resolve_group(const char *name, const uint8_t 
       if (p->prefix_len[k] <= len && memcmp(data, p->prefixes[k], p->prefix_len[k]) == 0)
         return p;
   }
+  /* A literal magic — `bytes<4> magic = "\xfeSMB"`, `str<4> magic = "RTPS"`.
+     Only a *fixed-width* field counts: a delimited or NUL-terminated string's
+     default is a typical value (`method = "GET"`), not something a packet has
+     to start with, and dispatching on it would claim packets that merely begin
+     with the same letters. */
+  for (i = 0; i < g_nprotos; i++) {
+    const pcapng_posa_proto_t *p = g_protos[i];
+    const pcapng_posa_fld_t *f0;
+    if (!p || strcmp(p->parent, name) != 0 || p->nflds == 0) continue;
+    f0 = &p->flds[0];
+    if (f0->ndefstr > 0 && f0->ndefstr <= len &&
+        (f0->type == PCAPNG_POSA_BYTES_FIXED || f0->type == PCAPNG_POSA_STR_FIXED) &&
+        memcmp(data, f0->defstr, (size_t)f0->ndefstr) == 0) return p;
+  }
   for (i = 0; i < g_nprotos; i++) {          /* first field's numeric magic */
     const pcapng_posa_proto_t *p = g_protos[i]; int sz;
     if (!p) continue;
     if (strcmp(p->parent, name) != 0 || p->nflds == 0) continue;
+    if (p->flds[0].ndefstr > 0 &&            /* it has a literal one, above */
+        (p->flds[0].type == PCAPNG_POSA_BYTES_FIXED ||
+         p->flds[0].type == PCAPNG_POSA_STR_FIXED)) continue;
     sz = fld_fixed_size(&p->flds[0]);
     if (sz <= 0 || sz > len) continue;
     { uint64_t v = (p->flds[0].type == PCAPNG_POSA_LE16 || p->flds[0].type == PCAPNG_POSA_LE32 ||
@@ -2343,13 +2460,24 @@ static const pcapng_posa_proto_t *resolve_group(const char *name, const uint8_t 
   return (pcapng_posa_proto_t *)fallback;
 }
 
+/* The decoder a name stands for, given the bytes about to be decoded. Normally
+   that is the object of that name — but a group is usually declared with an
+   `Object<GROUP> NAME` line of its own, which registers a *fieldless* object
+   under the group's name. Dissecting that would produce an empty subtree and
+   consume nothing, so a name that carries no fields but does have members
+   dispatches to a member instead. */
+static const pcapng_posa_proto_t *resolve_named(const char *name, const uint8_t *data, int len)
+{
+  const pcapng_posa_proto_t *p = pcapng_posa_find(name), *m;
+  if (p && p->nflds > 0) return p;
+  m = resolve_group(name, data, len);
+  return m ? m : p;
+}
+
 const pcapng_posa_proto_t *pcapng_posa_resolve(const char *name, const uint8_t *data, int len)
 {
-  const pcapng_posa_proto_t *p;
   if (!name) return NULL;
-  p = pcapng_posa_find(name);
-  if (p) return p;
-  return resolve_group(name, data, len);
+  return resolve_named(name, data, len);
 }
 
 /* The Protocol-column name of the innermost decoder that ran: NetBIOS frames
@@ -2362,11 +2490,12 @@ void pcapng_posa_reset_col(void) { g_last_col[0] = '\0'; }
 int pcapng_posa_dissect(const char *proto_name, const uint8_t *data, int len,
                         pcapng_field_t *parent, int abs_off, char *info, size_t infolen)
 {
-  const pcapng_posa_proto_t *p = pcapng_posa_find(proto_name);
+  const pcapng_posa_proto_t *p;
   pcapng_field_t *node; int used;
   g_nwarn = 0;                       /* warnings describe this dissect only */
   if (!proto_name || !data || len <= 0) return 0;
-  if (!p) { p = resolve_group(proto_name, data, len); if (!p) return 0; }
+  p = resolve_named(proto_name, data, len);
+  if (!p) return 0;
   node = pf_add(parent, p->abbrev[0] ? p->abbrev : p->name, PCAPNG_FT_NONE);
   pf_label(node, "%s", p->name);
   if (p->display[0]) snprintf(g_last_col, sizeof g_last_col, "%s", p->display);
@@ -2401,9 +2530,27 @@ int pcapng_posa_to_text(const pcapng_posa_proto_t *p, char *out, size_t sz)
     else if (f->type == PCAPNG_POSA_UUID)      snprintf(type, sizeof type, "uuid");
     else if (f->type == PCAPNG_POSA_LET)      snprintf(type, sizeof type, "uint64");
     else snprintf(type, sizeof type, "%s", (f->type >= 0 && f->type <= PCAPNG_POSA_PAYLOAD) ? TN[f->type] : "uint8");
-    o += (size_t)snprintf(out + o, sz - o, "    required %s %s", type, f->name);
-    if (f->nenums > 0 || f->type <= PCAPNG_POSA_U64)
-      o += (size_t)snprintf(out + o, sz - o, " = %llu", (unsigned long long)f->defnum);
+    o += (size_t)snprintf(out + o, sz - o, "    %s %s", type, f->name);
+    if (f->disp[0]) o += (size_t)snprintf(out + o, sz - o, " \"%s\"", f->disp);
+    /* the default closes the line: `defaults("AMQP")`, `defaults(5)` */
+    if (f->ndefstr > 0) {
+      int k;
+      int addr = (f->type == PCAPNG_POSA_IP4 || f->type == PCAPNG_POSA_IP6 ||
+                  f->type == PCAPNG_POSA_MAC);
+      o += (size_t)snprintf(out + o, sz - o, addr ? " defaults(" : " defaults(\"");
+      for (k = 0; k < f->ndefstr && o < sz; k++) {
+        unsigned char c = (unsigned char)f->defstr[k];
+        if (addr)                             o += (size_t)snprintf(out + o, sz - o, "%c", c);
+        else if (c == '"' || c == '\\')       o += (size_t)snprintf(out + o, sz - o, "\\%c", c);
+        else if (c == '\r')                   o += (size_t)snprintf(out + o, sz - o, "\\r");
+        else if (c == '\n')                   o += (size_t)snprintf(out + o, sz - o, "\\n");
+        else if (c == '\t')                   o += (size_t)snprintf(out + o, sz - o, "\\t");
+        else if (c < 0x20 || c >= 0x7f)       o += (size_t)snprintf(out + o, sz - o, "\\x%02x", c);
+        else                                  o += (size_t)snprintf(out + o, sz - o, "%c", c);
+      }
+      o += (size_t)snprintf(out + o, sz - o, addr ? ")" : "\")");
+    } else if (f->nenums > 0 || f->type <= PCAPNG_POSA_U64)
+      o += (size_t)snprintf(out + o, sz - o, " defaults(%llu)", (unsigned long long)f->defnum);
     o += (size_t)snprintf(out + o, sz - o, "\n");
     for (j = 0; j < f->nenums && o < sz; j++)
       o += (size_t)snprintf(out + o, sz - o, "        %s = %llu\n", f->enums[j].name, (unsigned long long)f->enums[j].val);
