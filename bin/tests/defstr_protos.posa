@@ -1,0 +1,48 @@
+# defstr_protos.posa — coverage for `= "text"` defaults, used by run_tests.sh.
+#
+# A default is what a field holds in a packet built without naming it. For the
+# numeric types that has always been `= N`; these objects cover the rest — the
+# text a string field starts with, the bytes of a fixed magic, and the dotted
+# form of an address — plus the two things that are easy to get wrong when a
+# default is quoted: the label must still be read as the label, and a literal
+# on a group member's first field must dispatch like a numeric magic.
+
+Object<main> DText
+    abbrev "dtext"
+    col "DTEXT"
+    str<8>  tag    = "hello" "Tag"
+    cstring name   = "carcal" "Name"
+    uint16  port   = 8080 "Port"
+
+# A request line, the way the text protocols are written: text closed by a
+# delimiter, which the builder has to emit as well or the line runs together.
+Object<main> DReq
+    abbrev "dreq"
+    col "DREQ"
+    string method until " "    = "GET" "Method"
+    string uri    until " "    = "/index.html" "URI"
+    string proto  until "\r\n" = "HTTP/1.1" "Version"
+
+# Escapes make a literal binary, and an address keeps the shape it is read in.
+Object<main> DBin
+    abbrev "dbin"
+    col "DBIN"
+    bytes<4> magic  = "\xfeSMB" "Magic"
+    ip4      server = 10.0.0.1 "Server"
+    mac      hwaddr = 01:80:c2:00:00:00 "Hardware"
+
+# Group dispatch on a literal, the AMQP/SMB shape: the member is chosen by the
+# bytes its first field defaults to, with no `starts` line involved.
+Object<GROUP> DGroup
+
+Object<DGroup> DGroupAMQP
+    abbrev "dgroup"
+    col "DGROUP"
+    bytes<4> magic = "AMQP" "Protocol Magic"
+    uint8    proto_id = 0 "Protocol ID"
+
+Object<DGroup> DGroupSMB
+    abbrev "dgroup"
+    col "DGROUP"
+    bytes<4> magic = "\xfeSMB" "Protocol Magic"
+    uint8    cmd = 0 "Command"
