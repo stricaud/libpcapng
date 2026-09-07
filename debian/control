@@ -1,0 +1,33 @@
+Source: libpcapng
+Section: libs
+Priority: optional
+Maintainer: Seb Tricaud <sebastien.tricaud@proton.me>
+Build-Depends: debhelper-compat (= 13), cmake (>= 3.20), ninja-build
+Standards-Version: 4.6.2
+Homepage: https://github.com/stricaud/libpcapng
+Rules-Requires-Root: no
+
+Package: libpcapng1
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: pcapng file format library
+ libpcapng is a C library for reading and writing pcapng capture files.
+ It supports pcapng block types (SHB, IDB, EPB, SPB, custom blocks),
+ protocol dissection, IP/TCP reassembly, and live packet capture.
+
+Package: libpcapng-dev
+Architecture: any
+Multi-Arch: same
+Section: libdevel
+Depends: libpcapng1 (= ${binary:Version}), ${misc:Depends}
+Description: pcapng library — development files
+ Headers, static library, and pkg-config file for building against libpcapng.
+
+Package: pcapsh
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: interactive pcapng shell and packet crafter
+ pcapsh is a scripting shell for generating and replaying pcapng traffic.
+ It ships with .posa protocol definition files for common network protocols
+ and supports live capture, dissection, and pcapng file generation.

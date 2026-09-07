@@ -21,4 +21,4 @@ intersphinx_mapping = {"python": ("https://docs.python.org/3", None)}
 html_theme = "furo"
 html_static_path = ["_static"]
 autodoc_member_order = "bysource"
-autodoc_mock_imports = ["pycapng"]
+autodoc_mock_imports = ["pycapng", "libpcapng"]

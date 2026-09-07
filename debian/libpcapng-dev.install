@@ -1,0 +1,4 @@
+usr/include/libpcapng/
+usr/lib/*/libpcapng.a
+usr/lib/*/libpcapng.so
+usr/lib/*/pkgconfig/libpcapng.pc

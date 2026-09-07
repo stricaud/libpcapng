@@ -1,0 +1,5 @@
+libpcapng (0.1-1) unstable; urgency=medium
+
+  * Initial Debian packaging.
+
+ -- Seb Tricaud <sebastien.tricaud@proton.me>  Sun, 07 Sep 2026 00:00:00 +0000
