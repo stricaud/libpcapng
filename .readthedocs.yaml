@@ -4,12 +4,6 @@ build:
   os: ubuntu-24.04
   tools:
     python: "3.12"
-  jobs:
-    pre_build:
-      # Build the C extension so autodoc can import pycapng.
-      - apt-get install -y libpcap-dev
-      - cmake -B build -DCMAKE_BUILD_TYPE=Release
-      - cmake --build build --target pcapsh_pymod
 
 sphinx:
   configuration: doc/python/conf.py
