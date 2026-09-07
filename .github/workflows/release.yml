@@ -46,7 +46,10 @@ jobs:
           fetch-depth: 0        # setuptools-scm needs full history + tags
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.23.3
+        # cibuildwheel builds CPython 3.14 by default from v3.1.0 onward; the
+        # 2.x series predates 3.14 entirely, which is why no cp314 wheel has
+        # ever been published.
+        uses: pypa/cibuildwheel@v4.2.1
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
         # All other config lives in [tool.cibuildwheel] in pyproject.toml.
