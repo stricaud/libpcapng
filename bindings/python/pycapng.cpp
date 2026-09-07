@@ -116,6 +116,21 @@ int PcapNG::OpenFileLinkType(const char *pathname, const char *mode, uint16_t li
   return -1;
 }
 
+int PcapNG::OpenFileLinkTypeComment(const char *pathname, const char *mode, uint16_t linktype, const std::string &comment)
+{
+  if (!strcmp(mode, "w")) {
+    _fp = fopen(pathname, "wb");
+    if (!_fp) {
+      fprintf(stderr, "Could not open file '%s' for writing!\n", pathname);
+      return -1;
+    }
+    libpcapng_write_header_with_comment_to_file(_fp, linktype, comment.c_str());
+    return 0;
+  }
+  fprintf(stderr, "OpenFileLinkTypeComment only supports mode 'w'.\n");
+  return -1;
+}
+
 int PcapNG::CloseFile(void)
 {
   fflush(_fp);
@@ -1126,6 +1141,7 @@ PYBIND11_MODULE(pycapng, m) {
       .def(py::init<>())
       .def("OpenFile", &PcapNG::OpenFile)
       .def("OpenFileLinkType", &PcapNG::OpenFileLinkType)
+      .def("OpenFileLinkTypeComment", &PcapNG::OpenFileLinkTypeComment)
       .def("CloseFile", &PcapNG::CloseFile)
       .def("WriteCustom", &PcapNG::WriteCustom)
       .def("WritePacket", &PcapNG::WritePacket)

@@ -1,6 +1,42 @@
 API Reference
 =============
 
+pcapng Writer (``pycapng.PcapNG``)
+-----------------------------------
+
+.. module:: pycapng
+
+``PcapNG`` writes pcapng files directly from Python, without running a
+pcapsh script.  Use it when you already have raw frame bytes and want
+fine-grained control over link types, timestamps, and block-level comments.
+
+Key methods:
+
+``OpenFileLinkTypeComment(path, mode, linktype, comment)``
+    Open *path* for writing (``mode="w"``).  Writes a Section Header Block
+    carrying *comment* as ``opt_comment`` (visible in Wireshark's
+    *Edit → Capture File Properties*), followed by an Interface Description
+    Block for *linktype*.  Pass ``""`` for no comment.
+
+``OpenFileLinkType(path, mode, linktype)``
+    Same as above without an SHB comment.
+
+``WritePacket(data, comment)``
+    Append an Enhanced Packet Block.  *comment* is stored as the EPB
+    ``opt_comment`` (visible in Wireshark's packet detail pane).  Pass
+    ``""`` for no comment.
+
+``WritePacketTime(data, timestamp)``
+    Append an EPB with an explicit Unix timestamp (seconds, ``uint32``).
+    Use this when replaying recorded captures with original timing.
+
+``CloseFile()``
+    Flush and close the output file.
+
+Linktype constants (e.g. ``pycapng.LINKTYPE_ETHERNET``,
+``pycapng.LINKTYPE_CAN_SOCKETCAN``) match the IANA registry values used
+by Wireshark and tcpdump.
+
 .. module:: libpcapng.pcapsh
 
 Script Engine

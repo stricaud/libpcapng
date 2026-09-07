@@ -86,6 +86,40 @@ The string supports the full pcapsh syntax: backslash line continuation,
 ``for`` loops, ``protocol`` blocks, and all built-in helpers
 (``TLS_CLIENT_HELLO``, ``SSH_KEXINIT``, ``fromhex``, …).
 
+Custom protocol definitions
+---------------------------
+
+Define a protocol layout once as a ``protocol`` block and build frames
+with named fields — no raw ``struct.pack``::
+
+    from pycapng import pcapsh
+
+    sh = pcapsh.PcapSH()
+    frames = sh.run_string("""
+    protocol MyProto
+        required le_uint32 magic   = 0xDEADBEEF
+        required uint8     version = 1
+        required uint8     flags   = 0
+            COMPRESSED = 1
+            ENCRYPTED  = 2
+        required uint16    length  = 0
+    end
+
+    wrpcap("x", MyProto(version=2, flags=ENCRYPTED, length=256))
+    wrpcap("x", MyProto(flags=COMPRESSED, length=64))
+    """)
+
+Supported field types: ``uint8``, ``uint16``, ``uint32``, ``uint64``,
+``le_uint16``, ``le_uint32``, ``le_uint64``, ``bytes<N>``, ``ip4``,
+``ip6``, ``mac``.  Enum values declared under a field become named
+constants usable in the argument list.
+
+Defined protocols compose with built-in layers::
+
+    wrpcap("x", IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=9000)/MyProto(flags=COMPRESSED))
+
+See :doc:`examples` for a complete walkthrough using ``SocketCAN`` frames.
+
 Writing a pcapng file
 ---------------------
 
@@ -123,7 +157,17 @@ Or use the ``pycapng`` binding if installed::
     import pycapng
 
     ng = pycapng.PcapNG()
-    ng.OpenFile("out.pcapng", "w")
+    # OpenFileLinkTypeComment sets the SHB opt_comment (visible in
+    # Wireshark's Edit → Capture File Properties).  Pass "" for no comment.
+    ng.OpenFileLinkTypeComment("out.pcapng", "w",
+                               pycapng.LINKTYPE_ETHERNET,
+                               "My capture session")
     for frame in packets:
+        # Second argument is an optional per-packet comment (EPB opt_comment).
         ng.WritePacket(frame, "")
     ng.CloseFile()
+
+To write packets with explicit Unix timestamps (seconds)::
+
+    import time
+    ng.WritePacketTime(frame, int(time.time()))

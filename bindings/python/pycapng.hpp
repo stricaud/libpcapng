@@ -21,6 +21,7 @@ public:
   ~PcapNG(void);
   int OpenFile(const char *pathname, const char *mode);
   int OpenFileLinkType(const char *pathname, const char *mode, uint16_t linktype);
+  int OpenFileLinkTypeComment(const char *pathname, const char *mode, uint16_t linktype, const std::string &comment);
   int CloseFile(void);
   int WritePacket(py::bytes data, const std::string &comment);
   int WriteTcpPacket(const std::string &src_mac, const std::string &dst_mac,
