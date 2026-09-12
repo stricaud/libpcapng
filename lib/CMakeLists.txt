@@ -67,7 +67,17 @@ set(LIBPCAPNG_SOURCES
   posa.c
   community_id.c
   wire_layout.c
+  tls_keylog.c
  )
+
+# Optional OpenSSL for TLS decryption
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND OR OPENSSL_FOUND)
+  message(STATUS "OpenSSL found — TLS keylog decryption enabled")
+  add_compile_definitions(HAVE_OPENSSL)
+else()
+  message(STATUS "OpenSSL not found — TLS keylog decryption disabled (keylog parsing still works)")
+endif()
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})
 set_target_properties(pcapng PROPERTIES SOVERSION 1)
@@ -80,6 +90,11 @@ set(CMAKE_INSTALL_RPATH "@rpath")
 
 add_library(pcapng_static STATIC ${LIBPCAPNG_SOURCES})
 set_target_properties(pcapng_static PROPERTIES SOVERSION 1 POSITION_INDEPENDENT_CODE ON)
+
+if(OpenSSL_FOUND OR OPENSSL_FOUND)
+  target_link_libraries(pcapng PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+  target_link_libraries(pcapng_static PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
 
 if(WIN32)
   # ntohs/inet_ntop & friends live in ws2_32 (see win_compat.h). Exporting all

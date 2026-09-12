@@ -2,6 +2,7 @@
  * Included as part of the pcapsh unity build (see pcapsh.c). */
 #include "pcapsh.h"
 #include <libpcapng/protocols/ssl.h>
+#include <libpcapng/tls_keylog.h>
 
 extern int g_tls_used;
 
@@ -360,6 +361,8 @@ void usage(const char *prog) {
         "  -e EXPR                 evaluate EXPR and exit\n"
         "  -o, --output FILE       redirect all wrpcap() output to FILE\n"
         "  -s                      print TLS session keys after run (for Wireshark)\n"
+        "  -k, --keylog FILE       load NSS TLS keylog file for live decryption\n"
+        "                          (also reads $SSLKEYLOGFILE if set)\n"
         "  -h, --help              show this help\n"
         "\n"
         "Script files (.pcapsh) are executed non-interactively.\n"
@@ -368,6 +371,10 @@ void usage(const char *prog) {
 }
 
 void pcapsh_init(void) {
+    /* Auto-load TLS keylog if the environment variable is set */
+    { const char *kl = getenv("SSLKEYLOGFILE");
+      if (kl && *kl) pcapng_tls_keylog_load_file(kl); }
+
     proto_register(PROTO_ETHER, "Ether", CBYEL);
     proto_register(PROTO_IP,    "IP",    CBCYN);
     proto_register(PROTO_TCP,   "TCP",   CBGRN);
@@ -437,6 +444,12 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i],"-s")) {
             g_session_keys = 1;
+            continue;
+        }
+        if ((!strcmp(argv[i],"-k")||!strcmp(argv[i],"--keylog")) && i+1 < argc) {
+            int n = pcapng_tls_keylog_load_file(argv[++i]);
+            if (n < 0) { fprintf(stderr, "Warning: cannot open keylog %s\n", argv[i]); }
+            else fprintf(stderr, "Loaded %d TLS keylog entries from %s\n", n, argv[i]);
             continue;
         }
         if ((!strcmp(argv[i],"-o")||!strcmp(argv[i],"--output")) && i+1 < argc) {
