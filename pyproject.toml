@@ -111,5 +111,11 @@ manylinux-x86_64-image  = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.macos]
-# arm64 minimum is macOS 11.0 (first Apple Silicon release).
+# x86_64 minimum is macOS 11.0 (first version with arm64 ABI parity).
 environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
+
+[[tool.cibuildwheel.overrides]]
+# Homebrew OpenSSL on Apple Silicon requires macOS 14.0+.  Any arm64 wheel
+# that bundles OpenSSL dylibs must match or exceed that minimum.
+select = "*-macosx_arm64"
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
