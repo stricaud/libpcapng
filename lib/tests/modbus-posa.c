@@ -4,11 +4,13 @@
  * survives a pcapng write/read roundtrip.
  *
  * Default values from modbus_tcp.posa:
- *   transaction_id  = 0   (uint16, 2 bytes)
+ *   transaction_id  = 1   (uint16, 2 bytes)
  *   protocol_id     = 0   (uint16, 2 bytes)
- *   length          = 2   (uint16, 2 bytes)  — covers unit_id + function_code
+ *   length          = 6   (uint16, 2 bytes)  — covers unit_id + the PDU
  *   unit_id         = 1   (uint8,  1 byte)
  *   function_code   = 3   (uint8,  1 byte)   — READ_HOLDING_REGISTERS
+ *   start_address   = 0   (uint16, 2 bytes)  — fc 3 request body
+ *   quantity        = 1   (uint16, 2 bytes)
  *
  * Build via cmake (Modbus-Posa ctest target).
  */
@@ -40,22 +42,47 @@ static int g_pass = 0, g_fail = 0;
 /* ── Modbus TCP default bytes ─────────────────────────────────────────────── */
 
 /*
- * MBAP header (6 bytes) + unit_id (1) + function_code (1) = 8 bytes total.
- * All fields at their posa-defined default values, big-endian on the wire.
+ * A complete READ_HOLDING_REGISTERS request: MBAP header (7 bytes, the last of
+ * which is unit_id) followed by the PDU. All fields at their posa-defined
+ * default values, big-endian on the wire.
  *
  * Offset  Length  Field            Default
- * 0       2       transaction_id   0x0000
+ * 0       2       transaction_id   0x0001
  * 2       2       protocol_id      0x0000
- * 4       2       length           0x0002  (2 bytes follow: unit_id + fc)
+ * 4       2       length           0x0006  (unit_id + the 5-byte PDU)
  * 6       1       unit_id          0x01
  * 7       1       function_code    0x03    (READ_HOLDING_REGISTERS)
+ * 8       2       start_address    0x0000
+ * 10      2       quantity         0x0001
+ *
+ * The body matters: `length` counts unit_id plus the PDU, and every Modbus
+ * function code carries a body of its own. A frame that stops after the
+ * function code is a truncated PDU, and a dissector is right to call it
+ * malformed — which is what this file used to write.
  */
-static const uint8_t MODBUS_DEFAULTS[8] = {
-    0x00, 0x00,   /* transaction_id = 0 */
+static const uint8_t MODBUS_DEFAULTS[12] = {
+    0x00, 0x01,   /* transaction_id = 1 */
     0x00, 0x00,   /* protocol_id    = 0 */
-    0x00, 0x02,   /* length         = 2 */
+    0x00, 0x06,   /* length         = 6 */
     0x01,         /* unit_id        = 1 */
     0x03,         /* function_code  = 3 READ_HOLDING_REGISTERS */
+    0x00, 0x00,   /* start_address  = 0 */
+    0x00, 0x01,   /* quantity       = 1 register */
+};
+
+/*
+ * The matching response: same transaction and unit, function code echoed, then
+ * a byte count and that many register bytes. length = 5 covers unit_id,
+ * function_code, byte_count and the two data bytes.
+ */
+static const uint8_t MODBUS_RESPONSE[11] = {
+    0x00, 0x01,   /* transaction_id = 1 */
+    0x00, 0x00,   /* protocol_id    = 0 */
+    0x00, 0x05,   /* length         = 5 */
+    0x01,         /* unit_id        = 1 */
+    0x03,         /* function_code  = 3 READ_HOLDING_REGISTERS */
+    0x02,         /* byte_count     = 2 (one register) */
+    0x12, 0x34,   /* register[0]    = 0x1234 */
 };
 
 /* ── helpers ──────────────────────────────────────────────────────────────── */
@@ -91,7 +118,9 @@ static size_t wrap_tcp(uint8_t *out,
 
     /* Ethernet */
     memset(p, 0x00, 6); p += 6;
-    memset(p, 0x11, 6); p += 6;
+    /* 0x02 = locally administered, unicast. 0x11 sets the IG bit, which makes
+       it a group address and is invalid as a source MAC. */
+    memset(p, 0x02, 6); p += 6;
     p[0] = 0x08; p[1] = 0x00; p += 2;
 
     /* IPv4 */
@@ -158,14 +187,18 @@ static void test_posa_decode(const char *posa_path)
                                    MODBUS_DEFAULTS, (int)sizeof MODBUS_DEFAULTS,
                                    root, 0, info, sizeof info);
 
-    CHECK("dissect consumed all 8 bytes", used == 8);
+    CHECK("dissect consumed all 12 bytes", used == 12);
 
     /* Numeric field values */
-    CHECK("transaction_id = 0", field_uint(root, "ModbusTCP.transaction_id") == 0);
+    CHECK("transaction_id = 1", field_uint(root, "ModbusTCP.transaction_id") == 1);
     CHECK("protocol_id = 0",    field_uint(root, "ModbusTCP.protocol_id")    == 0);
-    CHECK("length = 2",         field_uint(root, "ModbusTCP.length")         == 2);
+    CHECK("length = 6",         field_uint(root, "ModbusTCP.length")         == 6);
     CHECK("unit_id = 1",        field_uint(root, "ModbusTCP.unit_id")        == 1);
     CHECK("function_code = 3",  field_uint(root, "ModbusTCP.function_code")  == 3);
+
+    /* fc 3 request body — a 4-byte PDU body is decoded as a request */
+    CHECK("start_address = 0",  field_uint(root, "ModbusTCP.start_address")  == 0);
+    CHECK("quantity = 1",       field_uint(root, "ModbusTCP.quantity")       == 1);
 
     /* function_code 3 must resolve to the enum name */
     CHECK("function_code label is READ_HOLDING_REGISTERS",
@@ -201,19 +234,49 @@ static void test_posa_variants(const char *posa_path)
     };
 
     for (int i = 0; i < (int)(sizeof cases / sizeof cases[0]); i++) {
-        uint8_t pkt[8];
+        uint8_t pkt[sizeof MODBUS_DEFAULTS];
         memcpy(pkt, MODBUS_DEFAULTS, sizeof pkt);
         pkt[7] = cases[i].fc;
 
         pcapng_field_t *root = calloc(1, sizeof *root);
         char info[256] = "";
-        pcapng_posa_dissect("ModbusTCP", pkt, 8, root, 0, info, sizeof info);
+        pcapng_posa_dissect("ModbusTCP", pkt, (int)sizeof pkt, root, 0, info, sizeof info);
 
         char label[64];
         snprintf(label, sizeof label, "fc=0x%02x → %s", cases[i].fc, cases[i].name);
         CHECK(label, label_has(root, "ModbusTCP.function_code", cases[i].name));
         pcapng_field_free(root);
     }
+}
+
+/* The response body has a different shape from the request, and posa has no
+   view of the TCP ports that tell a dissector which is which — the arms are
+   selected on the PDU body size instead. Check the response side decodes. */
+static void test_posa_response(const char *posa_path)
+{
+    SUITE("posa decode — read holding registers response");
+
+    char errbuf[256] = "";
+    pcapng_posa_clear();
+    if (pcapng_posa_load_file(posa_path, errbuf, sizeof errbuf) < 0) {
+        printf("  SKIP  cannot load posa file\n");
+        return;
+    }
+
+    pcapng_field_t *root = calloc(1, sizeof *root);
+    char info[256] = "";
+    int used = pcapng_posa_dissect("ModbusTCP",
+                                   MODBUS_RESPONSE, (int)sizeof MODBUS_RESPONSE,
+                                   root, 0, info, sizeof info);
+
+    CHECK("response consumed 11 bytes", used == 11);
+    CHECK("length = 5",        field_uint(root, "ModbusTCP.length")        == 5);
+    CHECK("function_code = 3", field_uint(root, "ModbusTCP.function_code") == 3);
+    CHECK("byte_count = 2",    field_uint(root, "ModbusTCP.byte_count")    == 2);
+    CHECK("register[0] = 0x1234",
+          field_uint(root, "ModbusTCP.value") == 0x1234);
+
+    pcapng_field_free(root);
 }
 
 static void test_pcapng_roundtrip(void)
@@ -229,15 +292,16 @@ static void test_pcapng_roundtrip(void)
     uint8_t  frame[512];
     uint32_t src = (10 << 24) | 1;      /* 10.0.0.1 */
     uint32_t dst = (10 << 24) | 2;      /* 10.0.0.2 */
+
+    /* Client to server: READ_HOLDING_REGISTERS request, one register. */
     size_t   flen = wrap_tcp(frame, MODBUS_DEFAULTS, sizeof MODBUS_DEFAULTS,
                              src, dst, 12345, 502);
     libpcapng_write_enhanced_packet_to_file(f, frame, flen);
 
-    /* Write a second packet: Modbus response with fc=0x03 echoed */
-    uint8_t resp[8];
-    memcpy(resp, MODBUS_DEFAULTS, sizeof resp);
-    resp[7] = 0x03;   /* response echoes the same function code */
-    flen = wrap_tcp(frame, resp, sizeof resp, dst, src, 502, 12345);
+    /* Server to client: the matching response carrying that register. Both
+       PDUs are complete, so the capture reads clean in any Modbus dissector. */
+    flen = wrap_tcp(frame, MODBUS_RESPONSE, sizeof MODBUS_RESPONSE,
+                    dst, src, 502, 12345);
     libpcapng_write_enhanced_packet_to_file(f, frame, flen);
 
     fclose(f);
@@ -259,18 +323,27 @@ static void test_error_response(const char *posa_path)
         return;
     }
 
-    /* Error for READ_HOLDING_REGISTERS: fc = 3 | 0x80 = 0x83 */
-    uint8_t pkt[8];
-    memcpy(pkt, MODBUS_DEFAULTS, sizeof pkt);
-    pkt[7] = 0x83;
+    /* Error for READ_HOLDING_REGISTERS: fc = 3 | 0x80 = 0x83, followed by a
+       single exception code. length = 3 covers unit_id + fc + exception. */
+    static const uint8_t pkt[9] = {
+        0x00, 0x01,   /* transaction_id = 1 */
+        0x00, 0x00,   /* protocol_id    = 0 */
+        0x00, 0x03,   /* length         = 3 */
+        0x01,         /* unit_id        = 1 */
+        0x83,         /* function_code  = 3 | 0x80 */
+        0x02,         /* exception_code = ILLEGAL_DATA_ADDRESS */
+    };
 
     pcapng_field_t *root = calloc(1, sizeof *root);
     char info[256] = "";
-    int used = pcapng_posa_dissect("ModbusTCP", pkt, 8, root, 0, info, sizeof info);
+    int used = pcapng_posa_dissect("ModbusTCP", pkt, (int)sizeof pkt, root, 0, info, sizeof info);
 
-    CHECK("error response consumed 8 bytes", used == 8);
+    CHECK("error response consumed 9 bytes", used == 9);
     /* function_code 0x83 has no enum entry, so the raw value is shown */
     CHECK("error fc = 0x83", field_uint(root, "ModbusTCP.function_code") == 0x83);
+    CHECK("exception_code = 2", field_uint(root, "ModbusTCP.exception_code") == 2);
+    CHECK("exception_code label is ILLEGAL_DATA_ADDRESS",
+          label_has(root, "ModbusTCP.exception_code", "ILLEGAL_DATA_ADDRESS"));
 
     pcapng_field_free(root);
 }
@@ -304,6 +377,7 @@ int main(int argc, char **argv)
 
     test_posa_decode(posa_path);
     test_posa_variants(posa_path);
+    test_posa_response(posa_path);
     test_pcapng_roundtrip();
     test_error_response(posa_path);
 
