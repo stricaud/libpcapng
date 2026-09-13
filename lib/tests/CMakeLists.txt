@@ -67,3 +67,31 @@ add_executable(posa posa.c)
 target_link_libraries(posa ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(Posa posa)
 set_tests_properties(Filter PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+
+add_executable(surgery-roundtrip surgery-roundtrip.c)
+target_link_libraries(surgery-roundtrip ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Surgery-Roundtrip surgery-roundtrip)
+set_tests_properties(Surgery-Roundtrip PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+
+add_executable(tls-keylog tls-keylog.c)
+target_link_libraries(tls-keylog ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(TLS-Keylog tls-keylog)
+set_tests_properties(TLS-Keylog PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+
+# Resolve the modbus_tcp.posa path: prefer the submodule, fall back to installed protos.
+if(EXISTS "${CMAKE_SOURCE_DIR}/bin/protos/modbus_tcp.posa")
+    set(MODBUS_POSA_PATH "${CMAKE_SOURCE_DIR}/bin/protos/modbus_tcp.posa")
+elseif(DEFINED PCAPSH_PROTOS_INSTALL_DIR AND EXISTS "${PCAPSH_PROTOS_INSTALL_DIR}/modbus_tcp.posa")
+    set(MODBUS_POSA_PATH "${PCAPSH_PROTOS_INSTALL_DIR}/modbus_tcp.posa")
+else()
+    set(MODBUS_POSA_PATH "")
+endif()
+
+add_executable(modbus-posa modbus-posa.c)
+target_link_libraries(modbus-posa ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+if(MODBUS_POSA_PATH)
+    target_compile_definitions(modbus-posa PRIVATE
+        MODBUS_POSA_PATH="${MODBUS_POSA_PATH}")
+endif()
+add_test(Modbus-Posa modbus-posa)
+set_tests_properties(Modbus-Posa PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")

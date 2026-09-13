@@ -30,10 +30,9 @@ static int hex_val(char c)
 static int hex_decode(const char *hex, uint8_t *out, int max)
 {
     int n = 0;
-    while (hex[0] && hex[1]) {
+    while (n < max && hex[0] && hex[1]) {
         int hi = hex_val(hex[0]), lo = hex_val(hex[1]);
-        if (hi < 0 || lo < 0) return -1;
-        if (n >= max) return -1;
+        if (hi < 0 || lo < 0) break;
         out[n++] = (uint8_t)((hi << 4) | lo);
         hex += 2;
     }
