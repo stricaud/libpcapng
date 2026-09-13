@@ -1707,6 +1707,8 @@ void pcapng_dissection_free(pcapng_dissection_t *d)
 }
 
 /* ── introspection: protocols this dissector emits ──────────────────────── */
+void pcapng_dissect_ensure_protocols(void) { posa_ensure_builtin(); }
+
 const char *const *pcapng_dissect_protocols(int *count)
 {
   static const char *const P[] = {

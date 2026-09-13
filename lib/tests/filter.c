@@ -1224,6 +1224,55 @@ int main(void)
     /* expression alias with leading/trailing whitespace in the call */
     CHECK(match  (" new TCP connections ", PKT_TCP_SYN, PKT_TCP_SYN_LEN, LT_ETHERNET));
 
+    /* ── Decoder-backed fields (built-in decoders + .posa protocols) ─────── */
+    SUITE("Decoder-backed fields");
+    {
+        /* A complete Modbus/TCP READ_HOLDING_REGISTERS request to port 502:
+         * transaction 1, protocol 0, length 6, unit 1, fc 3, address 0, one
+         * register. None of the ModbusTCP.* abbrevs below exist in the
+         * byte-poking paths the other suites exercise — they come from
+         * dissecting the packet, which is what lets one expression mean the
+         * same thing in a capture filter and in a display filter. */
+        static const uint8_t MB[66] = {
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+            0x08, 0x00, 0x45, 0x00, 0x00, 0x34, 0x00, 0x01, 0x00, 0x00, 0x40, 0x06,
+            0x66, 0xc1, 0x0a, 0x00, 0x00, 0x01, 0x0a, 0x00, 0x00, 0x02, 0x30, 0x39,
+            0x01, 0xf6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x18,
+            0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06,
+            0x01, 0x03, 0x00, 0x00, 0x00, 0x01,
+        };
+
+        /* posa-defined fields, including ones only the fc-3 request arm emits */
+        CHECK(match  ("ModbusTCP.function_code == 3",  MB, sizeof MB, LT_ETHERNET));
+        CHECK(match  ("ModbusTCP.unit_id == 1",        MB, sizeof MB, LT_ETHERNET));
+        CHECK(match  ("ModbusTCP.transaction_id == 1", MB, sizeof MB, LT_ETHERNET));
+        CHECK(match  ("ModbusTCP.start_address == 0 and ModbusTCP.quantity == 1",
+                      MB, sizeof MB, LT_ETHERNET));
+        CHECK(nomatch("ModbusTCP.function_code == 4",  MB, sizeof MB, LT_ETHERNET));
+
+        /* a bare protocol name is an existence test, as `tcp` is */
+        CHECK(match  ("ModbusTCP", MB, sizeof MB, LT_ETHERNET));
+        CHECK(nomatch("ModbusTCP", PKT_UDP_DNS, PKT_UDP_DNS_LEN, LT_ETHERNET));
+
+        /* a field only the response arm carries is absent from a request */
+        CHECK(nomatch("ModbusTCP.byte_count", MB, sizeof MB, LT_ETHERNET));
+
+        /* mixing the two kinds of field in one expression */
+        CHECK(match  ("tcp.dstport == 502 and ModbusTCP.function_code == 3",
+                      MB, sizeof MB, LT_ETHERNET));
+        CHECK(nomatch("tcp.dstport == 503 and ModbusTCP.function_code == 3",
+                      MB, sizeof MB, LT_ETHERNET));
+
+        /* a prefix that names no decoder resolves to nothing rather than
+         * dissecting the packet to find out */
+        CHECK(nomatch("NoSuchProto.field == 1", MB, sizeof MB, LT_ETHERNET));
+        CHECK(nomatch("tcp.no_such_field == 1", MB, sizeof MB, LT_ETHERNET));
+
+        /* the fast paths still answer for themselves */
+        CHECK(match  ("tcp", MB, sizeof MB, LT_ETHERNET));
+        CHECK(nomatch("udp", MB, sizeof MB, LT_ETHERNET));
+    }
+
     /* ── Summary ─────────────────────────────────────────────────────────── */
     printf("\n=== Results: %d/%d passed", g_passed, g_tests);
     if (g_failed) printf(", %d FAILED", g_failed);

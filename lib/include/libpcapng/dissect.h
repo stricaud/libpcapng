@@ -85,8 +85,18 @@ void pcapng_dissect_reset_flows(void);
 void pcapng_dissect_set_verify_checksums(int on);
 
 /* The protocol abbrevs this dissector can produce (for listing decoders). The
-   returned array is static; *count is set to its length. */
+   returned array is static; *count is set to its length. Covers the built-in C
+   decoders only — the .posa-defined ones are enumerated through posa.h, after
+   pcapng_dissect_ensure_protocols(). */
 const char *const *pcapng_dissect_protocols(int *count);
+
+/* Load the bundled .posa decoders into the posa registry, once per process.
+   pcapng_dissect() calls this itself, so a caller that only dissects never
+   needs it. Call it directly when the registry has to be populated without
+   dissecting anything — deciding whether a field abbrev names a real decoder,
+   for one, which is what the capture-filter engine does before it commits to
+   dissecting a packet. */
+void pcapng_dissect_ensure_protocols(void);
 
 /* Tree helpers. */
 int             pcapng_field_count(const pcapng_field_t *parent);

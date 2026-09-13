@@ -8,7 +8,10 @@
  * Filter engine:
  *   Wireshark-style display filter parser (recursive-descent) operating
  *   on raw packet bytes via a lightweight built-in dissector.  Unknown
- *   fields are routed to the registered pcapng_field_provider_t.
+ *   fields are routed to the registered pcapng_field_provider_t, and then
+ *   to the full pcapng_dissect() field tree — so any abbrev the dissector
+ *   emits, including every .posa-defined one, filters here exactly as it
+ *   does in a display filter.  See dissected_field_get().
  *
  * License: MIT
  * Copyright (c) 2024 Sebastien Tricaud
@@ -71,6 +74,8 @@
 #include "libpcapng/capture.h"
 #include "libpcapng/easyapi.h"
 #include "libpcapng/linktypes.h"
+#include "libpcapng/dissect.h"
+#include "libpcapng/posa.h"
 
 /* ========================================================================
  * Constants
@@ -698,6 +703,13 @@ typedef struct {
         uint32_t bytes_in_flight;
         uint8_t  lost_segment;
     } tcp_analysis;
+
+    /* Lazy full dissection, for fields the fast byte-poking paths above do not
+       know. Built at most once per packet, and only if a filter actually names
+       such a field — a filter of built-in fields never pays for it.
+       pkt_ctx_cleanup() frees it. */
+    pcapng_dissection_t *dis;
+    int                  dis_tried;
 } pkt_ctx_t;
 
 /* Runs all tcp.analysis computations for this packet, writing into ctx->tcp_analysis.
@@ -940,6 +952,14 @@ static void pkt_ctx_init(pkt_ctx_t *ctx,
     tcp_run_analysis(ft, ctx);
 }
 
+/* Release anything pkt_ctx_init or the field lookups allocated. Safe to call
+   on a context that never dissected, and safe to call twice. */
+static void pkt_ctx_cleanup(pkt_ctx_t *ctx)
+{
+    if (ctx->dis) { pcapng_dissection_free(ctx->dis); ctx->dis = NULL; }
+    ctx->dis_tried = 0;
+}
+
 /* ========================================================================
  * Raw-field extraction
  *
@@ -967,8 +987,127 @@ typedef struct {
 static int parse_ipv4(const char *s, uint8_t out[4], int *cidr);
 static int parse_mac(const char *s, uint8_t out[6]);
 
+/* ── Dissector-backed fields ──────────────────────────────────────────────
+ *
+ * The paths above poke at raw bytes and cover the layers a capture filter is
+ * asked about most: eth/ip/tcp/udp/icmp/arp and tcp.analysis. Everything else
+ * the dissector knows — the built-in application decoders, and every protocol
+ * a .posa file defines — lives only in the pcapng_dissect() field tree. A
+ * filter naming one of those falls through to here, so
+ *
+ *     ModbusTCP.function_code == 3
+ *
+ * means the same thing in a capture filter as it does in a display filter.
+ *
+ * Dissecting costs far more than reading a header field, so it is gated twice:
+ * the packet is dissected at most once (cached on the context), and only after
+ * the prefix has been confirmed to name a protocol the dissector can actually
+ * produce. A typo like `tcp.prot` names nothing and is rejected without
+ * dissecting anything. */
+static int known_dissected_proto(const char *prefix, size_t n)
+{
+    int count = 0, i;
+    const char *const *names;
+
+    /* The bundled .posa decoders land in the registry on the first dissection,
+       so without this the very first lookup would scan an empty registry and
+       decide no .posa protocol exists. */
+    pcapng_dissect_ensure_protocols();
+    names = pcapng_dissect_protocols(&count);
+
+    for (i = 0; i < count; i++)
+        if (!strncmp(names[i], prefix, n) && names[i][n] == '\0') return 1;
+
+    /* .posa protocols are keyed by `abbrev` when they declare one and by the
+       object name otherwise — the same rule pcapng_posa_dissect() uses to
+       build the abbrevs, so both spellings resolve. */
+    for (i = 0; i < pcapng_posa_count(); i++) {
+        const pcapng_posa_proto_t *pp = pcapng_posa_at(i);
+        if (!pp) continue;
+        if (pp->abbrev[0] && !strncmp(pp->abbrev, prefix, n) && pp->abbrev[n] == '\0') return 1;
+        if (!strncmp(pp->name, prefix, n) && pp->name[n] == '\0') return 1;
+    }
+    return 0;
+}
+
+/* Layers the byte-poking paths resolve authoritatively, presence and absence
+   alike. A bare `udp` that came back empty there means the packet really has no
+   UDP, so it must not fall through and dissect — otherwise `not udp` would
+   dissect every TCP packet in a capture. */
+static int fastpath_layer(const char *field)
+{
+    static const char *const L[] = { "frame","eth","vlan","ip","ip6","ipv6",
+                                     "tcp","udp","icmp","icmpv6","arp" };
+    size_t i;
+    for (i = 0; i < sizeof L / sizeof L[0]; i++)
+        if (!strcmp(field, L[i])) return 1;
+    return 0;
+}
+
+static int dissected_field_get(pkt_ctx_t *ctx, const char *field,
+                               fval_t *out, int maxout)
+{
+    const char *dot = strchr(field, '.');
+    size_t plen = dot ? (size_t)(dot - field) : strlen(field);
+    pcapng_field_t *hits[CAP_MAX_FVALS];
+    int nh, i, n = 0;
+
+    /* Either a dotted abbrev, or a bare protocol name used as an existence
+       test — `ModbusTCP` on its own, the way `tcp` works above. */
+    if (plen == 0 || maxout <= 0) return 0;
+    if (!dot && fastpath_layer(field)) return 0;
+    if (!known_dissected_proto(field, plen)) return 0;
+
+    if (!ctx->dis_tried) {
+        ctx->dis_tried = 1;
+        ctx->dis = pcapng_dissect(ctx->raw, ctx->rawlen, ctx->rawlen, ctx->linktype);
+    }
+    if (!ctx->dis || !ctx->dis->root) return 0;
+
+    nh = pcapng_field_collect(ctx->dis->root, field, hits,
+                              maxout < CAP_MAX_FVALS ? maxout : CAP_MAX_FVALS);
+    for (i = 0; i < nh; i++) {
+        fval_t *v = &out[n];
+        switch (hits[i]->vtype) {
+        case PCAPNG_FT_UINT: v->type = FV_UINT; v->u = hits[i]->u; break;
+        case PCAPNG_FT_IPV4:
+            if (hits[i]->blen != 4) continue;
+            v->type = FV_IPV4; memcpy(v->ipv4, hits[i]->bytes, 4); break;
+        case PCAPNG_FT_IPV6:
+            if (hits[i]->blen != 16) continue;
+            v->type = FV_IPV6; memcpy(v->ipv6, hits[i]->bytes, 16); break;
+        case PCAPNG_FT_MAC:
+            if (hits[i]->blen != 6) continue;
+            v->type = FV_MAC; memcpy(v->mac, hits[i]->bytes, 6); break;
+        case PCAPNG_FT_STR:
+            /* fval_t's string is shorter than the field tree's; a long value
+               (a DNS name, a TLS SNI) compares on its first 63 bytes, the same
+               limit the provider path above works to. */
+            v->type = FV_STR;
+            snprintf(v->str, sizeof v->str, "%.*s", (int)sizeof v->str - 1, hits[i]->str);
+            break;
+        case PCAPNG_FT_BYTES: {
+            /* fval_t carries 8 bytes; longer values compare on that prefix,
+               which is what the slice syntax already does. */
+            int bl = hits[i]->blen;
+            if (bl <= 0) continue;
+            if (bl > (int)sizeof v->bytes.data) bl = (int)sizeof v->bytes.data;
+            v->type = FV_BYTES; v->bytes.len = bl;
+            memcpy(v->bytes.data, hits[i]->bytes, (size_t)bl);
+            break;
+        }
+        default:
+            /* A structural node (a protocol layer) has no value of its own, but
+               its presence is what `ModbusTCP` on its own asks about. */
+            v->type = FV_UINT; v->u = 1; break;
+        }
+        n++;
+    }
+    return n;
+}
+
 /* Populate out[] with field values; returns the count. */
-static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
+static int raw_field_get(pkt_ctx_t *ctx, const char *field,
                           fval_t *out, int maxout,
                           pcapng_field_provider_t provider_fn, void *provider_ctx)
 {
@@ -1434,6 +1573,12 @@ static int raw_field_get(const pkt_ctx_t *ctx, const char *field,
         }
     }
 
+    /* ── Dissector-backed fields (built-in decoders + every .posa protocol) ── */
+    {
+        int n = dissected_field_get(ctx, field, out, maxout);
+        if (n > 0) return n;
+    }
+
     return 0;  /* field not found */
 }
 
@@ -1616,7 +1761,7 @@ static int fval_matches(const fval_t *fv, op_t op, const char *val)
 
 /* ---- Filter evaluator ---- */
 
-static int filter_eval_node(const fnode_t *n, const pkt_ctx_t *ctx,
+static int filter_eval_node(const fnode_t *n, pkt_ctx_t *ctx,
                              pcapng_field_provider_t pfn, void *pctx)
 {
     if (!n) return 1;
@@ -1660,7 +1805,7 @@ static int filter_eval_node(const fnode_t *n, const pkt_ctx_t *ctx,
     return 0;
 }
 
-static int filter_eval(const cap_filter_t *f, const pkt_ctx_t *ctx,
+static int filter_eval(const cap_filter_t *f, pkt_ctx_t *ctx,
                         pcapng_field_provider_t pfn, void *pctx)
 {
     if (!f || f->match_all) return 1;
@@ -1681,6 +1826,7 @@ int pcapng_capture_filter_match(const char *expr,
     pkt_ctx_t ctx;
     pkt_ctx_init(&ctx, data, len, linktype, NULL);  /* NULL = no flow state */
     int r = filter_eval(f, &ctx, NULL, NULL);
+    pkt_ctx_cleanup(&ctx);
     filter_free(f);
     return r;
 }
@@ -1700,6 +1846,7 @@ int pcapng_capture_filter_match_ex(const char *expr,
     pkt_ctx_t ctx;
     pkt_ctx_init(&ctx, data, len, linktype, table);
     int r = filter_eval(f, &ctx, NULL, NULL);
+    pkt_ctx_cleanup(&ctx);
     filter_free(f);
     return r;
 }
@@ -2443,8 +2590,12 @@ static int xdp_dispatch(pcapng_capture_t *cap,
 
         pkt_ctx_t ctx;
         pkt_ctx_init(&ctx, data, caplen, cap->linktype, cap->flow_table);
+        /* Evaluate, then release before branching: the filter may have built a
+           full dissection of this packet to resolve a decoder field. */
+        int pass = filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx);
+        pkt_ctx_cleanup(&ctx);
 
-        if (filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx)) {
+        if (pass) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             pcapng_packet_info_t info;
@@ -2624,8 +2775,12 @@ static int linux_process_block(pcapng_capture_t *cap,
 
         pkt_ctx_t ctx;
         pkt_ctx_init(&ctx, data, caplen, cap->linktype, cap->flow_table);
+        /* Evaluate, then release before branching: the filter may have built a
+           full dissection of this packet to resolve a decoder field. */
+        int pass = filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx);
+        pkt_ctx_cleanup(&ctx);
 
-        if (filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx)) {
+        if (pass) {
             pcapng_packet_info_t info;
             info.data         = data;
             info.captured_len = caplen;
@@ -2794,8 +2949,12 @@ static int bsd_dispatch(pcapng_capture_t *cap,
 
         pkt_ctx_t ctx;
         pkt_ctx_init(&ctx, data, caplen, cap->linktype, cap->flow_table);
+        /* Evaluate, then release before branching: the filter may have built a
+           full dissection of this packet to resolve a decoder field. */
+        int pass = filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx);
+        pkt_ctx_cleanup(&ctx);
 
-        if (filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx)) {
+        if (pass) {
             pcapng_packet_info_t info;
             info.data         = data;
             info.captured_len = caplen;

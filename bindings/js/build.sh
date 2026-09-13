@@ -49,6 +49,10 @@ SOURCES=(
   "$LIB/easyapi.c"
   "$LIB/reassembly.c"
   "$LIB/reassembly_tcp.c"
+  # dissect.c calls into the keylog store for TLS session keys embedded in a
+  # capture (DSB blocks). Decryption itself needs HAVE_OPENSSL, which this
+  # build does not set, but the symbols must still resolve.
+  "$LIB/tls_keylog.c"
 )
 for f in "$LIB"/protocols/*.c; do SOURCES+=("$f"); done
 

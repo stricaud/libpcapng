@@ -195,7 +195,24 @@ int pcapng_capture_set_buffer_size(pcapng_capture_t *, size_t bytes);
  *   coap.code == lookup(CREATED)
  *   The provider receives "__lookup__:CREATED" and returns the numeric value.
  *
- * Unknown fields are passed to the registered field provider (if any).
+ * Decoder fields:
+ *   Everything above is read straight out of the packet header. Any other
+ *   abbrev the dissector emits also works — the application decoders built
+ *   into dissect.c, and every protocol a .posa file defines:
+ *
+ *     ModbusTCP.function_code == 3    ModbusTCP    (bare name = existence)
+ *
+ *   These are resolved by dissecting the packet, so they cost far more than a
+ *   header field: expect roughly an order of magnitude. Nothing is dissected
+ *   unless the filter names such a field, and a packet is dissected at most
+ *   once however many of them it names. A prefix that matches no decoder
+ *   (`NoSuchProto.x`) resolves to nothing without dissecting anything.
+ *
+ *   The same expression means the same thing here and in a display filter
+ *   (dfilter.h) — both read the field tree pcapng_dissect() builds.
+ *
+ * Unknown fields are passed to the registered field provider (if any) before
+ * the dissector is consulted, so a provider can still override any abbrev.
  *
  * Returns 0 on success, -1 on parse error (see errbuf).
  */
@@ -213,6 +230,10 @@ int pcapng_capture_set_filter(pcapng_capture_t *, const char *expr, char *errbuf
  *
  * Note: tcp.analysis.retransmission always returns 0 here (no flow state).
  * Use pcapng_capture_filter_match_ex() with a flow table for stateful detection.
+ *
+ * `expr` is compiled on every call. Filtering a whole file one packet at a
+ * time therefore recompiles it per packet; attach it once with
+ * pcapng_capture_set_filter() when that matters.
  */
 int pcapng_capture_filter_match(const char *expr,
                                 const uint8_t *data, uint32_t len,
