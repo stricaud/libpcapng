@@ -390,6 +390,17 @@ int pcapng_capture_print(const char *device, const char *filter,
  * ====================================================================== */
 void pcapng_capture_close(pcapng_capture_t *);
 
+/* ======================================================================
+ * AF_XDP capture (Linux only, requires HAVE_AF_XDP at build time)
+ * ====================================================================== */
+
+/* pcapng_capture_open_xdp — open an AF_XDP capture handle.
+ * Faster than AF_PACKET; requires root or CAP_NET_ADMIN + CAP_NET_RAW.
+ * Falls back gracefully: returns NULL with errbuf set if AF_XDP unavailable.
+ * Use pcapng_capture_set_* to configure before first dispatch call.
+ * queue_id: which NIC hardware queue to capture (0 for any/first). */
+pcapng_capture_t *pcapng_capture_open_xdp(const char *device, int queue_id, char *errbuf);
+
 #ifdef __cplusplus
 }
 #endif

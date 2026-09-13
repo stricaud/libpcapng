@@ -23,6 +23,11 @@ target_compile_definitions(pcapsh PRIVATE
 
 install(TARGETS pcapsh DESTINATION bin)
 
+add_executable(pcapngtool pcapngtool.c)
+target_include_directories(pcapngtool PRIVATE ${LIBPCAPNG_INCLUDE_DIRS})
+target_link_libraries(pcapngtool pcapng_static)
+install(TARGETS pcapngtool DESTINATION bin)
+
 # Install shared protocol definitions to share/pcapsh/protos/
 install(DIRECTORY protos/
     DESTINATION share/pcapsh/protos

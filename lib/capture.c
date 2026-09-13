@@ -59,6 +59,15 @@
 #  include <net/if_dl.h>
 #endif
 
+#if defined(__linux__) && defined(HAVE_AF_XDP)
+#  include <linux/if_xdp.h>
+#  include <linux/bpf.h>
+#  include <linux/netlink.h>
+#  include <linux/rtnetlink.h>
+#  include <linux/if_link.h>
+#  include <sys/syscall.h>
+#endif
+
 #include "libpcapng/capture.h"
 #include "libpcapng/easyapi.h"
 #include "libpcapng/linktypes.h"
@@ -1723,6 +1732,31 @@ struct pcapng_capture {
     uint32_t     block_size;
     uint32_t     block_nr;
     uint32_t     block_idx;
+#  if defined(HAVE_AF_XDP)
+    void        *umem;
+    size_t       umem_size;
+    void        *fill_ring;
+    void        *comp_ring;
+    void        *rx_ring;
+    uint32_t     fr_prod;
+    uint32_t     rx_cons;
+    uint32_t     xdp_ring_size;
+    int          xdp_link_fd;
+    int          xdp_prog_fd;
+    int          xdp_map_fd;
+    int          xdp_queue_id;
+    int          xdp_ifindex;
+    uint8_t      is_xdp;
+    /* byte offsets into mmap'd rings (from xdp_mmap_offsets) */
+    uint64_t     fr_prod_off;
+    uint64_t     fr_desc_off;
+    uint64_t     rx_prod_off;
+    uint64_t     rx_cons_off;
+    uint64_t     rx_desc_off;
+    size_t       fill_ring_mmap_size;
+    size_t       comp_ring_mmap_size;
+    size_t       rx_ring_mmap_size;
+#  endif
 #elif defined(__APPLE__) || defined(__FreeBSD__) || \
       defined(__OpenBSD__) || defined(__NetBSD__)
     int          fd;
@@ -1902,6 +1936,57 @@ pcapng_capture_t *pcapng_capture_open(const char *device, char *errbuf)
     return cap;
 }
 
+pcapng_capture_t *pcapng_capture_open_xdp(const char *device, int queue_id, char *errbuf)
+{
+#if defined(__linux__) && defined(HAVE_AF_XDP)
+    if (!device || !*device) {
+        if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE, "device name required");
+        return NULL;
+    }
+
+    pcapng_capture_t *cap = calloc(1, sizeof *cap);
+    if (!cap) {
+        if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE, "out of memory");
+        return NULL;
+    }
+
+    snprintf(cap->device, sizeof cap->device, "%s", device);
+    cap->snaplen     = CAP_DEFAULT_SNAPLEN;
+    cap->promisc     = 1;
+    cap->timeout_ms  = CAP_DEFAULT_TIMEOUT_MS;
+    cap->buffer_size = CAP_DEFAULT_BUF_SIZE;
+    cap->linktype    = LINKTYPE_ETHERNET;
+    cap->fd          = -1;
+    cap->ring        = MAP_FAILED;
+    cap->block_size  = CAP_BLOCK_SIZE;
+    cap->block_nr    = CAP_BLOCK_NR;
+
+    cap->xdp_prog_fd  = -1;
+    cap->xdp_map_fd   = -1;
+    cap->xdp_link_fd  = -1;
+    cap->xdp_queue_id = queue_id;
+    cap->is_xdp       = 1;
+
+    cap->flow_table = pcapng_flow_table_create();
+
+    char local_errbuf[PCAPNG_CAPTURE_ERRBUF_SIZE] = {0};
+    if (!errbuf) errbuf = local_errbuf;
+
+    if (xdp_open(cap, errbuf) < 0) {
+        pcapng_flow_table_free(cap->flow_table);
+        free(cap);
+        return NULL;
+    }
+
+    return cap;
+#else
+    if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                         "AF_XDP not available (linux/if_xdp.h not found at build time)");
+    (void)device; (void)queue_id;
+    return NULL;
+#endif
+}
+
 int pcapng_capture_set_snaplen(pcapng_capture_t *cap, uint32_t snaplen)
 {
     if (!cap) return -1;
@@ -1950,6 +2035,443 @@ void pcapng_capture_set_field_provider(pcapng_capture_t *cap,
 /* ========================================================================
  * Platform backends
  * ======================================================================== */
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Linux: AF_XDP backend
+ * ────────────────────────────────────────────────────────────────────────*/
+#if defined(__linux__) && defined(HAVE_AF_XDP)
+
+#define XDP_UMEM_SIZE  (1u << 22)   /* 4 MiB */
+#define XDP_FRAME_SIZE 2048u
+#define XDP_RING_SIZE  1024u
+
+static long xdp_bpf(int cmd, union bpf_attr *attr, unsigned int size)
+{
+    return syscall(SYS_bpf, cmd, attr, size);
+}
+
+/* Minimal XDP redirect program: bpf_redirect_map(xsk_map, 0, XDP_PASS).
+ * 6 instructions (8 bytes each). map_fd is patched into bytes [4..7]. */
+static const uint8_t xdp_prog_template[48] = {
+    /* insn 0: LD_IMM_DW R1, <map_fd> (BPF_PSEUDO_MAP_FD, src_reg=1) */
+    0x18, 0x11, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00,
+    /* insn 1: second word of 128-bit immediate */
+    0x00, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00,
+    /* insn 2: MOV64 R2 = 0  (queue index / map key) */
+    0xb7, 0x02, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00,
+    /* insn 3: MOV64 R3 = 2  (XDP_PASS = fallback action) */
+    0xb7, 0x03, 0x00, 0x00,  0x02, 0x00, 0x00, 0x00,
+    /* insn 4: CALL bpf_redirect_map (helper #51) */
+    0x85, 0x00, 0x00, 0x00,  0x33, 0x00, 0x00, 0x00,
+    /* insn 5: EXIT */
+    0x95, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00,
+};
+
+static int xdp_attach_prog(int ifindex, int prog_fd, char *errbuf)
+{
+    int nl_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+    if (nl_fd < 0) {
+        if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                             "netlink socket: %s", strerror(errno));
+        return -1;
+    }
+
+    /*
+     * Message layout:
+     *   nlmsghdr | ifinfomsg | IFLA_XDP(nested) { IFLA_XDP_FD, IFLA_XDP_FLAGS }
+     */
+    size_t inner_sz = RTA_SPACE(sizeof(int)) + RTA_SPACE(sizeof(uint32_t));
+    size_t attr_sz  = RTA_SPACE(inner_sz);
+    size_t ifm_sz   = NLMSG_ALIGN(sizeof(struct ifinfomsg));
+
+    uint8_t buf[512];
+    memset(buf, 0, sizeof buf);
+
+    struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+    nh->nlmsg_len   = (uint32_t)NLMSG_LENGTH(ifm_sz + attr_sz);
+    nh->nlmsg_type  = RTM_SETLINK;
+    nh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    nh->nlmsg_seq   = 1;
+
+    struct ifinfomsg *ifm = (struct ifinfomsg *)NLMSG_DATA(nh);
+    ifm->ifi_family = AF_UNSPEC;
+    ifm->ifi_index  = ifindex;
+
+    /* outer IFLA_XDP (nested) */
+    uint8_t *outer_p = (uint8_t *)ifm + ifm_sz;
+    struct rtattr *outer = (struct rtattr *)outer_p;
+    outer->rta_type = IFLA_XDP | NLA_F_NESTED;
+    outer->rta_len  = (unsigned short)RTA_LENGTH(inner_sz);
+
+    /* inner IFLA_XDP_FD */
+    uint8_t *inner_p = (uint8_t *)RTA_DATA(outer);
+    struct rtattr *rta = (struct rtattr *)inner_p;
+    rta->rta_type = IFLA_XDP_FD;
+    rta->rta_len  = (unsigned short)RTA_LENGTH(sizeof(int));
+    memcpy(RTA_DATA(rta), &prog_fd, sizeof(int));
+
+    /* inner IFLA_XDP_FLAGS = XDP_FLAGS_SKB_MODE (2) */
+    inner_p += RTA_SPACE(sizeof(int));
+    rta = (struct rtattr *)inner_p;
+    uint32_t xdp_flags = 2u;
+    rta->rta_type = IFLA_XDP_FLAGS;
+    rta->rta_len  = (unsigned short)RTA_LENGTH(sizeof(uint32_t));
+    memcpy(RTA_DATA(rta), &xdp_flags, sizeof(uint32_t));
+
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nl_family = AF_NETLINK;
+    if (sendto(nl_fd, buf, nh->nlmsg_len, 0,
+               (struct sockaddr *)&sa, sizeof sa) < 0) {
+        if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                             "netlink send: %s", strerror(errno));
+        close(nl_fd);
+        return -1;
+    }
+
+    uint8_t ack[512];
+    ssize_t n = recv(nl_fd, ack, sizeof ack, 0);
+    close(nl_fd);
+    if (n < (ssize_t)sizeof(struct nlmsghdr)) {
+        if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                             "netlink recv: %s", strerror(errno));
+        return -1;
+    }
+    struct nlmsghdr *ack_nh = (struct nlmsghdr *)ack;
+    if (ack_nh->nlmsg_type == NLMSG_ERROR) {
+        struct nlmsgerr *err_msg = (struct nlmsgerr *)NLMSG_DATA(ack_nh);
+        if (err_msg->error != 0) {
+            if (errbuf) snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                                 "xdp attach: %s", strerror(-err_msg->error));
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int xdp_open(pcapng_capture_t *cap, char *errbuf)
+{
+    unsigned int ifindex = if_nametoindex(cap->device);
+    if (!ifindex) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "interface '%s' not found", cap->device);
+        return -1;
+    }
+    cap->xdp_ifindex = (int)ifindex;
+
+    /* Create XSKMAP */
+    union bpf_attr map_attr;
+    memset(&map_attr, 0, sizeof map_attr);
+    map_attr.map_type    = BPF_MAP_TYPE_XSKMAP;
+    map_attr.key_size    = 4;
+    map_attr.value_size  = 4;
+    map_attr.max_entries = 1;
+    int map_fd = (int)xdp_bpf(BPF_MAP_CREATE, &map_attr, sizeof map_attr);
+    if (map_fd < 0) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "BPF_MAP_CREATE (XSKMAP): %s  (need root or CAP_BPF)", strerror(errno));
+        return -1;
+    }
+    cap->xdp_map_fd = map_fd;
+
+    /* Patch map_fd into BPF program and load it */
+    uint8_t prog[48];
+    memcpy(prog, xdp_prog_template, sizeof prog);
+    int32_t fd32 = (int32_t)map_fd;
+    memcpy(prog + 4, &fd32, sizeof fd32);
+
+    union bpf_attr prog_attr;
+    memset(&prog_attr, 0, sizeof prog_attr);
+    prog_attr.prog_type = BPF_PROG_TYPE_XDP;
+    prog_attr.insn_cnt  = 6;
+    prog_attr.insns     = (uint64_t)(uintptr_t)prog;
+    static const char gpl[] = "GPL";
+    prog_attr.license   = (uint64_t)(uintptr_t)gpl;
+    char bpf_log[256] = "";
+    prog_attr.log_buf   = (uint64_t)(uintptr_t)bpf_log;
+    prog_attr.log_size  = sizeof bpf_log;
+    prog_attr.log_level = 1;
+    int prog_fd = (int)xdp_bpf(BPF_PROG_LOAD, &prog_attr, sizeof prog_attr);
+    if (prog_fd < 0) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "BPF_PROG_LOAD: %s  log: %.80s", strerror(errno), bpf_log);
+        close(map_fd); cap->xdp_map_fd = -1;
+        return -1;
+    }
+    cap->xdp_prog_fd = prog_fd;
+
+    /* Create AF_XDP socket */
+    int xsk_fd = socket(AF_XDP, SOCK_RAW, 0);
+    if (xsk_fd < 0) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "socket(AF_XDP): %s", strerror(errno));
+        close(prog_fd); cap->xdp_prog_fd = -1;
+        close(map_fd);  cap->xdp_map_fd  = -1;
+        return -1;
+    }
+
+    /* mmap UMEM */
+    void *umem = mmap(NULL, XDP_UMEM_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+    if (umem == MAP_FAILED) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "mmap UMEM: %s", strerror(errno));
+        close(xsk_fd);
+        close(prog_fd); cap->xdp_prog_fd = -1;
+        close(map_fd);  cap->xdp_map_fd  = -1;
+        return -1;
+    }
+    cap->umem      = umem;
+    cap->umem_size = XDP_UMEM_SIZE;
+
+    struct xdp_umem_reg umem_reg;
+    memset(&umem_reg, 0, sizeof umem_reg);
+    umem_reg.addr       = (uint64_t)(uintptr_t)umem;
+    umem_reg.len        = XDP_UMEM_SIZE;
+    umem_reg.chunk_size = XDP_FRAME_SIZE;
+    umem_reg.headroom   = 0;
+    if (setsockopt(xsk_fd, SOL_XDP, XDP_UMEM_REG, &umem_reg, sizeof umem_reg) < 0) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "XDP_UMEM_REG: %s", strerror(errno));
+        goto fail_umem;
+    }
+
+    uint32_t ring_sz = XDP_RING_SIZE;
+    if (setsockopt(xsk_fd, SOL_XDP, XDP_UMEM_FILL_RING,       &ring_sz, sizeof ring_sz) < 0 ||
+        setsockopt(xsk_fd, SOL_XDP, XDP_UMEM_COMPLETION_RING, &ring_sz, sizeof ring_sz) < 0 ||
+        setsockopt(xsk_fd, SOL_XDP, XDP_RX_RING,              &ring_sz, sizeof ring_sz) < 0) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "XDP ring setsockopt: %s", strerror(errno));
+        goto fail_umem;
+    }
+    cap->xdp_ring_size = ring_sz;
+
+    struct xdp_mmap_offsets off;
+    socklen_t optlen = sizeof off;
+    if (getsockopt(xsk_fd, SOL_XDP, XDP_MMAP_OFFSETS, &off, &optlen) < 0) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "XDP_MMAP_OFFSETS: %s", strerror(errno));
+        goto fail_umem;
+    }
+
+    /* mmap fill ring */
+    size_t fill_mmap_sz = (size_t)off.fr.desc + ring_sz * sizeof(uint64_t);
+    void *fill_ring = mmap(NULL, fill_mmap_sz, PROT_READ | PROT_WRITE,
+                           MAP_SHARED | MAP_POPULATE, xsk_fd,
+                           XDP_UMEM_PGOFF_FILL_RING);
+    if (fill_ring == MAP_FAILED) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "mmap fill ring: %s", strerror(errno));
+        goto fail_umem;
+    }
+    cap->fill_ring           = fill_ring;
+    cap->fill_ring_mmap_size = fill_mmap_sz;
+    cap->fr_prod_off         = off.fr.producer;
+    cap->fr_desc_off         = off.fr.desc;
+
+    /* mmap completion ring */
+    size_t comp_mmap_sz = (size_t)off.cr.desc + ring_sz * sizeof(uint64_t);
+    void *comp_ring = mmap(NULL, comp_mmap_sz, PROT_READ | PROT_WRITE,
+                           MAP_SHARED | MAP_POPULATE, xsk_fd,
+                           XDP_UMEM_PGOFF_COMPLETION_RING);
+    if (comp_ring == MAP_FAILED) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "mmap comp ring: %s", strerror(errno));
+        munmap(fill_ring, fill_mmap_sz); cap->fill_ring = NULL;
+        goto fail_umem;
+    }
+    cap->comp_ring           = comp_ring;
+    cap->comp_ring_mmap_size = comp_mmap_sz;
+
+    /* mmap RX ring */
+    size_t rx_mmap_sz = (size_t)off.rx.desc + ring_sz * sizeof(struct xdp_desc);
+    void *rx_ring = mmap(NULL, rx_mmap_sz, PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_POPULATE, xsk_fd,
+                         XDP_PGOFF_RX_RING);
+    if (rx_ring == MAP_FAILED) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "mmap rx ring: %s", strerror(errno));
+        munmap(comp_ring, comp_mmap_sz); cap->comp_ring = NULL;
+        munmap(fill_ring, fill_mmap_sz); cap->fill_ring = NULL;
+        goto fail_umem;
+    }
+    cap->rx_ring           = rx_ring;
+    cap->rx_ring_mmap_size = rx_mmap_sz;
+    cap->rx_prod_off       = off.rx.producer;
+    cap->rx_cons_off       = off.rx.consumer;
+    cap->rx_desc_off       = off.rx.desc;
+
+    /* Bind socket to interface + queue in copy mode */
+    struct sockaddr_xdp sxdp;
+    memset(&sxdp, 0, sizeof sxdp);
+    sxdp.sxdp_family   = AF_XDP;
+    sxdp.sxdp_ifindex  = ifindex;
+    sxdp.sxdp_queue_id = (uint32_t)cap->xdp_queue_id;
+    sxdp.sxdp_flags    = XDP_COPY;
+    if (bind(xsk_fd, (struct sockaddr *)&sxdp, sizeof sxdp) < 0) {
+        snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                 "bind AF_XDP: %s", strerror(errno));
+        munmap(rx_ring,   rx_mmap_sz);   cap->rx_ring   = NULL;
+        munmap(comp_ring, comp_mmap_sz); cap->comp_ring = NULL;
+        munmap(fill_ring, fill_mmap_sz); cap->fill_ring = NULL;
+        goto fail_umem;
+    }
+
+    /* Register xsk in the XSKMAP at key=queue_id */
+    {
+        union bpf_attr upd;
+        memset(&upd, 0, sizeof upd);
+        upd.map_fd = (uint32_t)map_fd;
+        uint32_t key = (uint32_t)cap->xdp_queue_id;
+        int      val = xsk_fd;
+        upd.key   = (uint64_t)(uintptr_t)&key;
+        upd.value = (uint64_t)(uintptr_t)&val;
+        upd.flags = BPF_ANY;
+        if (xdp_bpf(BPF_MAP_UPDATE_ELEM, &upd, sizeof upd) < 0) {
+            snprintf(errbuf, PCAPNG_CAPTURE_ERRBUF_SIZE,
+                     "BPF_MAP_UPDATE_ELEM: %s", strerror(errno));
+            munmap(rx_ring,   rx_mmap_sz);   cap->rx_ring   = NULL;
+            munmap(comp_ring, comp_mmap_sz); cap->comp_ring = NULL;
+            munmap(fill_ring, fill_mmap_sz); cap->fill_ring = NULL;
+            goto fail_umem;
+        }
+    }
+
+    /* Attach XDP program to interface via RTM_SETLINK */
+    if (xdp_attach_prog((int)ifindex, prog_fd, errbuf) < 0) {
+        munmap(rx_ring,   rx_mmap_sz);   cap->rx_ring   = NULL;
+        munmap(comp_ring, comp_mmap_sz); cap->comp_ring = NULL;
+        munmap(fill_ring, fill_mmap_sz); cap->fill_ring = NULL;
+        goto fail_umem;
+    }
+
+    /* Pre-populate fill ring so the kernel has UMEM buffers to deliver into */
+    {
+        uint64_t *fill_descs =
+            (uint64_t *)((uint8_t *)fill_ring + cap->fr_desc_off);
+        volatile uint32_t *fill_prod_ptr =
+            (volatile uint32_t *)((uint8_t *)fill_ring + cap->fr_prod_off);
+        uint32_t mask = ring_sz - 1;
+        for (uint32_t i = 0; i < ring_sz / 2; i++)
+            fill_descs[(cap->fr_prod++) & mask] = (uint64_t)i * XDP_FRAME_SIZE;
+        __sync_synchronize();
+        *fill_prod_ptr = cap->fr_prod;
+    }
+
+    cap->fd       = xsk_fd;
+    cap->linktype = LINKTYPE_ETHERNET;
+    return 0;
+
+fail_umem:
+    munmap(umem, XDP_UMEM_SIZE);
+    cap->umem = NULL;
+    close(xsk_fd);
+    close(prog_fd); cap->xdp_prog_fd = -1;
+    close(map_fd);  cap->xdp_map_fd  = -1;
+    return -1;
+}
+
+static void xdp_close(pcapng_capture_t *cap)
+{
+    if (cap->xdp_prog_fd >= 0 && cap->xdp_ifindex > 0) {
+        char dummy[PCAPNG_CAPTURE_ERRBUF_SIZE];
+        int minus1 = -1;
+        xdp_attach_prog(cap->xdp_ifindex, minus1, dummy);
+        close(cap->xdp_prog_fd);
+        cap->xdp_prog_fd = -1;
+    }
+    if (cap->xdp_map_fd >= 0) { close(cap->xdp_map_fd); cap->xdp_map_fd = -1; }
+    if (cap->rx_ring   && cap->rx_ring_mmap_size)
+        { munmap(cap->rx_ring,   cap->rx_ring_mmap_size);   cap->rx_ring   = NULL; }
+    if (cap->comp_ring && cap->comp_ring_mmap_size)
+        { munmap(cap->comp_ring, cap->comp_ring_mmap_size); cap->comp_ring = NULL; }
+    if (cap->fill_ring && cap->fill_ring_mmap_size)
+        { munmap(cap->fill_ring, cap->fill_ring_mmap_size); cap->fill_ring = NULL; }
+    if (cap->umem && cap->umem_size)
+        { munmap(cap->umem, cap->umem_size); cap->umem = NULL; }
+    if (cap->fd >= 0) { close(cap->fd); cap->fd = -1; }
+}
+
+static int xdp_get_stats(pcapng_capture_t *cap, pcapng_capture_stats_t *st)
+{
+    st->received = cap->stats.passed + cap->stats.filtered;
+    st->dropped  = 0;
+    st->passed   = cap->stats.passed;
+    st->filtered = cap->stats.filtered;
+    return 0;
+}
+
+static int xdp_dispatch(pcapng_capture_t *cap,
+                         int count, pcapng_packet_cb cb, void *ud)
+{
+    if (cap->fd < 0 || !cap->rx_ring) return -1;
+
+    struct pollfd pfd;
+    pfd.fd     = cap->fd;
+    pfd.events = POLLIN;
+    int r = poll(&pfd, 1, cap->timeout_ms);
+    if (r < 0 && errno == EINTR) return 0;
+    if (r <= 0) return 0;
+
+    volatile uint32_t *rx_prod_ptr =
+        (volatile uint32_t *)((uint8_t *)cap->rx_ring + cap->rx_prod_off);
+    volatile uint32_t *rx_cons_ptr =
+        (volatile uint32_t *)((uint8_t *)cap->rx_ring + cap->rx_cons_off);
+    struct xdp_desc   *rx_descs    =
+        (struct xdp_desc *)((uint8_t *)cap->rx_ring + cap->rx_desc_off);
+
+    volatile uint32_t *fill_prod_ptr =
+        (volatile uint32_t *)((uint8_t *)cap->fill_ring + cap->fr_prod_off);
+    uint64_t *fill_descs =
+        (uint64_t *)((uint8_t *)cap->fill_ring + cap->fr_desc_off);
+
+    uint32_t mask    = cap->xdp_ring_size - 1;
+    uint32_t rx_prod = *rx_prod_ptr;
+    __sync_synchronize();
+
+    int total = 0;
+    while (cap->rx_cons != rx_prod && (count <= 0 || total < count)) {
+        uint32_t       idx  = cap->rx_cons & mask;
+        uint64_t       addr = rx_descs[idx].addr;
+        uint32_t       len  = rx_descs[idx].len;
+        const uint8_t *data = (const uint8_t *)cap->umem + addr;
+        uint32_t       caplen = (len > cap->snaplen) ? cap->snaplen : len;
+
+        pkt_ctx_t ctx;
+        pkt_ctx_init(&ctx, data, caplen, cap->linktype, cap->flow_table);
+
+        if (filter_eval(cap->filter, &ctx, cap->field_fn, cap->field_ctx)) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            pcapng_packet_info_t info;
+            info.data         = data;
+            info.captured_len = caplen;
+            info.original_len = len;
+            info.timestamp_ns = (uint64_t)ts.tv_sec * 1000000000ULL
+                              + (uint64_t)ts.tv_nsec;
+            info.direction    = PCAPNG_CAP_DIR_UNKNOWN;
+            cb(&info, ud);
+            cap->stats.passed++;
+        } else {
+            cap->stats.filtered++;
+        }
+
+        /* Return this frame to the fill ring so the kernel can reuse it */
+        fill_descs[(cap->fr_prod++) & mask] = addr;
+        cap->rx_cons++;
+        total++;
+    }
+
+    if (total > 0) {
+        __sync_synchronize();
+        *rx_cons_ptr   = cap->rx_cons;
+        *fill_prod_ptr = cap->fr_prod;
+    }
+
+    return total;
+}
+
+#endif /* __linux__ && HAVE_AF_XDP */
 
 /* ────────────────────────────────────────────────────────────────────────
  * Linux: AF_PACKET + TPACKET_V3 (zero-copy ring buffer)
@@ -2363,6 +2885,9 @@ int pcapng_capture_dispatch(pcapng_capture_t *cap, int count,
     cap->breakflag = 0;
 
 #if defined(__linux__)
+#  if defined(HAVE_AF_XDP)
+    if (cap->is_xdp) return xdp_dispatch(cap, count, cb, userdata);
+#  endif
     return linux_dispatch(cap, count, cb, userdata);
 #elif defined(__APPLE__) || defined(__FreeBSD__) || \
       defined(__OpenBSD__) || defined(__NetBSD__)
@@ -2391,7 +2916,13 @@ int pcapng_capture_loop(pcapng_capture_t *cap, int count,
 
     while (!cap->breakflag && !g_sigint) {
 #if defined(__linux__)
+#  if defined(HAVE_AF_XDP)
+        int n = cap->is_xdp
+            ? xdp_dispatch(cap, count > 0 ? count - total : -1, cb, userdata)
+            : linux_dispatch(cap, count > 0 ? count - total : -1, cb, userdata);
+#  else
         int n = linux_dispatch(cap, count > 0 ? count - total : -1, cb, userdata);
+#  endif
 #elif defined(__APPLE__) || defined(__FreeBSD__) || \
       defined(__OpenBSD__) || defined(__NetBSD__)
         int n = bsd_dispatch(cap, count > 0 ? count - total : -1, cb, userdata);
@@ -2415,6 +2946,9 @@ int pcapng_capture_get_stats(pcapng_capture_t *cap,
 {
     if (!cap || !st) return -1;
 #if defined(__linux__)
+#  if defined(HAVE_AF_XDP)
+    if (cap->is_xdp) return xdp_get_stats(cap, st);
+#  endif
     return linux_get_stats(cap, st);
 #elif defined(__APPLE__) || defined(__FreeBSD__) || \
       defined(__OpenBSD__) || defined(__NetBSD__)
@@ -2428,6 +2962,10 @@ void pcapng_capture_close(pcapng_capture_t *cap)
 {
     if (!cap) return;
 #if defined(__linux__)
+#  if defined(HAVE_AF_XDP)
+    if (cap->is_xdp) { xdp_close(cap); }
+    else
+#  endif
     linux_close(cap);
 #elif defined(__APPLE__) || defined(__FreeBSD__) || \
       defined(__OpenBSD__) || defined(__NetBSD__)

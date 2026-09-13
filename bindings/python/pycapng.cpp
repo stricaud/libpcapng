@@ -7,6 +7,8 @@
 #endif
 
 #include <libpcapng/libpcapng.h>
+#include <libpcapng/surgery.h>
+#include <libpcapng/tls_keylog.h>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
@@ -1225,6 +1227,115 @@ PYBIND11_MODULE(pycapng, m) {
     m.attr("PTRFLAGS_MOVE")     = py::int_(PTRFLAGS_MOVE);
     m.attr("PTRFLAGS_BUTTON1")  = py::int_(PTRFLAGS_BUTTON1);
     m.attr("PTRFLAGS_BUTTON2")  = py::int_(PTRFLAGS_BUTTON2);
+
+    /* ── TLS keylog ──────────────────────────────────────────────────────── */
+    m.def("tls_keylog_load_file", [](const std::string &path) {
+        return pcapng_tls_keylog_load_file(path.c_str());
+    }, py::arg("path"),
+    "Load an NSS TLS keylog file (SSLKEYLOGFILE format).\n"
+    "Returns number of entries loaded, or -1 on I/O error.\n"
+    "Once loaded, dissect() calls will include 'tls.app_data.decrypted' fields.");
+
+    m.def("tls_keylog_load_text", [](const std::string &text) {
+        return pcapng_tls_keylog_load_text(text.c_str());
+    }, py::arg("text"),
+    "Load NSS TLS keylog entries from a string.\n"
+    "Useful for embedding keys directly in scripts.");
+
+    m.def("tls_keylog_clear", &pcapng_tls_keylog_clear,
+    "Remove all loaded TLS keylog entries and per-flow session state.");
+
+    m.def("tls_keylog_loaded", &pcapng_tls_keylog_loaded,
+    "Returns 1 if at least one TLS keylog entry is loaded, 0 otherwise.");
+
+    m.def("tls_keylog_ingest_dsb", [](py::bytes body) {
+        const char *buf; Py_ssize_t len;
+        PyBytes_AsStringAndSize(body.ptr(), (char **)&buf, &len);
+        pcapng_tls_keylog_ingest_dsb((const uint8_t *)buf, (uint32_t)len);
+    }, py::arg("body"),
+    "Feed a Decryption Secrets Block body (type 0x544c534b) to the keylog store.\n"
+    "Use when reading a pcapng file that embeds TLS session keys.");
+
+    /* ── pcapng file surgery ─────────────────────────────────────────────── */
+    m.def("filter_file", [](const std::string &input, const std::string &output,
+                             const std::string &filter_expr) -> int {
+        char errbuf[PCAPNG_SURGERY_ERRBUF_SIZE] = {0};
+        int n = pcapng_filter_file(input.c_str(), output.c_str(),
+                                   filter_expr.c_str(), errbuf);
+        if (n < 0) throw std::runtime_error(errbuf);
+        return n;
+    }, py::arg("input"), py::arg("output"), py::arg("filter"),
+    "Copy packets matching a display filter expression to a new pcapng file.\n"
+    "Returns the number of packets written.\n"
+    "Raises RuntimeError on filter compile error or I/O failure.");
+
+    m.def("merge", [](const std::vector<std::string> &inputs,
+                       const std::string &output,
+                       bool sort_by_timestamp) -> int {
+        std::vector<const char *> ptrs;
+        ptrs.reserve(inputs.size());
+        for (const auto &s : inputs) ptrs.push_back(s.c_str());
+        pcapng_merge_opts_t opts; memset(&opts, 0, sizeof opts);
+        opts.sort_by_timestamp = sort_by_timestamp ? 1 : 0;
+        char errbuf[PCAPNG_SURGERY_ERRBUF_SIZE] = {0};
+        int n = pcapng_merge(ptrs.data(), (int)ptrs.size(), output.c_str(),
+                             &opts, errbuf);
+        if (n < 0) throw std::runtime_error(errbuf);
+        return n;
+    }, py::arg("inputs"), py::arg("output"), py::arg("sort_by_timestamp") = false,
+    "Concatenate multiple pcapng files into one output file.\n"
+    "IDB interface_ids are renumbered to avoid collisions.\n"
+    "Returns total packets written.");
+
+    m.def("split", [](const std::string &input, const std::string &pattern,
+                       uint32_t max_packets, uint64_t max_bytes) -> int {
+        pcapng_split_opts_t opts; memset(&opts, 0, sizeof opts);
+        opts.max_packets = max_packets;
+        opts.max_bytes   = max_bytes;
+        char errbuf[PCAPNG_SURGERY_ERRBUF_SIZE] = {0};
+        int n = pcapng_split(input.c_str(), pattern.c_str(), &opts, errbuf);
+        if (n < 0) throw std::runtime_error(errbuf);
+        return n;
+    }, py::arg("input"), py::arg("pattern"),
+       py::arg("max_packets") = (uint32_t)0, py::arg("max_bytes") = (uint64_t)0,
+    "Split a pcapng file into multiple output files.\n"
+    "pattern must contain a printf %d specifier (e.g. 'out%04d.pcapng').\n"
+    "max_packets: split every N packets; max_bytes: split when file exceeds N bytes.\n"
+    "Returns the number of files created.");
+
+    m.def("anonymize", [](const std::string &input, const std::string &output,
+                           uint64_t seed, bool anon_mac) -> int {
+        pcapng_anon_opts_t opts; memset(&opts, 0, sizeof opts);
+        opts.seed          = seed;
+        opts.anonymize_mac = anon_mac ? 1 : 0;
+        char errbuf[PCAPNG_SURGERY_ERRBUF_SIZE] = {0};
+        int n = pcapng_anonymize(input.c_str(), output.c_str(), &opts, errbuf);
+        if (n < 0) throw std::runtime_error(errbuf);
+        return n;
+    }, py::arg("input"), py::arg("output"),
+       py::arg("seed") = (uint64_t)0x6c69627063617067ULL,
+       py::arg("anonymize_mac") = false,
+    "Anonymize IP addresses (and optionally MACs) in a pcapng file.\n"
+    "IPv4: last 2 octets replaced deterministically (preserves /16).\n"
+    "IPv6: last 8 bytes replaced. seed controls the substitution key.\n"
+    "Returns number of packets processed.");
+
+    m.def("inject_packet", [](const std::string &input, const std::string &output,
+                               py::bytes pkt, uint64_t ts_us,
+                               uint32_t interface_id) -> int {
+        const char *buf; Py_ssize_t plen;
+        PyBytes_AsStringAndSize(pkt.ptr(), (char **)&buf, &plen);
+        char errbuf[PCAPNG_SURGERY_ERRBUF_SIZE] = {0};
+        int r = pcapng_inject_packet(input.c_str(), output.c_str(),
+                                     (const uint8_t *)buf, (uint32_t)plen,
+                                     ts_us, interface_id, errbuf);
+        if (r < 0) throw std::runtime_error(errbuf);
+        return r;
+    }, py::arg("input"), py::arg("output"), py::arg("pkt"),
+       py::arg("ts_us") = (uint64_t)0, py::arg("interface_id") = (uint32_t)0,
+    "Inject a raw packet into a pcapng file at the correct timestamp position.\n"
+    "ts_us: timestamp in microseconds (0 = append at end).\n"
+    "Returns 0 on success.");
 
     register_pcapsh_submodule(m);
     register_capture(m);

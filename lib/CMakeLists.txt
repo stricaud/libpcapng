@@ -68,6 +68,7 @@ set(LIBPCAPNG_SOURCES
   community_id.c
   wire_layout.c
   tls_keylog.c
+  surgery.c
  )
 
 # Optional OpenSSL for TLS decryption
@@ -77,6 +78,17 @@ if(OpenSSL_FOUND OR OPENSSL_FOUND)
   add_compile_definitions(HAVE_OPENSSL)
 else()
   message(STATUS "OpenSSL not found — TLS keylog decryption disabled (keylog parsing still works)")
+endif()
+
+if(UNIX AND NOT APPLE)
+  include(CheckIncludeFile)
+  check_include_file("linux/if_xdp.h" HAVE_AF_XDP)
+  if(HAVE_AF_XDP)
+    message(STATUS "AF_XDP support enabled (linux/if_xdp.h found)")
+    add_compile_definitions(HAVE_AF_XDP)
+  else()
+    message(STATUS "AF_XDP support disabled (linux/if_xdp.h not found)")
+  endif()
 endif()
 
 add_library(pcapng SHARED ${LIBPCAPNG_SOURCES})
