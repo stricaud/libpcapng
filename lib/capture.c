@@ -1936,6 +1936,10 @@ pcapng_capture_t *pcapng_capture_open(const char *device, char *errbuf)
     return cap;
 }
 
+#if defined(__linux__) && defined(HAVE_AF_XDP)
+static int xdp_open(pcapng_capture_t *cap, char *errbuf);
+#endif
+
 pcapng_capture_t *pcapng_capture_open_xdp(const char *device, int queue_id, char *errbuf)
 {
 #if defined(__linux__) && defined(HAVE_AF_XDP)
