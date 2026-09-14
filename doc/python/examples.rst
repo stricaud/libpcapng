@@ -3,6 +3,30 @@ Examples
 
 All examples are in ``bindings/python/examples/``.
 
+Start here: the guided tour
+---------------------------
+
+``posa_tour.py`` walks the whole workflow in five stages — capture frames,
+ask posa which decoder claims each one, dissect the ones it recognises,
+write a decoder for the ones it does not, then build packets from that same
+decoder and save them as pcapng.
+
+It runs with no privileges and no capture file: given neither ``--iface``
+nor ``--read`` it generates its own mixed traffic, some of which posa
+already understands (Modbus/TCP) and some of which nothing does — which is
+what motivates writing a decoder in stage 4.
+
+.. code-block:: console
+
+   $ python3 posa_tour.py                                  # the whole tour
+   $ sudo python3 posa_tour.py --iface en0 --count 50      # capture for real
+   $ python3 posa_tour.py --read mycapture.pcapng          # replay a file
+   $ python3 posa_tour.py --stage discover --read x.pcapng # one stage alone
+
+.. literalinclude:: ../../bindings/python/examples/posa_tour.py
+   :language: python
+   :lines: 1-
+
 lan_corp with a callback
 ------------------------
 

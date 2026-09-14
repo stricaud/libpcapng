@@ -147,7 +147,66 @@ void register_posa(py::module_ &m) {
         "Warnings raised by the last posa_dissect() — today, a `recall` that\n"
         "found nothing bound. Informational: the dissection completed anyway.");
 
+  m.def("posa_load_builtin",
+        []() {
+          pcapng_dissect_ensure_protocols();
+          return pcapng_posa_count();
+        },
+        "Load the decoders bundled into the library (every .posa embedded at\n"
+        "build time), once per process. Returns the decoder count afterwards.\n"
+        "Dissecting a packet does this on its own; call it directly when the\n"
+        "registry has to be populated before anything is dissected — asking\n"
+        "posa_bound_port() what listens on a port, for one.");
+
   m.def("posa_count", &pcapng_posa_count, "Number of loaded posa decoders.");
+
+  /* ── Dispatch bindings — which decoder claims a packet ───────────────────
+     These answer the `rule` lines a .posa file declares:
+         rule tcp.port == 502   => ModbusTCP
+         rule ip.proto == 51    => AH
+         rule eth.type == 0x8847 => MPLS
+         rule tcp.content "SSH-" => SSH
+     Given what a captured frame carries, they name the decoder to hand it to.
+     All return None when no rule matches. */
+
+  m.def("posa_bound_port",
+        [](int ip_proto, uint16_t port) -> py::object {
+          const char *n = pcapng_posa_bound_port(ip_proto, port);
+          return n ? py::object(py::str(n)) : py::object(py::none());
+        },
+        py::arg("ip_proto"), py::arg("port"),
+        "Decoder bound to a transport port: ip_proto is 6 (TCP) or 17 (UDP).");
+
+  m.def("posa_bound_ipproto",
+        [](int proto) -> py::object {
+          const char *n = pcapng_posa_bound_ipproto(proto);
+          return n ? py::object(py::str(n)) : py::object(py::none());
+        },
+        py::arg("ip_proto"),
+        "Decoder bound to an IP protocol number (51 = AH, 50 = ESP, ...).");
+
+  m.def("posa_bound_ethertype",
+        [](uint16_t ethertype) -> py::object {
+          const char *n = pcapng_posa_bound_ethertype(ethertype);
+          return n ? py::object(py::str(n)) : py::object(py::none());
+        },
+        py::arg("ethertype"),
+        "Decoder bound to an EtherType (0x8847 = MPLS, 0x888e = EAPOL, ...).");
+
+  m.def("posa_bound_content",
+        [](int ip_proto, py::bytes data, bool weak) -> py::object {
+          std::string buf = data;
+          const uint8_t *p = reinterpret_cast<const uint8_t *>(buf.data());
+          const char *n = weak
+              ? pcapng_posa_bound_content_weak(ip_proto, p, (int)buf.size())
+              : pcapng_posa_bound_content(ip_proto, p, (int)buf.size());
+          return n ? py::object(py::str(n)) : py::object(py::none());
+        },
+        py::arg("ip_proto"), py::arg("data"), py::arg("weak") = false,
+        "Decoder whose payload signature matches these bytes, port-independent\n"
+        "(`rule tcp.content \"SSH-\"`). weak=True consults the `weak rule`\n"
+        "signatures too — suggestive rather than conclusive, so ask them only\n"
+        "after a port binding and a strong signature have both come up empty.");
 
   m.def("posa_list",
         []() {
