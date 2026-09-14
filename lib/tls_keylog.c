@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include <libpcapng/tls_keylog.h>
+#include <libpcapng/threading.h>  /* PCAPNG_THREAD_LOCAL + the threading contract */
 
 static int hex_val(char c)
 {
@@ -71,6 +72,10 @@ typedef struct kl_entry {
     struct kl_entry *next;
 } kl_entry_t;
 
+/* Shared on purpose: the keylog is loaded once and only read during dissection,
+   like the decoder registry. Load your keys before starting threads that
+   dissect — pcapng_tls_keylog_load_*() and pcapng_tls_keylog_clear() write this
+   with no synchronisation. */
 static kl_entry_t *g_store[KL_STORE_SIZE];
 static int g_store_count;
 
@@ -226,8 +231,14 @@ typedef struct {
     uint8_t    has_server_hello;
 } tls_sess_t;
 
-static tls_sess_t g_sess[TLS_SESS_SIZE];
+/* Per-thread, unlike the keylog above: this is per-flow state built up across a
+   connection's packets — ClientHello random, then ServerHello parameters, then
+   derived keys — so two threads decrypting at once would interleave into each
+   other's sessions. Correct per-thread provided a flow is dissected by one
+   thread; pin flows to threads. ~50 KB per thread. */
+static PCAPNG_THREAD_LOCAL tls_sess_t g_sess[TLS_SESS_SIZE];
 
+/* Clears the calling thread's sessions only. */
 void tls_session_state_clear(void)
 {
     memset(g_sess, 0, sizeof g_sess);

@@ -22,6 +22,8 @@
 #include <libpcapng/posa.h>            /* declarative decoders (e.g. bundled RDP)   */
 #include <libpcapng/community_id.h>    /* per-flow Community ID + sticky flow key    */
 #include <libpcapng/tls_keylog.h>      /* TLS keylog decryption hooks               */
+#include <libpcapng/threading.h>       /* PCAPNG_THREAD_LOCAL + the threading contract */
+#include <libpcapng/flow_hash.h>       /* the shared 5-tuple hash                   */
 #include "builtin_protos.h"           /* g_builtin_posa_protos[] — embedded .posa  */
 
 /* LINKTYPE_* aliases so the ported dissector body is unchanged. */
@@ -237,17 +239,22 @@ static const char POSA_BUILTIN_RDP[] =
   "    info \"%s Negotiate %s\" cookie, type\n"
   "rule tcp.port == 3389 => TPKT\n";
 
-static int g_posa_builtin_loaded;
+/* Guarded rather than a plain flag: threads racing into the first dissection
+   would otherwise each see the registry as unloaded and build it on top of each
+   other, and a half-built registry mis-decodes. The guard costs one acquire
+   load once it is done. See threading.h — and call
+   pcapng_dissect_ensure_protocols() once up front, which skips the wait. */
+static pcapng_once_t g_posa_builtin_once = PCAPNG_ONCE_INIT;
 static void posa_ensure_builtin(void)
 {
   int i;
-  if (g_posa_builtin_loaded) return;
-  g_posa_builtin_loaded = 1;
+  if (!pcapng_once_begin(&g_posa_builtin_once)) return;
   /* Every .posa in bin/protos, embedded at build time. */
   for (i = 0; g_builtin_posa_protos[i]; i++)
     pcapng_posa_load_text(g_builtin_posa_protos[i], NULL, 0);
   /* Load the known-good RDP definition last so it wins over any bundled rdp.posa. */
   pcapng_posa_load_text(POSA_BUILTIN_RDP, NULL, 0);
+  pcapng_once_end(&g_posa_builtin_once);
 }
 
 /* Run the posa decoder named by a `rule`, if there is one. Returns 1 when it
@@ -334,8 +341,13 @@ static int dispatch_named(dctx_t *c, const char *name, const uint8_t *pl, int pl
    opening packet resolved to, and replay it onto the rest of the flow. */
 #define FLOWTAB_BITS 14
 #define FLOWTAB_SIZE (1u << FLOWTAB_BITS)
-static struct { uint64_t key; char proto[16]; } g_flowtab[FLOWTAB_SIZE];
-static int g_flow_used;
+/* Per-thread, which makes the table safe to use from several threads at once
+   and scopes it to the thread that filled it: a flow whose packets are split
+   across threads is classified independently in each, so the opening packet's
+   verdict does not reach the others. Give a thread whole flows. Costs ~384 KB
+   of thread-local storage per thread. */
+static PCAPNG_THREAD_LOCAL struct { uint64_t key; char proto[16]; } g_flowtab[FLOWTAB_SIZE];
+static PCAPNG_THREAD_LOCAL int g_flow_used;
 
 void pcapng_dissect_reset_flows(void) { memset(g_flowtab, 0, sizeof g_flowtab); g_flow_used = 0; }
 
@@ -345,20 +357,12 @@ void pcapng_dissect_reset_flows(void) { memset(g_flowtab, 0, sizeof g_flowtab); 
 static int g_verify_checksums;
 void pcapng_dissect_set_verify_checksums(int on) { g_verify_checksums = on ? 1 : 0; }
 
+/* The same hash a caller shards on, so a packet's worker and the table slot it
+   lands in are derived from one definition. flow_hash.c holds it. */
 static uint64_t flow_key(uint8_t proto, const uint8_t *a, const uint8_t *b, int alen,
                          uint16_t sp, uint16_t dp)
 {
-  const uint8_t *lo = a, *hi = b; uint16_t plo = sp, phi = dp;
-  uint64_t h = 1469598103934665603ULL; /* FNV-1a */
-  int i, cmp = memcmp(a, b, (size_t)alen);
-  if (cmp > 0 || (cmp == 0 && sp > dp)) { lo = b; hi = a; plo = dp; phi = sp; }
-#define FNV(x) do { h ^= (uint8_t)(x); h *= 1099511628211ULL; } while (0)
-  FNV(proto);
-  for (i = 0; i < alen; i++) FNV(lo[i]);
-  for (i = 0; i < alen; i++) FNV(hi[i]);
-  FNV(plo >> 8); FNV(plo & 0xff); FNV(phi >> 8); FNV(phi & 0xff);
-#undef FNV
-  return h ? h : 1;                       /* 0 marks an empty slot */
+  return pcapng_flow_hash_tuple(proto, a, b, alen, sp, dp, PCAPNG_FLOW_TUPLE);
 }
 
 static const char *flow_lookup(uint64_t key)

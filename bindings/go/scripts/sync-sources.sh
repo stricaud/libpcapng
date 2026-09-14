@@ -27,6 +27,7 @@ mkdir -p "$VEND/include/libpcapng/protocols"
 TOP_SRCS=(
     blocks.c easyapi.c io.c dissect.c dfilter.c objects.c posa.c
     reassembly.c reassembly_tcp.c capture.c wire_layout.c community_id.c
+    flow_hash.c
     # dissect.c calls into the keylog store for the TLS keys a capture can
     # carry in its DSB blocks; without it the link comes up short of
     # pcapng_tls_keylog_loaded and friends.

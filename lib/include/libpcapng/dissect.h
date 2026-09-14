@@ -76,7 +76,11 @@ void pcapng_dissection_free(pcapng_dissection_t *d);
 /* Sticky flow classification (TLS/SSH etc. recognised from a flow's first
    packet is remembered for the rest of the flow) persists across dissect calls.
    Call this once before dissecting a new capture in file order, so the flow
-   table does not carry classifications over from the previous one. */
+   table does not carry classifications over from the previous one.
+
+   The table is per-thread, so this resets only the calling thread's — and a
+   flow whose packets are dissected by more than one thread is classified
+   separately in each. See threading.h. */
 void pcapng_dissect_reset_flows(void);
 
 /* Enable/disable L4/IP checksum validation (off by default, like Wireshark).
@@ -95,7 +99,11 @@ const char *const *pcapng_dissect_protocols(int *count);
    needs it. Call it directly when the registry has to be populated without
    dissecting anything — deciding whether a field abbrev names a real decoder,
    for one, which is what the capture-filter engine does before it commits to
-   dissecting a packet. */
+   dissecting a packet.
+
+   Threaded callers must call it, once, before starting any thread that
+   dissects: the lazy path it guards is not synchronised, and threads racing
+   into it read a half-built registry and mis-decode. See threading.h. */
 void pcapng_dissect_ensure_protocols(void);
 
 /* Tree helpers. */

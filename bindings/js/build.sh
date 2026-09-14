@@ -45,6 +45,7 @@ SOURCES=(
   "$LIB/dfilter.c"
   "$LIB/posa.c"
   "$LIB/community_id.c"
+  "$LIB/flow_hash.c"
   "$LIB/wire_layout.c"
   "$LIB/easyapi.c"
   "$LIB/reassembly.c"

@@ -39,6 +39,7 @@ set(LIBPCAPNG_HEADERS
 set(LIBPCAPNG_SOURCES
   blocks.c
   easyapi.c
+  flow_hash.c
   io.c
   protocols/asn1.c
   protocols/rdp.c

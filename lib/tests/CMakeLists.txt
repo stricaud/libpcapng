@@ -78,6 +78,22 @@ target_link_libraries(tls-keylog ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(TLS-Keylog tls-keylog)
 set_tests_properties(TLS-Keylog PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
 
+add_executable(flow-hash flow-hash.c)
+target_link_libraries(flow-hash ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Flow-Hash flow-hash)
+set_tests_properties(Flow-Hash PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+
+# Concurrency — holds the library to the contract in threading.h. Needs threads,
+# which the library itself does not, so it is skipped where they are unavailable
+# (Windows has no pthreads and no capture backend either).
+find_package(Threads)
+if(Threads_FOUND AND NOT WIN32)
+    add_executable(concurrency concurrency.c)
+    target_link_libraries(concurrency ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS} Threads::Threads)
+    add_test(Concurrency concurrency)
+    set_tests_properties(Concurrency PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+endif()
+
 # Resolve the modbus_tcp.posa path: prefer the submodule, fall back to installed protos.
 if(EXISTS "${CMAKE_SOURCE_DIR}/bin/protos/modbus_tcp.posa")
     set(MODBUS_POSA_PATH "${CMAKE_SOURCE_DIR}/bin/protos/modbus_tcp.posa")
