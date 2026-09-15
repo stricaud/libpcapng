@@ -1,0 +1,102 @@
+# web.toml — jackal rules for web and web-adjacent traffic.
+#
+# Modelled on Emerging Threats signatures — the sid and msg of each rule below
+# is a real ET entry from the 2026-09-11 ruleset (v11288). What differs is the
+# condition: where a Suricata rule writes a protocol header, ports, flow state
+# and a chain of content matches, a jackal rule writes one display-filter
+# expression over fields the decoders already produce.
+#
+#   ET:      alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"..."; \
+#                flow:established,to_server; http.uri; content:"/cgi-bin/"; ...)
+#   jackal:  filter = 'http.uri contains "/cgi-bin/"'
+#
+# Which fields exist is a question about decoders, not about jackal: every
+# field any .posa file declares is available here. `pcapsh` will tell you what
+# a packet actually offers —
+#
+#     $ pcapsh
+#     > rdpcap("suspect.pcapng", "http.uri")
+#
+# Write the filter in single quotes. TOML leaves a literal string exactly as
+# written, and filter expressions are full of double quotes.
+#
+# severity follows the ET convention: 1 is most urgent, 3 is informational.
+
+[ruleset]
+name        = "web"
+description = "HTTP, TLS SNI and DNS signatures for web-delivered threats"
+
+# ── exploit.rules ────────────────────────────────────────────────────────────
+
+[[rule]]
+sid       = 2072016
+msg       = "ET EXPLOIT WAVLINK Sync Server Command Injection/Arbitrary File Write Attempt"
+classtype = "attempted-admin"
+severity  = 1
+reference = "https://community.emergingthreats.net/t/ruleset-update-summary-2026-09-11-v11288/3453"
+# Command injection through a CGI endpoint: the shell metacharacter in the
+# query string is the part that matters, the /cgi-bin/ prefix narrows it.
+filter    = 'http.uri contains "/cgi-bin/" and http.uri contains "cmd="'
+
+[[rule]]
+sid       = 2072020
+msg       = "ET WEB_SERVER Possible Shell Metacharacter in HTTP URI"
+classtype = "web-application-attack"
+severity  = 2
+# Deliberately broad, and last in the file for that reason: a pipe, semicolon
+# or backtick in a URI is worth looking at but is not on its own an intrusion.
+filter    = 'http.uri contains "|" or http.uri contains ";" or http.uri contains "`"'
+
+# ── hunting.rules ────────────────────────────────────────────────────────────
+
+[[rule]]
+sid       = 2072017
+msg       = "ET HUNTING GET to ip.ipify.org via WinHTTP"
+classtype = "policy-violation"
+severity  = 3
+# Not malicious by itself. Malware asks what its public address is early on,
+# and WinHTTP's default user agent is a tell that it was not a browser asking.
+filter    = 'http.headers.host contains "ipify.org" and http.headers.user_agent contains "WinHTTP"'
+
+# ── exploit_kit.rules ────────────────────────────────────────────────────────
+
+[[rule]]
+sid       = 2072006
+msg       = "ET EXPLOIT_KIT LandUpdate808 Domain in TLS SNI"
+classtype = "trojan-activity"
+severity  = 1
+# The handshake names the host in cleartext even though everything after it is
+# encrypted, which is why SNI carries so much of a modern ruleset.
+filter    = 'tls.server_name contains "landupdate808"'
+
+[[rule]]
+sid       = 2072002
+msg       = "ET EXPLOIT_KIT LandUpdate808 Domain in DNS Lookup"
+classtype = "trojan-activity"
+severity  = 1
+# The lookup that precedes the connection, caught before any of it happens.
+filter    = 'dns.qname contains "landupdate808"'
+
+# ── malware.rules ────────────────────────────────────────────────────────────
+
+[[rule]]
+sid       = 2072012
+msg       = "ET MALWARE TA569 Gholoader CnC Domain in TLS SNI"
+classtype = "command-and-control"
+severity  = 1
+filter    = 'tls.server_name contains "gholoader"'
+
+[[rule]]
+sid       = 2072014
+msg       = "ET MALWARE Win32/Lumma Stealer Related CnC Domain in DNS Lookup"
+classtype = "command-and-control"
+severity  = 1
+filter    = 'dns.qname contains "lumma"'
+
+[[rule]]
+sid       = 2071996
+msg       = "ET MALWARE GemStone Gemini Chrome Extension CnC - Register"
+classtype = "command-and-control"
+severity  = 1
+# The extension registers itself by POSTing to a fixed path.
+filter    = 'http.method == "POST" and http.uri contains "/api/v1/register"'

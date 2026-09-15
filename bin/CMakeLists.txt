@@ -23,10 +23,25 @@ target_compile_definitions(pcapsh PRIVATE
 
 install(TARGETS pcapsh DESTINATION bin)
 
-add_executable(pcapngtool pcapngtool.c)
-target_include_directories(pcapngtool PRIVATE ${LIBPCAPNG_INCLUDE_DIRS})
+add_executable(pcapngtool pcapngtool.c pipeline.c)
+target_include_directories(pcapngtool PRIVATE ${LIBPCAPNG_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pcapngtool pcapng_static)
+# The pipeline is the only thing here that threads; the library still does not.
+find_package(Threads)
+if(Threads_FOUND)
+    target_link_libraries(pcapngtool Threads::Threads)
+endif()
 install(TARGETS pcapngtool DESTINATION bin)
+
+# ── jackal — rule-based intrusion detection ─────────────────────────────────
+add_executable(jackal jackal.c pipeline.c toml_lite.c)
+target_include_directories(jackal PRIVATE ${LIBPCAPNG_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(jackal pcapng_static)
+if(Threads_FOUND)
+    target_link_libraries(jackal Threads::Threads)
+endif()
+install(TARGETS jackal DESTINATION bin)
+install(FILES etc/jackal.conf DESTINATION share/jackal)
 
 # Install shared protocol definitions to share/pcapsh/protos/
 install(DIRECTORY protos/

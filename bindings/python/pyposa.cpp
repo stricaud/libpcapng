@@ -28,6 +28,7 @@
 extern "C" {
 #include <libpcapng/posa.h>
 #include <libpcapng/dissect.h>
+#include <libpcapng/flow_hash.h>
 }
 
 namespace py = pybind11;
@@ -168,6 +169,45 @@ void register_posa(py::module_ &m) {
          rule tcp.content "SSH-" => SSH
      Given what a captured frame carries, they name the decoder to hand it to.
      All return None when no rule matches. */
+
+  /* ── Flow hashing — the value a dispatcher shards on ─────────────────── */
+
+  m.def("flow_hash",
+        [](py::bytes data, uint16_t linktype, int mode) {
+          std::string buf = data;
+          return pcapng_flow_hash(reinterpret_cast<const uint8_t *>(buf.data()),
+                                  (uint32_t)buf.size(), linktype,
+                                  (pcapng_flow_mode_t)mode);
+        },
+        py::arg("frame"), py::arg("linktype") = 1, py::arg("mode") = 0,
+        "Direction-independent 64-bit hash of the flow a frame belongs to.\n"
+        "Both directions of a connection hash the same, so\n"
+        "    worker = flow_hash(frame) % nworkers\n"
+        "sends a whole conversation to one worker — which is what keeps the\n"
+        "library's per-flow state coherent when several are running at once.\n"
+        "mode 0 = FLOW_TUPLE (proto + addresses + ports),\n"
+        "mode 1 = FLOW_IPPAIR (addresses only, for sessions that span ports).\n"
+        "Returns 0, and only 0, when the frame carries no flow.");
+
+  m.def("flow_hash_tuple",
+        [](uint8_t ip_proto, py::bytes saddr, py::bytes daddr,
+           uint16_t sport, uint16_t dport, int mode) {
+          std::string a = saddr, b = daddr;
+          if (a.size() != b.size() || (a.size() != 4 && a.size() != 16))
+            throw std::runtime_error("addresses must both be 4 or 16 bytes");
+          return pcapng_flow_hash_tuple(ip_proto,
+                                        reinterpret_cast<const uint8_t *>(a.data()),
+                                        reinterpret_cast<const uint8_t *>(b.data()),
+                                        (int)a.size(), sport, dport,
+                                        (pcapng_flow_mode_t)mode);
+        },
+        py::arg("ip_proto"), py::arg("saddr"), py::arg("daddr"),
+        py::arg("sport") = 0, py::arg("dport") = 0, py::arg("mode") = 0,
+        "The same hash from an already-parsed tuple. Addresses are\n"
+        "network-order bytes, 4 for IPv4 or 16 for IPv6; ports are host order.");
+
+  m.attr("FLOW_TUPLE")  = 0;
+  m.attr("FLOW_IPPAIR") = 1;
 
   m.def("posa_bound_port",
         [](int ip_proto, uint16_t port) -> py::object {
