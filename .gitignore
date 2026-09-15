@@ -17,3 +17,10 @@ __pycache__/
 
 # pcapng capture files at repo root (test/scratch files)
 *.pcapng
+
+# ...except the protocol conformance captures, which are reference data: one
+# per spec in lib/tests/protocols, regenerated with
+#     protocol-conformance --write lib/tests/captures
+# and committed so a protocol can be checked in Wireshark — a second opinion
+# from an implementation that is not this one.
+!lib/tests/captures/*.pcapng

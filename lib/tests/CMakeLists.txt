@@ -78,6 +78,15 @@ target_link_libraries(tls-keylog ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(TLS-Keylog tls-keylog)
 set_tests_properties(TLS-Keylog PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
 
+# Protocol conformance — one capture per protocol, every field checked against
+# a value read off the protocol's specification. What a release is held to.
+add_executable(protocol-conformance protocol-conformance.c)
+target_link_libraries(protocol-conformance ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+target_compile_definitions(protocol-conformance PRIVATE
+    PROTOCOL_SPEC_DIR_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/protocols")
+add_test(Protocol-Conformance protocol-conformance)
+set_tests_properties(Protocol-Conformance PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+
 add_executable(flow-hash flow-hash.c)
 target_link_libraries(flow-hash ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(Flow-Hash flow-hash)
