@@ -78,6 +78,24 @@ target_link_libraries(tls-keylog ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(TLS-Keylog tls-keylog)
 set_tests_properties(TLS-Keylog PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
 
+# Header accessors — the inline readers in headers.h, checked against both the
+# bytes they are given and what the full dissector makes of the same frame.
+add_executable(headers headers.c)
+target_link_libraries(headers ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Headers headers)
+set_tests_properties(Headers PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+
+# Vendor sync — the Go and Rust bindings carry copies of lib/'s C sources, and
+# nothing else in the build compiles them, so they drift without anyone
+# noticing. This notices. Needs a shell, so it is skipped on Windows.
+if(NOT WIN32)
+    add_test(
+        NAME Vendor-Sync
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/check-vendor-sync.sh
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+endif()
+
 # Protocol conformance — one capture per protocol, every field checked against
 # a value read off the protocol's specification. What a release is held to.
 add_executable(protocol-conformance protocol-conformance.c)

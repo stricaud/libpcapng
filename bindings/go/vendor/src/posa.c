@@ -6,6 +6,7 @@
  * when, string-until, info, rule) build on the same structures.
  */
 #include <libpcapng/posa.h>
+#include <libpcapng/threading.h>  /* PCAPNG_THREAD_LOCAL, and what is safe across threads */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1695,13 +1696,22 @@ typedef struct {
   char     val[96];
 } posa_bind_t;
 
-static posa_bind_t g_convmem[POSA_BIND_SLOTS];
-static int         g_nconvmem;
-static char        g_conv[40];
+/* Per-thread. `bind`/`recall` is per-flow state — the conversation key is set
+   once per packet and read back by the decoder mid-dissection — so two threads
+   dissecting at once would overwrite each other's key and recall the wrong
+   flow's bindings. Per-thread is the right answer rather than a lock, provided
+   a flow is only ever dissected by one thread: pin flows to threads.
+   Costs ~896 KB of thread-local storage per thread, demand-paged, so only the
+   slots a thread actually uses are ever resident. */
+static PCAPNG_THREAD_LOCAL posa_bind_t g_convmem[POSA_BIND_SLOTS];
+static PCAPNG_THREAD_LOCAL int         g_nconvmem;
+static PCAPNG_THREAD_LOCAL char        g_conv[40];
 
 #define POSA_WARN_MAX 16
-static char g_warn[POSA_WARN_MAX][160];
-static int  g_nwarn;
+/* Per-thread: a warning describes the dissection the calling thread just ran,
+   and pcapng_posa_warnings() is how that thread reads it back. */
+static PCAPNG_THREAD_LOCAL char g_warn[POSA_WARN_MAX][160];
+static PCAPNG_THREAD_LOCAL int  g_nwarn;
 
 void pcapng_posa_set_conversation(const char *community_id)
 { snprintf(g_conv, sizeof g_conv, "%s", community_id ? community_id : ""); }
@@ -2482,8 +2492,11 @@ const pcapng_posa_proto_t *pcapng_posa_resolve(const char *name, const uint8_t *
 
 /* The Protocol-column name of the innermost decoder that ran: NetBIOS frames
    SMB2, and the packet is an "SMB2" — the deepest layer that names a column
-   wins, the same way the deepest Info string already does. */
-static char g_last_col[32];
+   wins, the same way the deepest Info string already does.
+
+   Per-thread, because run_posa() reads it straight back to label the packet it
+   just dissected. Shared, two threads dissecting at once label each other's. */
+static PCAPNG_THREAD_LOCAL char g_last_col[32];
 const char *pcapng_posa_last_col(void) { return g_last_col[0] ? g_last_col : NULL; }
 void pcapng_posa_reset_col(void) { g_last_col[0] = '\0'; }
 

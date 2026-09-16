@@ -93,7 +93,7 @@ int libpcapng_write_header_with_comment_to_file(FILE *outfile, uint16_t linktype
 	return 0;
 }
 
-int libpcapng_write_enhanced_packet_to_file(FILE *outfile, unsigned char *packet, size_t packet_size)
+int libpcapng_write_enhanced_packet_to_file(FILE *outfile, const unsigned char *packet, size_t packet_size)
 {
 	unsigned char *buffer;
 	size_t buffer_size;
@@ -108,7 +108,7 @@ int libpcapng_write_enhanced_packet_to_file(FILE *outfile, unsigned char *packet
 	return 0;
 }
 
-int libpcapng_write_enhanced_packet_with_time_to_file(FILE *outfile, unsigned char *packet, size_t packet_size, uint32_t timestamp)
+int libpcapng_write_enhanced_packet_with_time_to_file(FILE *outfile, const unsigned char *packet, size_t packet_size, uint32_t timestamp)
 {
 	unsigned char *buffer;
 	size_t buffer_size;

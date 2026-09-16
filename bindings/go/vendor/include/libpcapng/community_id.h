@@ -3,8 +3,16 @@
  * A deterministic, direction-independent identifier for a network flow, derived
  * from the 5-tuple (proto, addrs, ports). The same value is produced regardless
  * of capture direction, so it correlates flows across Zeek, Suricata, Wireshark
- * and this library. libpcapng also uses it internally as a flow key to make
- * protocol classification sticky across a flow's packets.
+ * and this library. libpcapng also uses it internally as the key a decoder's
+ * `bind`/`recall` remembers values under, so both directions of a connection
+ * share one conversation.
+ *
+ * Not the hash the dissector shards or classifies on. SHA-1 and base64 are the
+ * price of agreeing with other tools on a name for a flow, and at ~316 ns a
+ * packet that is 160x what an internal hash of the same 5-tuple costs. The
+ * sticky-classification table and the TLS keylog session table use a plain
+ * FNV-1a of the same canonicalised tuple instead (flow_key() in dissect.c),
+ * which partitions flows identically and returns a uint64 rather than a string.
  */
 #ifndef LIBPCAPNG_COMMUNITY_ID_H
 #define LIBPCAPNG_COMMUNITY_ID_H

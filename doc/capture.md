@@ -347,14 +347,8 @@ writing to a pcapng file, and the POSA field-provider hook.
 #include <arpa/inet.h>
 
 #include <libpcapng/libpcapng.h>
-
-/* ── Helpers ─────────────────────────────────────────────────────────── */
-
-static const char *ip4_str(const uint8_t *p, char *buf, size_t n)
-{
-    snprintf(buf, n, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
-    return buf;
-}
+#include <libpcapng/headers.h>     /* header accessors, libpcapng_frame_parse() */
+#include <libpcapng/timestamp.h>   /* libpcapng_ts_time_str(), libpcapng_ts_from_ns() */
 
 /* ── Packet callback ─────────────────────────────────────────────────── */
 
@@ -368,69 +362,45 @@ static void on_packet(const pcapng_packet_info_t *pkt, void *ud)
     cb_state_t *s = (cb_state_t *)ud;
     s->count++;
 
-    /* Decode timestamp */
-    uint64_t sec  = pkt->timestamp_ns / 1000000000ULL;
-    uint64_t usec = (pkt->timestamp_ns % 1000000000ULL) / 1000ULL;
+    /* Capture time, ready to print. libpcapng_ts_time_str() gives
+       "15:04:05.123456"; libpcapng_ts_iso8601() gives the full instant for a
+       log. Both are UTC — see timestamp.h for taking one apart instead. */
+    char when[LIBPCAPNG_TS_STR_MAX];
+    libpcapng_ts_time_str(pkt->timestamp_ns, when, sizeof when);
 
-    /* Quick protocol decode directly from the zero-copy pointer */
-    const uint8_t *d = pkt->data;
-    uint32_t        n = pkt->captured_len;
-    const char     *proto = "DATA";
-    char            src[20] = "-", dst[20] = "-";
-    uint16_t        sport = 0, dport = 0;
+    /* Headers, straight off the zero-copy pointer. libpcapng_frame_parse()
+       walks Ethernet (VLAN tags included), IPv4 or IPv6, and the transport
+       header, bounds-checking as it goes. It allocates nothing and runs no
+       decoders — see the note below on when to reach for the dissector
+       instead. */
+    libpcapng_frame_t f;
+    char src[LIBPCAPNG_ADDR_STR_MAX], dst[LIBPCAPNG_ADDR_STR_MAX];
 
-    if (n >= 14) {
-        uint16_t et = (uint16_t)((d[12] << 8) | d[13]);
+    libpcapng_frame_parse(pkt->data, pkt->captured_len, LINKTYPE_ETHERNET, &f);
 
-        if (et == 0x0800 && n >= 34) {          /* IPv4 */
-            uint8_t ihl   = (uint8_t)((d[14] & 0x0f) * 4);
-            uint8_t iproto = d[14 + 9];
-            ip4_str(d + 26, src, sizeof src);
-            ip4_str(d + 30, dst, sizeof dst);
-
-            if (iproto == 6 && n >= (uint32_t)(14 + ihl + 4)) {
-                proto = "TCP";
-                const uint8_t *t = d + 14 + ihl;
-                sport = (uint16_t)((t[0] << 8) | t[1]);
-                dport = (uint16_t)((t[2] << 8) | t[3]);
-            } else if (iproto == 17 && n >= (uint32_t)(14 + ihl + 4)) {
-                proto = "UDP";
-                const uint8_t *u = d + 14 + ihl;
-                sport = (uint16_t)((u[0] << 8) | u[1]);
-                dport = (uint16_t)((u[2] << 8) | u[3]);
-            } else if (iproto == 1) {
-                proto = "ICMP";
-            } else {
-                proto = "IP";
-            }
-        } else if (et == 0x86DD) {
-            proto = "IPv6";
-        } else if (et == 0x0806) {
-            proto = "ARP";
-        }
-    }
+    const char *proto = libpcapng_frame_proto_name(&f);
+    libpcapng_addr_str(f.src_addr, f.addr_len, src, sizeof src);
+    libpcapng_addr_str(f.dst_addr, f.addr_len, dst, sizeof dst);
+    uint16_t sport = f.sport, dport = f.dport;
 
     /* One-line summary */
     if (sport || dport) {
-        printf("%5llu  %llu.%06llu  %-5s  %s:%u → %s:%u  (%u bytes)\n",
-               (unsigned long long)s->count,
-               (unsigned long long)sec, (unsigned long long)usec,
+        printf("%5llu  %s  %-5s  %s:%u → %s:%u  (%u bytes)\n",
+               (unsigned long long)s->count, when,
                proto, src, sport, dst, dport, pkt->original_len);
     } else {
-        printf("%5llu  %llu.%06llu  %-5s  %s → %s  (%u bytes)\n",
-               (unsigned long long)s->count,
-               (unsigned long long)sec, (unsigned long long)usec,
+        printf("%5llu  %s  %-5s  %s → %s  (%u bytes)\n",
+               (unsigned long long)s->count, when,
                proto, src, dst, pkt->original_len);
     }
 
-    /* Write to pcapng file if requested */
+    /* Write to pcapng file if requested. pkt->data points straight into the
+       kernel ring and is const; the writer only reads, and says so, so it
+       goes across without a cast. */
     if (s->pcapng_out) {
-        uint32_t ts_sec = (uint32_t)(pkt->timestamp_ns / 1000000000ULL);
+        libpcapng_ts_t t = libpcapng_ts_from_ns(pkt->timestamp_ns);
         libpcapng_write_enhanced_packet_with_time_to_file(
-            s->pcapng_out,
-            (unsigned char *)(uintptr_t)pkt->data,   /* zero-copy read */
-            pkt->captured_len,
-            ts_sec);
+            s->pcapng_out, pkt->data, pkt->captured_len, (uint32_t)t.sec);
     }
 }
 
@@ -447,23 +417,19 @@ static int app_field_provider(const char     *field,
                                size_t          val_size,
                                void           *ctx)
 {
+    libpcapng_frame_t f;
+
     (void)ctx;
     if (strcmp(field, "app.port") != 0) return 0;
-    if (len < 14 + 20 + 4) return 0;      /* need eth + ip + 4 port bytes */
 
-    uint16_t et = (uint16_t)((data[12] << 8) | data[13]);
-    if (et != 0x0800) return 0;
+    /* One call walks Ethernet — VLAN tags included — then IPv4 or IPv6 and the
+       transport header, bounds-checking as it goes. f.dport is already 0 for
+       anything without ports, so there is nothing else to test. */
+    if (!libpcapng_frame_parse(data, len, LINKTYPE_ETHERNET, &f)) return 0;
+    if (!f.dport) return 0;
 
-    uint8_t        ihl   = (uint8_t)((data[14] & 0x0f) * 4);
-    uint8_t        proto = data[14 + 9];
-    const uint8_t *l4    = data + 14 + ihl;
-
-    if ((proto == 6 || proto == 17) && len >= (uint32_t)(14 + ihl + 4)) {
-        uint16_t dport = (uint16_t)((l4[2] << 8) | l4[3]);
-        snprintf(val_out, val_size, "%u", dport);
-        return 1;
-    }
-    return 0;
+    snprintf(val_out, val_size, "%u", f.dport);
+    return 1;
 }
 
 /* ── main ────────────────────────────────────────────────────────────── */

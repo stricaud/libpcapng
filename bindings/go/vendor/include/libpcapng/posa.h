@@ -283,7 +283,8 @@ int  pcapng_posa_dissect(const char *proto, const uint8_t *data, int len,
 
 /* The `col "..."` of the innermost decoder the last dissect reached (NULL if
    none declared one): NetBIOS frames SMB2, and the packet should read "SMB2".
-   Reset before a dissect, read after it. */
+   Reset before a dissect, read after it. Per-thread, so each thread sees the
+   column of its own dissection. */
 void        pcapng_posa_reset_col(void);
 const char *pcapng_posa_last_col(void);
 

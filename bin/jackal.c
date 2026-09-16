@@ -34,6 +34,7 @@
 #include <libpcapng/blocks.h>
 #include <libpcapng/dfilter.h>
 #include <libpcapng/dissect.h>
+#include <libpcapng/timestamp.h>
 
 #include "pipeline.h"
 #include "toml_lite.h"
@@ -178,28 +179,15 @@ static void json_escape(const char *s, char *out, size_t outlen)
     out[o] = '\0';
 }
 
-static void ts_iso8601(uint64_t ts_us, char *out, size_t outlen)
-{
-    time_t    secs = (time_t)(ts_us / 1000000u);
-    unsigned  usec = (unsigned)(ts_us % 1000000u);
-    struct tm tm;
-    char      base[32];
-
-#ifdef _WIN32
-    gmtime_s(&tm, &secs);
-#else
-    gmtime_r(&secs, &tm);
-#endif
-    strftime(base, sizeof base, "%Y-%m-%dT%H:%M:%S", &tm);
-    snprintf(out, outlen, "%s.%06u+0000", base, usec);
-}
-
 static void alert_emit(detect_job_t *job, const rule_t *r,
                        const pipeline_block_t *b, unsigned long pkt_no,
                        const pcapng_dissection_t *d)
 {
-    char when[64];
-    ts_iso8601(b->ts, when, sizeof when);
+    /* An EPB timestamp is in the interface's units — microseconds unless the
+       IDB says otherwise — so it is converted before formatting. */
+    char when[LIBPCAPNG_TS_STR_MAX];
+    libpcapng_ts_iso8601(libpcapng_ts_to_ns(libpcapng_ts_from_us(b->ts)),
+                         when, sizeof when);
 
     if (job->eve) {
         /* Shaped like Suricata's EVE alert record, so anything that already

@@ -21,6 +21,9 @@
 #include <libpcapng/protocols/ssl.h>   /* TLS_CONTENT_*, TLS_VERSION_* constants    */
 #include <libpcapng/posa.h>            /* declarative decoders (e.g. bundled RDP)   */
 #include <libpcapng/community_id.h>    /* per-flow Community ID + sticky flow key    */
+#include <libpcapng/tls_keylog.h>      /* TLS keylog decryption hooks               */
+#include <libpcapng/threading.h>       /* PCAPNG_THREAD_LOCAL + the threading contract */
+#include <libpcapng/flow_hash.h>       /* the shared 5-tuple hash                   */
 #include "builtin_protos.h"           /* g_builtin_posa_protos[] — embedded .posa  */
 
 /* LINKTYPE_* aliases so the ported dissector body is unchanged. */
@@ -138,6 +141,8 @@ typedef struct {
   int l3v6;                      /* 1 if l3src/l3dst are 16-byte IPv6 addresses */
   char conv_id[32];              /* Community ID of this flow — the key posa's
                                     `bind`/`recall` remember values under      */
+  uint64_t fkey;                 /* canonical bidirectional flow key            */
+  uint16_t l4_sport, l4_dport;  /* L4 source/dest ports (0 if not TCP/UDP)    */
 } dctx_t;
 
 static uint16_t be16(const uint8_t *p);
@@ -234,17 +239,22 @@ static const char POSA_BUILTIN_RDP[] =
   "    info \"%s Negotiate %s\" cookie, type\n"
   "rule tcp.port == 3389 => TPKT\n";
 
-static int g_posa_builtin_loaded;
+/* Guarded rather than a plain flag: threads racing into the first dissection
+   would otherwise each see the registry as unloaded and build it on top of each
+   other, and a half-built registry mis-decodes. The guard costs one acquire
+   load once it is done. See threading.h — and call
+   pcapng_dissect_ensure_protocols() once up front, which skips the wait. */
+static pcapng_once_t g_posa_builtin_once = PCAPNG_ONCE_INIT;
 static void posa_ensure_builtin(void)
 {
   int i;
-  if (g_posa_builtin_loaded) return;
-  g_posa_builtin_loaded = 1;
+  if (!pcapng_once_begin(&g_posa_builtin_once)) return;
   /* Every .posa in bin/protos, embedded at build time. */
   for (i = 0; g_builtin_posa_protos[i]; i++)
     pcapng_posa_load_text(g_builtin_posa_protos[i], NULL, 0);
   /* Load the known-good RDP definition last so it wins over any bundled rdp.posa. */
   pcapng_posa_load_text(POSA_BUILTIN_RDP, NULL, 0);
+  pcapng_once_end(&g_posa_builtin_once);
 }
 
 /* Run the posa decoder named by a `rule`, if there is one. Returns 1 when it
@@ -331,8 +341,13 @@ static int dispatch_named(dctx_t *c, const char *name, const uint8_t *pl, int pl
    opening packet resolved to, and replay it onto the rest of the flow. */
 #define FLOWTAB_BITS 14
 #define FLOWTAB_SIZE (1u << FLOWTAB_BITS)
-static struct { uint64_t key; char proto[16]; } g_flowtab[FLOWTAB_SIZE];
-static int g_flow_used;
+/* Per-thread, which makes the table safe to use from several threads at once
+   and scopes it to the thread that filled it: a flow whose packets are split
+   across threads is classified independently in each, so the opening packet's
+   verdict does not reach the others. Give a thread whole flows. Costs ~384 KB
+   of thread-local storage per thread. */
+static PCAPNG_THREAD_LOCAL struct { uint64_t key; char proto[16]; } g_flowtab[FLOWTAB_SIZE];
+static PCAPNG_THREAD_LOCAL int g_flow_used;
 
 void pcapng_dissect_reset_flows(void) { memset(g_flowtab, 0, sizeof g_flowtab); g_flow_used = 0; }
 
@@ -342,20 +357,12 @@ void pcapng_dissect_reset_flows(void) { memset(g_flowtab, 0, sizeof g_flowtab); 
 static int g_verify_checksums;
 void pcapng_dissect_set_verify_checksums(int on) { g_verify_checksums = on ? 1 : 0; }
 
+/* The same hash a caller shards on, so a packet's worker and the table slot it
+   lands in are derived from one definition. flow_hash.c holds it. */
 static uint64_t flow_key(uint8_t proto, const uint8_t *a, const uint8_t *b, int alen,
                          uint16_t sp, uint16_t dp)
 {
-  const uint8_t *lo = a, *hi = b; uint16_t plo = sp, phi = dp;
-  uint64_t h = 1469598103934665603ULL; /* FNV-1a */
-  int i, cmp = memcmp(a, b, (size_t)alen);
-  if (cmp > 0 || (cmp == 0 && sp > dp)) { lo = b; hi = a; plo = dp; phi = sp; }
-#define FNV(x) do { h ^= (uint8_t)(x); h *= 1099511628211ULL; } while (0)
-  FNV(proto);
-  for (i = 0; i < alen; i++) FNV(lo[i]);
-  for (i = 0; i < alen; i++) FNV(hi[i]);
-  FNV(plo >> 8); FNV(plo & 0xff); FNV(phi >> 8); FNV(phi & 0xff);
-#undef FNV
-  return h ? h : 1;                       /* 0 marks an empty slot */
+  return pcapng_flow_hash_tuple(proto, a, b, alen, sp, dp, PCAPNG_FLOW_TUPLE);
 }
 
 static const char *flow_lookup(uint64_t key)
@@ -400,7 +407,11 @@ static uint64_t flow_annotate(dctx_t *c, pcapng_field_t *layer, uint8_t proto,
     pf_set_str(f, cid);
     pf_set_label(f, "Community ID: %s", cid);
   }
-  return flow_key(proto, c->l3src, c->l3dst, alen, sp, dp);
+  uint64_t fk = flow_key(proto, c->l3src, c->l3dst, alen, sp, dp);
+  c->fkey = fk;
+  c->l4_sport = sp;
+  c->l4_dport = dp;
+  return fk;
 }
 
 /* ── frame (always present) ─────────────────────────────────────────────── */
@@ -1235,6 +1246,9 @@ static void dissect_tls(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
     f = pf_add(t, "tls.handshake.type", PCAPNG_FT_UINT); pf_set_uint(f, hs);
     pf_set_label(f, "Handshake Type: %s (%u)", tls_hs_name(hs), hs); set_range(c, f, d + 5, 1);
     if (hs == 1) {
+      /* ClientHello: d[11..42] = client_random (5-byte record hdr + 4-byte HS hdr + 2-byte version) */
+      if (len >= 43 && c->fkey && pcapng_tls_keylog_loaded())
+        tls_keylog_on_client_hello(c->fkey, d + 11);
       char sni[128];
       tls_extract_sni(d, len, sni, sizeof sni);
       if (sni[0]) {
@@ -1242,6 +1256,35 @@ static void dissect_tls(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
         pf_set_str(f, sni); pf_set_label(f, "Server Name: %s", sni);
         set_info(c, "Client Hello (SNI=%s)", sni);
       } else set_info(c, "Client Hello");
+    } else if (hs == 2) {
+      /* ServerHello: same header layout; server_random at d[11..42], then session_id, cipher_suite */
+      if (len >= 43 + 1 && c->fkey && pcapng_tls_keylog_loaded()) {
+        const uint8_t *srv_random = d + 11;
+        int p = 43;
+        if (p < len) {
+          uint8_t sid_len = d[p]; p += 1 + sid_len;   /* skip session_id */
+          if (p + 3 <= len) {
+            uint16_t cs   = be16(d + p); p += 2;
+            /* Detect TLS 1.3: legacy_version=0x0303 but Supported Versions ext says 0x0304 */
+            uint16_t neg_ver = ver;                    /* outer record version */
+            /* Quick scan extensions for supported_versions (type 0x002b) */
+            int ep = p + 1;  /* skip compression */
+            if (ep + 2 <= len) {
+              int ext_end = ep + 2 + be16(d + ep); ep += 2;
+              while (ep + 4 <= ext_end && ep + 4 <= len) {
+                uint16_t et = be16(d + ep), el = be16(d + ep + 2); ep += 4;
+                if (et == 0x002b && el >= 2 && ep + 2 <= len) {
+                  neg_ver = be16(d + ep);
+                  break;
+                }
+                ep += el;
+              }
+            }
+            tls_keylog_on_server_hello(c->fkey, srv_random, cs, neg_ver);
+          }
+        }
+      }
+      set_info(c, "Server Hello");
     } else set_info(c, "%s", tls_hs_name(hs));
   } else {
     /* non-handshake record (Application Data / Alert / ChangeCipherSpec): show
@@ -1260,6 +1303,22 @@ static void dissect_tls(dctx_t *c, const uint8_t *d, int len, pcapng_field_t *ro
       pf_set_label(f, "%s: %s%s",
                    (ct == TLS_CONTENT_APPDATA) ? "Encrypted Application Data" : "Fragment",
                    hex, bodylen > 16 ? "\xe2\x80\xa6" : "");
+
+      /* Attempt in-place TLS decryption when keylog is loaded */
+      if (ct == TLS_CONTENT_APPDATA && c->fkey && pcapng_tls_keylog_loaded()) {
+        /* from_client: the packet flows from the initiator (src_port != well-known) to server */
+        int from_client = (c->l4_dport == 443 || c->l4_dport == 8443);
+        uint8_t *plain = (uint8_t *)malloc((size_t)(len + 16));
+        if (plain) {
+          int plen = tls_keylog_decrypt(c->fkey, from_client, d, len, plain);
+          if (plen > 0) {
+            f = pf_add(t, "tls.app_data.decrypted", PCAPNG_FT_BYTES);
+            pf_set_bytes(f, plain, plen);
+            pf_set_label(f, "Decrypted data (%d bytes)", plen);
+          }
+          free(plain);
+        }
+      }
     }
     set_info(c, "%s", tls_ct_name(ct));
   }
@@ -1652,6 +1711,8 @@ void pcapng_dissection_free(pcapng_dissection_t *d)
 }
 
 /* ── introspection: protocols this dissector emits ──────────────────────── */
+void pcapng_dissect_ensure_protocols(void) { posa_ensure_builtin(); }
+
 const char *const *pcapng_dissect_protocols(int *count)
 {
   static const char *const P[] = {
