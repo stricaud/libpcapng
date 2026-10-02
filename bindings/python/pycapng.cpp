@@ -1236,7 +1236,31 @@ PYBIND11_MODULE(pycapng, m) {
        table that turns an interface id into a link type, and a packet counter.
        These wrap pcapng_read_packets() so none of that is the caller's
        problem. */
-    py::class_<pcapng_packet_t>(m, "CapturedPacket",
+    /*
+     * pcapng_packet_t.data points into the reader's own buffer and is valid
+     * only for the duration of the callback — for a classic .pcap the library
+     * synthesises each block and frees it on return. So the frame is copied
+     * here, at the moment it is handed over, rather than exposed as a lazy
+     * property over a pointer that will have gone by the time Python reads it.
+     */
+    struct PyCapturedPacket {
+        uint64_t    index;
+        uint32_t    captured_len, original_len, interface_id, block_type;
+        uint16_t    linktype;
+        uint64_t    timestamp_ns;
+        bool        has_timestamp;
+        std::string data;
+
+        explicit PyCapturedPacket(const pcapng_packet_t &p)
+            : index(p.index), captured_len(p.captured_len),
+              original_len(p.original_len), interface_id(p.interface_id),
+              block_type(p.block_type), linktype(p.linktype),
+              timestamp_ns(p.timestamp_ns), has_timestamp(p.has_timestamp != 0),
+              data(reinterpret_cast<const char *>(p.data),
+                   p.data ? p.captured_len : 0u) {}
+    };
+
+    py::class_<PyCapturedPacket>(m, "CapturedPacket",
         "One packet from a capture, with everything needed to make sense of it.\n\n"
         "  index         1-based position among the packets\n"
         "  data          the frame, as bytes\n"
@@ -1247,23 +1271,22 @@ PYBIND11_MODULE(pycapng, m) {
         "  timestamp_ns  nanoseconds since the epoch, scaled by the\n"
         "                interface's declared resolution\n"
         "  has_timestamp False for a Simple Packet Block, which carries none")
-        .def_readonly("index",        &pcapng_packet_t::index)
-        .def_readonly("captured_len", &pcapng_packet_t::captured_len)
-        .def_readonly("original_len", &pcapng_packet_t::original_len)
-        .def_readonly("interface_id", &pcapng_packet_t::interface_id)
-        .def_readonly("linktype",     &pcapng_packet_t::linktype)
-        .def_readonly("timestamp_ns", &pcapng_packet_t::timestamp_ns)
-        .def_readonly("block_type",   &pcapng_packet_t::block_type)
-        .def_property_readonly("has_timestamp",
-            [](const pcapng_packet_t &p) { return p.has_timestamp != 0; })
-        .def_property_readonly("data", [](const pcapng_packet_t &p) {
-            return py::bytes(reinterpret_cast<const char *>(p.data), p.captured_len);
+        .def_readonly("index",         &PyCapturedPacket::index)
+        .def_readonly("captured_len",  &PyCapturedPacket::captured_len)
+        .def_readonly("original_len",  &PyCapturedPacket::original_len)
+        .def_readonly("interface_id",  &PyCapturedPacket::interface_id)
+        .def_readonly("linktype",      &PyCapturedPacket::linktype)
+        .def_readonly("timestamp_ns",  &PyCapturedPacket::timestamp_ns)
+        .def_readonly("block_type",    &PyCapturedPacket::block_type)
+        .def_readonly("has_timestamp", &PyCapturedPacket::has_timestamp)
+        .def_property_readonly("data", [](const PyCapturedPacket &p) {
+            return py::bytes(p.data);
         }, "The frame bytes.")
         .def_property_readonly("truncated",
-            [](const pcapng_packet_t &p) { return p.captured_len < p.original_len; },
+            [](const PyCapturedPacket &p) { return p.captured_len < p.original_len; },
             "True when the capture kept less than was on the wire (snaplen).")
-        .def("__len__", [](const pcapng_packet_t &p) { return (size_t)p.captured_len; })
-        .def("__repr__", [](const pcapng_packet_t &p) {
+        .def("__len__", [](const PyCapturedPacket &p) { return p.data.size(); })
+        .def("__repr__", [](const PyCapturedPacket &p) {
             char buf[160];
             snprintf(buf, sizeof buf,
                      "<CapturedPacket #%llu %u/%u bytes linktype=%u>",
@@ -1279,7 +1302,7 @@ PYBIND11_MODULE(pycapng, m) {
               py::list out;
               auto collect = [](const pcapng_packet_t *p, void *ud) -> int {
                   auto *l = static_cast<py::list *>(ud);
-                  l->append(py::cast(*p, py::return_value_policy::copy));
+                  l->append(py::cast(PyCapturedPacket(*p)));
                   return 0;
               };
               if (pcapng_read_packets(path.c_str(), collect, &out) < 0)
@@ -1300,7 +1323,7 @@ PYBIND11_MODULE(pycapng, m) {
               std::string buf = data;
               auto collect = [](const pcapng_packet_t *p, void *ud) -> int {
                   auto *l = static_cast<py::list *>(ud);
-                  l->append(py::cast(*p, py::return_value_policy::copy));
+                  l->append(py::cast(PyCapturedPacket(*p)));
                   return 0;
               };
               pcapng_read_packets_mem(reinterpret_cast<const uint8_t *>(buf.data()),
@@ -1317,7 +1340,7 @@ PYBIND11_MODULE(pycapng, m) {
               auto trampoline = [](const pcapng_packet_t *p, void *ud) -> int {
                   auto *c = static_cast<cb_ctx *>(ud);
                   try {
-                      py::object r = (*c->fn)(py::cast(*p, py::return_value_policy::copy));
+                      py::object r = (*c->fn)(py::cast(PyCapturedPacket(*p)));
                       /* Returning False stops the walk, the way a callback that
                          has found what it came for should be able to. */
                       if (!r.is_none() && !r.cast<bool>()) return 1;

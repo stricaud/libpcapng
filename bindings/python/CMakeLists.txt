@@ -45,6 +45,17 @@ set_target_properties(pycapng PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}"
 # Require C++14: std::make_unique, initialized lambda captures.
 target_compile_features(pycapng PRIVATE cxx_std_14)
 
+# The packet reader's Python surface. Worth its own test because the thing that
+# can go wrong here cannot go wrong in C: CapturedPacket has to own a copy of
+# the frame, since the pointer the C reader hands over dies with the callback.
+# A length check does not notice the difference; comparing the bytes does.
+add_test(
+    NAME Python-Reader
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_reader.py
+)
+set_tests_properties(Python-Reader PROPERTIES
+    ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:pycapng>")
+
 if(SKBUILD)
     # scikit-build-core sets SKBUILD=1; install relative to the wheel root.
     install(TARGETS pycapng LIBRARY DESTINATION . COMPONENT Python)
