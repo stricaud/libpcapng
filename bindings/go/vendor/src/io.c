@@ -76,10 +76,18 @@ static int _pcap_emit_epb(uint32_t ts_sec, uint32_t ts_usec,
     unsigned char *epb = (unsigned char *)malloc(data_sz);
     if (!epb) return -1;
 
-    uint32_t iface = 0;
+    /* An EPB timestamp is one 64-bit count of if_tsresol units split across two
+       words, not a (seconds, fraction) pair — so the classic header's two
+       fields are combined before being split again. Writing ts_sec into the
+       high word and ts_usec into the low one, as this did, produces a number
+       around 2^32 times too large and a fraction that reads as whole units. */
+    uint64_t ticks   = (uint64_t)ts_sec * 1000000ULL + ts_usec;
+    uint32_t ts_high = (uint32_t)(ticks >> 32);
+    uint32_t ts_low  = (uint32_t)(ticks & 0xffffffffULL);
+    uint32_t iface   = 0;
     memcpy(epb +  0, &iface,    4);
-    memcpy(epb +  4, &ts_sec,   4);
-    memcpy(epb +  8, &ts_usec,  4);
+    memcpy(epb +  4, &ts_high,  4);
+    memcpy(epb +  8, &ts_low,   4);
     memcpy(epb + 12, &incl_len, 4);
     memcpy(epb + 16, &orig_len, 4);
     memcpy(epb + 20, pkt,       incl_len);
@@ -210,7 +218,7 @@ int foreach_pcapng_block(uint32_t block_counter, uint32_t block_type, uint32_t b
 	return 0;
 }
 
-int libpcapng_mem_read(unsigned char *buf, size_t buf_len,
+int libpcapng_mem_read(const unsigned char *buf, size_t buf_len,
                        foreach_pcapng_block_cb pcapng_block_cb, void *userdata)
 {
     int swap;

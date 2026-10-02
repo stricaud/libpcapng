@@ -78,6 +78,13 @@ target_link_libraries(tls-keylog ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
 add_test(TLS-Keylog tls-keylog)
 set_tests_properties(TLS-Keylog PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
 
+# Reader — pcapng_read_packets(), the packet-level view: block layouts, the
+# interface table, timestamp resolution, and the counter callers used to keep.
+add_executable(reader reader.c)
+target_link_libraries(reader ${LIBPCAPNG_LIBRARY} ${CMAKE_DL_LIBS})
+add_test(Reader reader)
+set_tests_properties(Reader PROPERTIES ENVIRONMENT "${LIBPCAPNG_TEST_ENV}")
+
 # Header accessors — the inline readers in headers.h, checked against both the
 # bytes they are given and what the full dissector makes of the same frame.
 add_executable(headers headers.c)

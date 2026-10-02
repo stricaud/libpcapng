@@ -17,7 +17,10 @@ extern "C" {
 
   typedef int (*foreach_pcapng_block_cb)(uint32_t block_counter, uint32_t block_type, uint32_t block_total_length, unsigned char *data, void *userdata);
 
-int libpcapng_mem_read(unsigned char *buf, size_t buf_len, foreach_pcapng_block_cb pcapng_block_cb, void *userdata);
+/* The buffer is read, never written, so const bytes need no cast. The callback
+   is still handed a non-const pointer into it, for callers that rewrite blocks
+   in place; treat it as read-only unless you own the buffer. */
+int libpcapng_mem_read(const unsigned char *buf, size_t buf_len, foreach_pcapng_block_cb pcapng_block_cb, void *userdata);
 int libpcapng_fp_read(FILE *fp, foreach_pcapng_block_cb pcapng_block_cb, void *userdata);
 int libpcapng_file_read(char *filename, foreach_pcapng_block_cb pcapng_block_cb, void *userdata);
 int libpcapng_file_read_debug(char *filename);

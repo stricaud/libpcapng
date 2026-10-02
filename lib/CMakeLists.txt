@@ -65,6 +65,8 @@ set(LIBPCAPNG_SOURCES
   dissect.c
   dfilter.c
   objects.c
+  reader.c
+  reader.c
   posa.c
   community_id.c
   wire_layout.c

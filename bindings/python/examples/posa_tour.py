@@ -252,25 +252,12 @@ def capture_live(args) -> list[bytes]:
 def read_pcapng(path: str) -> list[bytes]:
     """Pull the raw frames out of a pcapng file.
 
-    ForeachPacket hands back the Enhanced Packet Block's fixed header followed
-    by exactly captured_len bytes of frame:
-        interface_id(4) ts_high(4) ts_low(4) captured_len(4) original_len(4)
-    all little-endian, so the frame starts at offset 20.
+    read_packets() resolves each packet's interface into its link type and
+    numbers the packets, so there is no block dispatch, no struct.unpack of a
+    block header, and no counter to keep. For a capture too large to hold in
+    memory, pycapng.foreach_packet(path, callback) streams instead.
     """
-    EPB_HDR = 20
-    frames: list[bytes] = []
-
-    def each_block(counter, btype, total_len, data):
-        if btype != pycapng.ENHANCED_PACKET_BLOCK or len(data) < EPB_HDR:
-            return
-        _iface, _hi, _lo, caplen, _orig = struct.unpack("<IIIII", data[:EPB_HDR])
-        frames.append(data[EPB_HDR:EPB_HDR + caplen])
-
-    f = pycapng.PcapNG()
-    f.OpenFile(path, "r")
-    f.ForeachPacket(each_block)
-    f.CloseFile()
-    return frames
+    return [pkt.data for pkt in pycapng.read_packets(path)]
 
 
 def run_pcapsh(sh, script: str, **kw) -> list[bytes]:

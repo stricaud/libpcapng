@@ -9,6 +9,7 @@
 #include <libpcapng/libpcapng.h>
 #include <libpcapng/surgery.h>
 #include <libpcapng/tls_keylog.h>
+#include <libpcapng/reader.h>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
@@ -1229,6 +1230,131 @@ PYBIND11_MODULE(pycapng, m) {
     m.attr("PTRFLAGS_BUTTON2")  = py::int_(PTRFLAGS_BUTTON2);
 
     /* ── TLS keylog ──────────────────────────────────────────────────────── */
+    /* ── Packet-level reading ─────────────────────────────────────────────
+       ForeachPacket hands over raw block bytes, which leaves every caller to
+       reimplement the Enhanced and Simple Packet Block layouts, the interface
+       table that turns an interface id into a link type, and a packet counter.
+       These wrap pcapng_read_packets() so none of that is the caller's
+       problem. */
+    py::class_<pcapng_packet_t>(m, "CapturedPacket",
+        "One packet from a capture, with everything needed to make sense of it.\n\n"
+        "  index         1-based position among the packets\n"
+        "  data          the frame, as bytes\n"
+        "  captured_len  bytes present in data\n"
+        "  original_len  bytes on the wire, >= captured_len\n"
+        "  linktype      resolved from the interface description\n"
+        "  interface_id  which interface it arrived on\n"
+        "  timestamp_ns  nanoseconds since the epoch, scaled by the\n"
+        "                interface's declared resolution\n"
+        "  has_timestamp False for a Simple Packet Block, which carries none")
+        .def_readonly("index",        &pcapng_packet_t::index)
+        .def_readonly("captured_len", &pcapng_packet_t::captured_len)
+        .def_readonly("original_len", &pcapng_packet_t::original_len)
+        .def_readonly("interface_id", &pcapng_packet_t::interface_id)
+        .def_readonly("linktype",     &pcapng_packet_t::linktype)
+        .def_readonly("timestamp_ns", &pcapng_packet_t::timestamp_ns)
+        .def_readonly("block_type",   &pcapng_packet_t::block_type)
+        .def_property_readonly("has_timestamp",
+            [](const pcapng_packet_t &p) { return p.has_timestamp != 0; })
+        .def_property_readonly("data", [](const pcapng_packet_t &p) {
+            return py::bytes(reinterpret_cast<const char *>(p.data), p.captured_len);
+        }, "The frame bytes.")
+        .def_property_readonly("truncated",
+            [](const pcapng_packet_t &p) { return p.captured_len < p.original_len; },
+            "True when the capture kept less than was on the wire (snaplen).")
+        .def("__len__", [](const pcapng_packet_t &p) { return (size_t)p.captured_len; })
+        .def("__repr__", [](const pcapng_packet_t &p) {
+            char buf[160];
+            snprintf(buf, sizeof buf,
+                     "<CapturedPacket #%llu %u/%u bytes linktype=%u>",
+                     (unsigned long long)p.index, p.captured_len,
+                     p.original_len, (unsigned)p.linktype);
+            return std::string(buf);
+        });
+
+    m.def("read_packets",
+          [](const std::string &path) {
+              /* Each packet is copied into a Python object as it arrives: the C
+                 pointer is only valid for the duration of the callback. */
+              py::list out;
+              auto collect = [](const pcapng_packet_t *p, void *ud) -> int {
+                  auto *l = static_cast<py::list *>(ud);
+                  l->append(py::cast(*p, py::return_value_policy::copy));
+                  return 0;
+              };
+              if (pcapng_read_packets(path.c_str(), collect, &out) < 0)
+                  throw std::runtime_error("cannot read " + path);
+              return out;
+          },
+          py::arg("path"),
+          "Every packet in a capture file, as a list of CapturedPacket.\n\n"
+          "    for pkt in pycapng.read_packets(\"capture.pcapng\"):\n"
+          "        print(pkt.index, len(pkt.data), pkt.linktype)\n\n"
+          "Interface descriptions are resolved into each packet's linktype, and\n"
+          "classic .pcap files are read too. For a capture too large to hold in\n"
+          "memory use foreach_packet(), which streams.");
+
+    m.def("read_packets_mem",
+          [](py::bytes data) {
+              py::list out;
+              std::string buf = data;
+              auto collect = [](const pcapng_packet_t *p, void *ud) -> int {
+                  auto *l = static_cast<py::list *>(ud);
+                  l->append(py::cast(*p, py::return_value_policy::copy));
+                  return 0;
+              };
+              pcapng_read_packets_mem(reinterpret_cast<const uint8_t *>(buf.data()),
+                                      buf.size(), collect, &out);
+              return out;
+          },
+          py::arg("data"),
+          "Same, from a capture already held in memory.");
+
+    m.def("foreach_packet",
+          [](const std::string &path, py::object callback) {
+              struct cb_ctx { py::object *fn; std::exception_ptr exc; };
+              cb_ctx ctx{ &callback, nullptr };
+              auto trampoline = [](const pcapng_packet_t *p, void *ud) -> int {
+                  auto *c = static_cast<cb_ctx *>(ud);
+                  try {
+                      py::object r = (*c->fn)(py::cast(*p, py::return_value_policy::copy));
+                      /* Returning False stops the walk, the way a callback that
+                         has found what it came for should be able to. */
+                      if (!r.is_none() && !r.cast<bool>()) return 1;
+                  } catch (...) {
+                      c->exc = std::current_exception();
+                      return 1;
+                  }
+                  return 0;
+              };
+              long n = pcapng_read_packets(path.c_str(), trampoline, &ctx);
+              if (ctx.exc) std::rethrow_exception(ctx.exc);
+              if (n < 0) throw std::runtime_error("cannot read " + path);
+              return n;
+          },
+          py::arg("path"), py::arg("callback"),
+          "Call `callback(pkt)` for each packet, without holding the whole\n"
+          "capture in memory. Returns how many were delivered; the callback may\n"
+          "return False to stop early.");
+
+    /* Block-type predicates, for code that really does work at the block level. */
+    m.def("is_idb", [](uint32_t t, py::bytes b) {
+              return pcapng_block_is_idb(t, py::len(b)) != 0; },
+          py::arg("block_type"), py::arg("block_data"),
+          "True for an Interface Description Block whose body is long enough.");
+    m.def("is_epb", [](uint32_t t, py::bytes b) {
+              return pcapng_block_is_epb(t, py::len(b)) != 0; },
+          py::arg("block_type"), py::arg("block_data"),
+          "True for an Enhanced Packet Block whose body is long enough.");
+    m.def("is_spb", [](uint32_t t, py::bytes b) {
+              return pcapng_block_is_spb(t, py::len(b)) != 0; },
+          py::arg("block_type"), py::arg("block_data"),
+          "True for a Simple Packet Block whose body is long enough.");
+    m.def("has_packet", [](uint32_t t, py::bytes b) {
+              return pcapng_block_has_packet(t, py::len(b)) != 0; },
+          py::arg("block_type"), py::arg("block_data"),
+          "True for any block carrying a frame: EPB, SPB or the obsolete type 2.");
+
     m.def("tls_keylog_load_file", [](const std::string &path) {
         return pcapng_tls_keylog_load_file(path.c_str());
     }, py::arg("path"),
