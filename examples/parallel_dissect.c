@@ -22,7 +22,7 @@
  * for TLS decryption):
  *   cc -I lib/include -I bin -o parallel_dissect \
  *      examples/parallel_dissect.c bin/pipeline.c \
- *      build/lib/libpcapng_static.a -lcrypto -lpthread
+ *      build/lib/libpcapng.a -lcrypto -lpthread
  *
  * Run:
  *   ./parallel_dissect capture.pcapng 8

@@ -973,7 +973,7 @@ s = TCPSession("client_ip", "server_ip", client_port, server_port)
 |--------------------------|---------------|-------|----------|
 | `syn(s)`                 | client→server | S     | cli_seq += 1 |
 | `syn_ack(s)`             | server→client | SA    | srv_seq += 1 |
-| `tcp_ack(s)`             | client→server | A     | — |
+| `tcp_ack(s)` / `ack(s)`  | client→server | A     | — |
 | `client_send(s, "data")` | client→server | PA    | cli_seq += len(data) |
 | `server_send(s, "data")` | server→client | PA    | srv_seq += len(data) |
 | `client_fin(s)`          | client→server | FA    | cli_seq += 1 |

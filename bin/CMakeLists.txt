@@ -19,9 +19,11 @@ target_link_libraries(pcapsh pcapng_static)
 target_compile_definitions(pcapsh PRIVATE
     PCAPSH_PROTOS_INSTALL_DIR="${CMAKE_INSTALL_FULL_DATAROOTDIR}/pcapsh/protos"
     PCAPSH_PROTOS_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/protos"
+    PCAPSH_VERSION="${LIBPCAPNG_VERSION}"
 )
 
 install(TARGETS pcapsh DESTINATION bin)
+install(FILES pcapsh.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
 
 add_executable(pcapngtool pcapngtool.c pipeline.c)
 target_include_directories(pcapngtool PRIVATE ${LIBPCAPNG_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})

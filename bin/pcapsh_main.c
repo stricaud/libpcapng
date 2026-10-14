@@ -34,7 +34,7 @@ void completion_cb(const char *buf, linenoiseCompletions *lc) {
         "DNS(","DNSQR(","DNSRR(","RandShort()",
         "hexdump(","raw(","ls(","wrpcap(","load(","fromhex(","frompcapng(","replacepkt(","show(","rdpcap(",
         "help()","exit()","quit()",
-        "TCPSession(","syn(","syn_ack(","tcp_ack(","client_send(","server_send(",
+        "TCPSession(","syn(","syn_ack(","tcp_ack(","ack(","client_send(","server_send(",
         "client_fin(","server_fin_ack(",
         "protocol ",
         NULL
@@ -364,6 +364,7 @@ void usage(const char *prog) {
         "  -k, --keylog FILE       load NSS TLS keylog file for live decryption\n"
         "                          (also reads $SSLKEYLOGFILE if set)\n"
         "  -h, --help              show this help\n"
+        "      --version           print the version and exit\n"
         "\n"
         "Script files (.pcapsh) are executed non-interactively.\n"
         ".posa files define custom protocols (see ~/.pcapsh_protos.posa).\n",
@@ -421,7 +422,20 @@ void pcapsh_init(void) {
     }
 }
 
+#ifndef PCAPSH_VERSION
+#define PCAPSH_VERSION "unknown"
+#endif
+
 int main(int argc, char **argv) {
+    /* Checked before pcapsh_init() so it has no side effects (no posa loading,
+     * no ~/.pcapsh_protos.posa creation). */
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i],"--version")) {
+            printf("pcapsh %s\n", PCAPSH_VERSION);
+            return 0;
+        }
+    }
+
     pcapsh_init();
     setvbuf(stdout, NULL, _IOLBF, 0);
 

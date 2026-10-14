@@ -92,7 +92,7 @@
   '("wrpcap" "fromhex" "frompcapng" "replacepkt" "show"
     "hexdump" "raw" "ls" "load" "help" "exit" "quit"
     "RandShort"
-    "TCPSession" "syn" "syn_ack" "tcp_ack"
+    "TCPSession" "syn" "syn_ack" "tcp_ack" "ack"
     "client_send" "server_send" "client_fin" "server_fin_ack"))
 
 ;;; ── Syntax table ─────────────────────────────────────────────────────────────

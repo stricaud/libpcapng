@@ -105,6 +105,11 @@ set(CMAKE_INSTALL_RPATH "@rpath")
 
 add_library(pcapng_static STATIC ${LIBPCAPNG_SOURCES})
 set_target_properties(pcapng_static PROPERTIES SOVERSION 1 POSITION_INDEPENDENT_CODE ON)
+# libpcapng.a beside libpcapng.so, as distros expect. Windows keeps the distinct
+# name so the static lib cannot collide with the DLL's import library.
+if(NOT WIN32)
+  set_target_properties(pcapng_static PROPERTIES OUTPUT_NAME pcapng)
+endif()
 
 if(OpenSSL_FOUND OR OPENSSL_FOUND)
   target_link_libraries(pcapng PRIVATE OpenSSL::SSL OpenSSL::Crypto)
@@ -119,13 +124,13 @@ if(WIN32)
   set_target_properties(pcapng PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
 
-install(TARGETS pcapng LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT Libraries)
-install(TARGETS pcapng_static LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT Libraries)
+install(TARGETS pcapng LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT Libraries)
+install(TARGETS pcapng_static ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT Libraries)
 # Install the header tree preserving the protocols/ subdirectory, so consumers
 # that include the umbrella <libpcapng/libpcapng.h> (which pulls protocols/*.h)
 # build against an installed copy.
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/libpcapng
-        DESTINATION include COMPONENT Headers FILES_MATCHING PATTERN "*.h")
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT Headers FILES_MATCHING PATTERN "*.h")
 
 if(NOT WIN32)
   add_subdirectory(tests)

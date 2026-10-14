@@ -1009,7 +1009,7 @@ EvalResult eval_primary(Lex *L) {
                        "  " CCYN "s = TCPSession" CR "(\"1.2.3.4\",\"5.6.7.8\",sport,dport)\n"
                        "  " CCYN "syn" CR "(s)             SYN from client\n"
                        "  " CCYN "syn_ack" CR "(s)         SYN-ACK from server\n"
-                       "  " CCYN "tcp_ack" CR "(s)         ACK from client\n"
+                       "  " CCYN "tcp_ack" CR "(s), " CCYN "ack" CR "(s)  ACK from client\n"
                        "  " CCYN "client_send" CR "(s,\"data\")  PSH+ACK from client\n"
                        "  " CCYN "server_send" CR "(s,\"data\")  PSH+ACK from server\n"
                        "  " CCYN "client_fin" CR "(s)      FIN+ACK from client\n"
@@ -1233,9 +1233,10 @@ EvalResult eval_primary(Lex *L) {
                 r.sess = sess_new(cip, sip, sport, dport);
                 return r;
             }
-            /* syn/syn_ack/tcp_ack/client_fin/server_fin_ack(session) */
+            /* syn/syn_ack/tcp_ack/client_fin/server_fin_ack(session); ack() aliases tcp_ack() */
             if (!strcmp(name,"syn")      || !strcmp(name,"syn_ack") ||
-                !strcmp(name,"tcp_ack")  || !strcmp(name,"client_fin") ||
+                !strcmp(name,"tcp_ack")  || !strcmp(name,"ack")     ||
+                !strcmp(name,"client_fin") ||
                 !strcmp(name,"server_fin_ack")) {
                 EvalResult arg = eval_expr(L);
                 if (L->cur.type == T_RPAREN) lex_adv(L);
@@ -1245,7 +1246,8 @@ EvalResult eval_primary(Lex *L) {
                 }
                 if      (!strcmp(name,"syn"))           r.pkt = do_syn(arg.sess);
                 else if (!strcmp(name,"syn_ack"))        r.pkt = do_syn_ack(arg.sess);
-                else if (!strcmp(name,"tcp_ack"))        r.pkt = do_tcp_ack(arg.sess);
+                else if (!strcmp(name,"tcp_ack") ||
+                         !strcmp(name,"ack"))            r.pkt = do_tcp_ack(arg.sess);
                 else if (!strcmp(name,"client_fin"))     r.pkt = do_client_fin(arg.sess);
                 else if (!strcmp(name,"server_fin_ack")) r.pkt = do_server_fin_ack(arg.sess);
                 return r;

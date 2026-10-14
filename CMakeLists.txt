@@ -32,8 +32,9 @@ message("Libpcapng Version: ${LIBPCAPNG_VERSION}")
 message("Libpcapng Version Major: ${LIBPCAPNG_VERSION_MAJOR}")
 message("Libpcapng Version Minor: ${LIBPCAPNG_VERSION_MINOR}")
 
-configure_file("${libpcapng_SOURCE_DIR}/libpcapng.pc.cmake" "${libpcapng_BINARY_DIR}/libpcapng.pc")
-install(FILES "${libpcapng_BINARY_DIR}/libpcapng.pc" DESTINATION "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" COMPONENT Headers)
+configure_file("${libpcapng_SOURCE_DIR}/libpcapng.pc.cmake" "${libpcapng_BINARY_DIR}/libpcapng.pc" @ONLY)
+# Relative destination so `cmake --install --prefix` and DESTDIR are honoured.
+install(FILES "${libpcapng_BINARY_DIR}/libpcapng.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig" COMPONENT Headers)
 
 include_directories(AFTER ${libpcapng_SOURCE_DIR}/lib/include)
 
