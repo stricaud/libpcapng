@@ -1,0 +1,793 @@
+.\" pcapsh(1) \- interactive packet shell and scripting language
+.\" Part of libpcapng.  View with: man ./pcapsh.1
+.TH PCAPSH 1 2026-10-13 "libpcapng" "User Commands"
+.SH NAME
+pcapsh \- build, dissect and write network packets interactively or from scripts
+.SH SYNOPSIS
+.B pcapsh
+.RB [ \-p
+.IR file.posa ]
+.RB [ \-k
+.IR keylog ]
+.RB [ \-o
+.IR out.pcapng ]
+.RB [ \-s ]
+.RI [ file.posa ...]
+.RI [ script.pcapsh ]
+.br
+.B pcapsh
+.RI [ options ]
+.B \-e
+.I expression
+.br
+.B pcapsh
+.BR \-h | \-\-help | \-\-version
+.SH DESCRIPTION
+.B pcapsh
+is a Scapy\-inspired shell built on libpcapng.
+Packets are written as stacks of protocol layers separated by
+.BR / ,
+for example
+.BR Ether()/IP()/TCP() .
+Every layer has named fields with sensible defaults, and lengths and
+checksums are computed automatically.
+The result can be displayed, hex\-dumped, dissected, or appended to a pcapng
+file that Wireshark, tshark and tcpdump read directly.
+.PP
+.B pcapsh
+runs in three modes:
+.TP
+.B Interactive
+With no script argument it starts a REPL with line editing, Tab completion
+(protocol names, functions and variables) and history saved to
+.I .pcapsh_history
+in the current directory.
+A
+.B for
+loop body is ended by an empty line.
+Leave with
+.BR exit() ,
+.B quit()
+or Ctrl\-D.
+.TP
+.B Script
+With a file argument, each line is evaluated in order with no banner or
+prompt.
+Lines starting with
+.B #
+are comments, so a script may begin with a
+.B #!
+line and be made executable.
+.TP
+.B One\-shot
+.B \-e
+.I expression
+evaluates a single expression and exits; handy from other shell scripts.
+.PP
+Beyond the native layers (Ether, IP, TCP, UDP, ICMP, Raw, DNS, TLS) more than a
+hundred protocols are described in the
+.B posa
+language and loaded at startup; new ones can be added in a file or inline in
+a script without recompiling.
+.SH OPTIONS
+.TP
+.BR \-p ", " \-\-proto " \fIfile.posa\fR"
+Load protocol definitions from
+.IR file.posa .
+May be repeated.
+Any argument ending in
+.B .posa
+is loaded the same way without the flag.
+.TP
+.BI \-e " expression"
+Evaluate
+.I expression
+and exit.
+.TP
+.BR \-o ", " \-\-output " \fIfile\fR"
+Redirect every
+.B wrpcap()
+in the script to
+.IR file ,
+whatever file name the script itself uses.
+Lets one script produce differently named captures.
+.TP
+.B \-s
+After the run, print the TLS session keys (NSS key log format) to standard
+error.
+.TP
+.BR \-k ", " \-\-keylog " \fIfile\fR"
+Load an NSS TLS key log so that
+.B rdpcap()
+can decrypt TLS traffic.
+.B $SSLKEYLOGFILE
+is read automatically when set.
+.TP
+.BR \-h ", " \-\-help
+Show a usage summary.
+.TP
+.B \-\-version
+Print the version and exit.
+.SH QUICK START
+.nf
+.RS 4
+$ pcapsh
+>>> IP(dst="8.8.8.8")/UDP(dport=53)/DNS(rd=1,qd=DNSQR(qname="example.com"))
+>>> hexdump(Ether()/IP()/TCP(dport=443,flags="S"))
+>>> ls()                      # every known protocol
+>>> ls(TCP)                   # fields of TCP, with defaults
+>>> wrpcap("out.pcapng", Ether()/IP()/ICMP())
+>>> rdpcap("out.pcapng")      # tshark\-like listing
+>>> help()
+.RE
+.fi
+.PP
+The same lines saved in a file run unattended:
+.PP
+.nf
+.RS 4
+$ pcapsh ping.pcapsh && tshark \-r ping.pcapng
+.RE
+.fi
+.SH LANGUAGE
+.SS Building packets
+A layer is written
+.IB Name ( field = value ", ...)" ,
+and layers are stacked with
+.BR / .
+Fields not mentioned keep their default; fields such as IP
+.BR len ,
+.BR proto ,
+.BR chksum ,
+UDP
+.BR len ,
+and Ether
+.B type
+are filled in from the layers that follow unless set explicitly.
+.PP
+.nf
+.RS 4
+IP()
+Ether(src="aa:bb:cc:dd:ee:ff")/IP(src="10.0.0.1",dst="10.0.0.2",ttl=1)/TCP(dport=22)
+IP()/TCP(flags="PA")/"GET / HTTP/1.0\er\en\er\en"
+IP(proto=47)/GRE(proto=IPV4)/IP(dst="192.168.2.1")/TCP()
+.RE
+.fi
+.PP
+Typing an expression at the prompt prints the packet layer by layer.
+A layer of a protocol defined in
+.B posa
+may also be used alone, e.g.
+.BR hexdump(SMB2(command=READ)) ,
+which serialises only that header.
+.SS Values
+.TP
+.B Numbers
+Decimal
+.RB ( 80 )
+or hexadecimal
+.RB ( 0x1F90 ).
+Numeric fields accept
+.BR + ,
+.B \-
+and
+.B *
+with the usual precedence, e.g.
+.B sport=49000+$i
+or
+.BR seq=1+$i*68 .
+Division is not available because
+.B /
+stacks layers.
+.TP
+.B Strings
+Double\-quoted, with escapes
+.BR \er ,
+.BR \en ,
+.BR \et ,
+.BR \e\e ,
+and
+.BI \ex NN
+for any byte.
+A string after
+.B /
+becomes a Raw payload.
+.TP
+.B Addresses
+IPv4 and MAC addresses are given as strings:
+.B dst="10.0.0.1"
+and
+.BR src="02:00:0a:00:00:01" .
+.TP
+.B TCP flags
+A string of letters
+.RB ( F
+FIN,
+.B S
+SYN,
+.B R
+RST,
+.B P
+PSH,
+.B A
+ACK,
+.B U
+URG), e.g.
+.BR flags="SA" ,
+or a number such as
+.BR flags=0x12 .
+.TP
+.B Enum names
+Fields with named values take the name directly:
+.BR ARP(op=REPLY) ,
+.BR SMB2(command=READ) ,
+.BR DNSQR(qtype=MX) .
+.B ls(Proto)
+shows the names.
+.SS Variables
+.B name = expression
+stores a packet, raw bytes, a TCP session or a number:
+.PP
+.nf
+.RS 4
+req = IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=123)/NTP()
+hexdump(req)
+wrpcap("ntp.pcapng", req)
+.RE
+.fi
+.SS Comments
+Everything from
+.B #
+to the end of a line is ignored.
+.SH SCRIPTS
+A script is a plain text file, by convention ending in
+.BR .pcapsh ,
+holding one statement per line.
+.B wrpcap()
+appends to an existing file, so delete old output before a re\-run if you
+want a fresh capture:
+.PP
+.nf
+.RS 4
+#!/usr/bin/env pcapsh
+# ping.pcapsh \- two echo request/reply pairs
+wrpcap("ping.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/ICMP(type=8,id=1,seq=1)/"hello")
+wrpcap("ping.pcapng", IP(src="10.0.0.2",dst="10.0.0.1")/ICMP(type=0,id=1,seq=1)/"hello")
+wrpcap("ping.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/ICMP(type=8,id=1,seq=2)/"hello")
+wrpcap("ping.pcapng", IP(src="10.0.0.2",dst="10.0.0.1")/ICMP(type=0,id=1,seq=2)/"hello")
+.RE
+.fi
+.PP
+.nf
+.RS 4
+$ rm \-f ping.pcapng; pcapsh ping.pcapsh
+$ pcapsh \-o other.pcapng ping.pcapsh     # same script, other file
+.RE
+.fi
+.PP
+.B exit()
+or
+.B quit()
+in a script stops it immediately.
+.SS Loops
+.nf
+.RS 4
+for $\fIvar\fP in range(\fIstop\fP):
+    \fIstatement\fP
+    \fIstatement\fP
+.RE
+.fi
+.PP
+The body consists of the following lines indented by at least one space or
+tab; it ends at the first unindented line (or, interactively, an empty line).
+.TP
+.BI range( n )
+.I $var
+takes
+.BR 1 ", " 2 ", ... " \fIn\fP
+(one\-based and inclusive, so it matches packet numbers).
+.TP
+.BI range( start ", " stop )
+.IR start ", " start "+1, ... " stop "\-1."
+.TP
+.BI range( start ", " stop ", " step )
+.IR start ", " start + step ", ... while below " stop .
+.PP
+The loop variable can be used in any numeric field or argument, including
+arithmetic and
+.BR frompcapng() ;
+it is not substituted inside strings such as IP addresses.
+.PP
+.nf
+.RS 4
+# 20 NTP exchanges from ephemeral ports 49152\-49171
+for $i in range(20):
+    wrpcap("ntp.pcapng", IP(src="10.0.1.1",dst="10.0.0.2")/UDP(sport=49151+$i,dport=123)/NTP(li_vn_mode=CLIENT))
+    wrpcap("ntp.pcapng", IP(src="10.0.0.2",dst="10.0.1.1")/UDP(sport=123,dport=49151+$i)/NTP(li_vn_mode=SERVER,stratum=1))
+.RE
+.fi
+.SS Inline protocols
+A protocol can be declared in the script itself and is usable at once:
+.PP
+.nf
+.RS 4
+protocol MyHdr
+    uint8  version defaults(1)
+    uint8  flags   defaults(0)
+        URGENT = 0x01
+        RETRY  = 0x02
+    uint16 length  defaults(0)
+    uint32 session defaults(0)
+end
+
+wrpcap("custom.pcapng", IP()/UDP(dport=9000)/MyHdr(flags=URGENT,session=0xdeadbeef))
+show("MyHdr", fromhex("02 01 00 08 de ad be ef"))
+.RE
+.fi
+.PP
+The field syntax is the same as in
+.B .posa
+files; see
+.BR "DEFINING PROTOCOLS" .
+.SH FUNCTIONS
+.TP
+.BI hexdump( pkt )
+Print a coloured hex and ASCII dump of the serialised packet.
+.TP
+.BI raw( pkt )
+Print the bytes as an escaped string, as Scapy's
+.B raw()
+does.
+.TP
+.BR ls ([ \fIProto\fP ])
+Without an argument, list every known protocol.
+With one, list its fields, types, defaults and enum names.
+.TP
+.BI wrpcap(" file ", " pkt )
+Write
+.I pkt
+to the pcapng
+.IR file .
+Creates the file (with section and interface headers) if it does not exist,
+otherwise appends one Enhanced Packet Block.
+The link type is always Ethernet; a packet with no
+.B Ether
+layer gets a default one prepended.
+.TP
+.BR rdpcap( \fIfile\fP [, \fIfilter\fP ])
+List the packets of a pcap or pcapng file, one line each, like
+.BR "tshark \-r" ,
+optionally keeping only those matching a display
+.I filter
+(see
+.BR "DISPLAY FILTERS" ).
+Returns the number of matching packets.
+.TP
+.BI frompcapng(" file ", " n )
+Return packet
+.I n
+(counting from 1) of a pcapng file as raw bytes, for
+.BR show() ,
+.BR hexdump() ,
+.B raw()
+or
+.BR wrpcap() .
+.B packet_number=\fIn\fP
+is accepted as well.
+.TP
+.BI replacepkt(" file ", " n ", " pkt )
+Replace packet
+.I n
+of an existing pcapng file in place.
+.TP
+.BI fromhex(" hex ")
+Turn hex text into raw bytes.
+Accepts a plain stream
+.RB ( """00010100""" ),
+space\-separated bytes
+.RB ( """00 01 01 00""" ),
+or a multi\-line Wireshark "Copy as Hex Dump" with offsets and ASCII column.
+.TP
+.BI show(" stack ", " bytes )
+Dissect
+.I bytes
+through the
+.BR / \-separated
+layer names in
+.IR stack ,
+e.g.
+.BR """Ether/IP/UDP/DNS""" ,
+printing each layer and consuming its header before the next.
+IP and TCP use their header\-length fields, so options are skipped.
+Any posa protocol may appear in the stack, and a group name declared as
+.BI Object< Group >
+dispatches to the member whose fields match (e.g.
+.B """IP/UDP/TFTP"""
+picks TFTP_RRQ, TFTP_DATA, ... from the opcode).
+.TP
+.BI load(" file.posa ")
+Load protocol definitions at run time.
+.TP
+.B RandShort()
+A random 16\-bit number, e.g. for DNS transaction ids.
+.TP
+.BR help() ", " exit() ", " quit()
+Show built\-in help; leave the shell.
+.SH PROTOCOLS
+.SS Native layers
+.TP
+.B Ether
+.BR dst " (ff:ff:ff:ff:ff:ff), " src ", " type
+(0x0800 by default; set
+.B type=0x0806
+for ARP).
+.TP
+.B IP
+.BR src ", " dst " (127.0.0.1), " ttl " (64), " id ", " flags ", " frag ", " tos ,
+.BR proto ", " len ", " chksum " (automatic)."
+.TP
+.B TCP
+.BR sport " (20), " dport " (80), " seq ", " ack ", " flags " (""S""), " window ,
+.BR dataofs ", " urgptr ", " chksum .
+.TP
+.B UDP
+.BR sport ", " dport " (53), " len ", " chksum .
+.TP
+.B ICMP
+.BR type " (8, echo request), " code ", " id ", " seq ", " chksum .
+.TP
+.B Raw
+.BR load= \(dq...\(dq;
+a bare string after
+.B /
+is the same thing.
+.TP
+.B DNS
+.BR id ", " qr ", " opcode ", " aa ", " tc ", " rd ", " ra ", " rcode
+(or the whole
+.B flags
+word),
+.BR qdcount ", " ancount ", " nscount ", " arcount ,
+and the sections
+.BR qd= DNSQR(...),
+.BR an= ", " ns= ", " ar= DNSRR(...).
+Setting
+.B qd
+increments
+.B qdcount
+automatically.
+.TP
+.BR DNSQR( qname ", " qtype ", " qclass )
+Question; types
+.BR A ", " NS ", " CNAME ", " SOA ", " PTR ", " MX ", " AAAA ", " ANY .
+.TP
+.BR DNSRR( rrname ", " type ", " rclass ", " ttl ", " rdata )
+Resource record;
+.B rdata
+is an IPv4 address for A records and a domain name for CNAME, NS, MX, PTR.
+.SS posa protocols
+Loaded at startup from the protocol directory (see
+.BR FILES )
+and from
+.IR ~/.pcapsh_protos.posa .
+They include, among many others, ARP, NTP, DHCP, GRE, VXLAN, RADIUS, SYSLOG,
+NBT, NBNS, SMB2, DCERPC, LDAP, KRB5, HTTP, SIP, MQTT, Modbus, BGP, OSPF,
+QUIC, WireGuard, SNMP, TFTP and Telnet.
+Run
+.B ls()
+for the complete list and
+.BI ls( Proto )
+for fields.
+.SS TLS and SSH helpers
+These return ready\-made records to put after a TCP layer.
+TLS uses TLS 1.2 with the NULL cipher, so Wireshark decodes the inner
+protocol without keys.
+.TP
+.B TLS_CLIENT_HELLO() TLS_SERVER_HELLO() TLS_CERTIFICATE()
+.TQ
+.B TLS_CHANGE_CIPHER_SPEC() TLS_FINISHED()
+Handshake records (50, 47, 12, 6 and 21 bytes long).
+.TP
+.B TLS()
+Wraps whatever follows into an Application Data record:
+.BR TCP(flags="PA")/TLS()/LDAP(op_tag=BIND_REQUEST) .
+.TP
+.BR SSH_KEXINIT ([ side="server" ]) ", " SSH_NEWKEYS()
+SSH key exchange messages; send the version banner as a plain string,
+.BR """SSH\-2.0\-OpenSSH_9.5\er\en""" .
+.SH TCP SESSIONS
+Writing a coherent TCP conversation by hand means tracking sequence and
+acknowledgement numbers.
+A
+.B TCPSession
+does it for you: each helper returns a complete Ether/IP/TCP packet and
+advances the session state, and
+.B wrpcap()
+just writes it.
+.PP
+.nf
+.RS 4
+s = TCPSession("\fIclient_ip\fP", "\fIserver_ip\fP", \fIclient_port\fP, \fIserver_port\fP)
+.RE
+.fi
+.PP
+MAC addresses are derived from the IPs (02:00 followed by the four octets).
+.PP
+.TS
+l l l.
+Function	Direction	Flags
+_
+syn(s)	client \(-> server	S
+syn_ack(s)	server \(-> client	SA
+tcp_ack(s), ack(s)	client \(-> server	A
+client_send(s, "data")	client \(-> server	PA
+server_send(s, "data")	server \(-> client	PA
+client_fin(s)	client \(-> server	FA
+server_fin_ack(s)	server \(-> client	FA
+.TE
+.PP
+.nf
+.RS 4
+# http.pcapsh \- a complete HTTP/1.0 exchange
+s = TCPSession("192.168.1.100", "93.184.216.34", 54321, 80)
+wrpcap("http.pcapng", syn(s))
+wrpcap("http.pcapng", syn_ack(s))
+wrpcap("http.pcapng", ack(s))             # same as tcp_ack(s)
+wrpcap("http.pcapng", client_send(s, "GET / HTTP/1.0\er\enHost: example.com\er\en\er\en"))
+wrpcap("http.pcapng", server_send(s, "HTTP/1.0 200 OK\er\enContent\-Length: 5\er\en\er\enhello"))
+wrpcap("http.pcapng", client_fin(s))
+wrpcap("http.pcapng", server_fin_ack(s))
+.RE
+.fi
+.PP
+Several sessions can be interleaved in one file; packets appear in the order
+they are written.
+.SH DISPLAY FILTERS
+.B rdpcap()
+accepts a subset of Wireshark display filter syntax:
+.TP
+.B Existence
+.BR tcp ", " dns ", " dns.qry.name
+.TP
+.B Comparison
+.BR "== != > < >= <=" " (or " "eq ne gt lt ge le" ),
+.BR contains ,
+.B matches
+(POSIX extended regex)
+.TP
+.B Logic
+.BR "&& || !" " (or " "and or not" "), parentheses"
+.TP
+.B Values
+numbers, "strings", IPv4 addresses with optional /CIDR, MAC addresses
+.TP
+.B Slices and sets
+.BR "eth.src[0:3] == 00:00:5e" ,
+.BR "tcp.port in {80, 443}" ,
+.B udp.port in {1..1024}
+.TP
+.B Aliases
+.BR ip.addr ", " tcp.port ", " udp.port ", " eth.addr
+match either direction.
+.PP
+.nf
+.RS 4
+rdpcap("capture.pcapng", "ip.addr == 10.0.0.0/8 && tcp.port in {80,443}")
+rdpcap("capture.pcapng", "dns && !(ip.src == 8.8.8.8)")
+.RE
+.fi
+.SH DEFINING PROTOCOLS
+New protocols are described in
+.B posa
+files, loaded with
+.BR \-p ,
+.BR load() ,
+by naming them on the command line, or by putting them in
+.IR ~/.pcapsh_protos.posa .
+They appear in
+.BR ls() ,
+can be built like any layer, and can be dissected with
+.BR show() .
+.PP
+.nf
+.RS 4
+Object<main> MyTLV
+    uint8  type   "Type"   defaults(1)
+        DATA      = 1
+        CONTROL   = 2
+        KEEPALIVE = 3
+    uint8  flags  defaults(0)
+    uint16 length defaults(0)
+    uint32 seq    defaults(0)
+.RE
+.fi
+.PP
+.B defaults(...)
+gives the value used when the field is not set: a number, a quoted string or
+byte string, or an address written as is
+.RB ( defaults(10.0.0.1) ).
+Indented
+.IB NAME " = " value
+lines under a field declare its enum names.
+The optional quoted label is used for display.
+.PP
+Field types:
+.TP
+.B uint8 uint16 uint32 uint64
+Big\-endian integers.
+.TP
+.B le_uint16 le_uint32 le_uint64
+Little\-endian integers (Windows protocols such as SMB2 and DCERPC).
+.TP
+.BI enum< uint8 | uint16 | uint32 >
+Integer with named values.
+.TP
+.BR mac ", " ip4
+Six\- and four\-byte addresses.
+.TP
+.BI bytes< N > ", " str< N >
+Fixed width, zero padded.
+.TP
+.B cstring
+NUL\-terminated text.
+.TP
+.BI "string " name " until """ delim """"
+Text up to and including a delimiter, e.g.
+.BR "until ""\er\en""" .
+.PP
+Declaring several objects as
+.BI Object< Group >
+lets
+.BI show(""... /Group "", " data )
+choose the right one automatically.
+See
+.I doc/posa.md
+in the libpcapng sources for the full language.
+.SH EXAMPLES
+.SS DNS query and answer
+.nf
+.RS 4
+wrpcap("dns.pcapng", IP(src="192.168.1.10",dst="8.8.8.8")/UDP(sport=54321,dport=53)/DNS(id=0x1111,rd=1,qd=DNSQR(qname="example.com")))
+wrpcap("dns.pcapng", IP(src="8.8.8.8",dst="192.168.1.10")/UDP(sport=53,dport=54321)/DNS(id=0x1111,qr=1,rd=1,ra=1,qd=DNSQR(qname="example.com"),an=DNSRR(rrname="example.com",type=A,ttl=300,rdata="93.184.216.34"),ancount=1))
+.RE
+.fi
+.SS ARP request and reply
+.nf
+.RS 4
+wrpcap("arp.pcapng", Ether(type=0x0806)/ARP(op=REQUEST,spa="10.0.0.100",tpa="10.0.0.1"))
+wrpcap("arp.pcapng", Ether(type=0x0806)/ARP(op=REPLY,sha="aa:bb:cc:dd:ee:01",spa="10.0.0.1",tha="02:00:0a:00:00:64",tpa="10.0.0.100"))
+.RE
+.fi
+.SS Port sweep with a loop
+.nf
+.RS 4
+for $p in range(20, 30):
+    wrpcap("sweep.pcapng", IP(src="10.0.0.5",dst="10.0.0.1")/TCP(sport=40000+$p,dport=$p,flags="S"))
+.RE
+.fi
+.SS DHCP discover / offer
+.nf
+.RS 4
+wrpcap("dhcp.pcapng", Ether(src="aa:bb:cc:dd:ee:ff")/IP(src="0.0.0.0",dst="255.255.255.255")/UDP(sport=68,dport=67)/DHCP(op=BOOTREQUEST,xid=0xdeadbeef))
+wrpcap("dhcp.pcapng", Ether(src="00:11:22:33:44:55",dst="aa:bb:cc:dd:ee:ff")/IP(src="192.168.1.1",dst="255.255.255.255")/UDP(sport=67,dport=68)/DHCP(op=BOOTREPLY,xid=0xdeadbeef,yiaddr="192.168.1.100"))
+.RE
+.fi
+.SS Tunnels
+.nf
+.RS 4
+wrpcap("gre.pcapng", IP(src="10.0.0.1",dst="10.0.0.2",proto=47)/GRE(proto=IPV4)/IP(src="192.168.1.1",dst="192.168.2.1")/TCP(flags="S"))
+wrpcap("vxlan.pcapng", IP(src="10.0.0.1",dst="10.0.0.2")/UDP(dport=4789)/VXLAN()/Ether()/IP()/TCP(dport=8080))
+.RE
+.fi
+.SS RFC 3164 syslog
+.B SYSLOG()
+emits only the PRI byte; for a full message use a string
+(PRI = facility * 8 + severity):
+.PP
+.nf
+.RS 4
+wrpcap("syslog.pcapng", IP(src="10.0.0.1",dst="10.0.0.254")/UDP(sport=514,dport=514)/"<38>May 11 10:00:01 dc01 sshd[1234]: Accepted publickey for admin")
+.RE
+.fi
+.SS LDAP over TLS
+.nf
+.RS 4
+s = TCPSession("10.0.1.1", "10.0.0.1", 50000, 636)
+wrpcap("ldaps.pcapng", syn(s))
+wrpcap("ldaps.pcapng", syn_ack(s))
+wrpcap("ldaps.pcapng", tcp_ack(s))
+wrpcap("ldaps.pcapng", Ether()/IP(src="10.0.1.1",dst="10.0.0.1")/TCP(sport=50000,dport=636,flags="PA")/TLS_CLIENT_HELLO())
+wrpcap("ldaps.pcapng", Ether()/IP(src="10.0.1.1",dst="10.0.0.1")/TCP(sport=50000,dport=636,flags="PA")/TLS()/LDAP(op_tag=BIND_REQUEST,message_id=1))
+.RE
+.fi
+.PP
+(For a capture that Wireshark fully reassembles, set
+.B seq
+and
+.B ack
+on each TCP layer: each TLS record advances them by its length.)
+.SS Dissect bytes copied from Wireshark
+.nf
+.RS 4
+d = fromhex("0000   45 00 00 34 00 01 00 00  40 11 f6 c4 c0 a8 01 05
+0010   08 08 08 08 c3 a8 00 35  00 20 41 a1 12 34 01 00
+0020   00 01 00 00 00 00 00 00")
+show("IP/UDP/DNS", d)
+.RE
+.fi
+.SS Inspect and edit an existing capture
+.nf
+.RS 4
+rdpcap("capture.pcapng", "udp.dstport == 53")
+for $n in range(3):
+    show("Ether/IP/TCP", frompcapng("capture.pcapng", $n))
+
+replacepkt("capture.pcapng", 2, Ether()/IP(dst="10.0.0.99")/TCP(dport=8080,flags="S"))
+.RE
+.fi
+.SS From the shell
+.nf
+.RS 4
+$ pcapsh \-e 'hexdump(IP()/UDP(dport=53)/DNS(rd=1,qd=DNSQR(qname="a.example")))'
+$ pcapsh \-e 'ls(SMB2)'
+$ pcapsh \-e 'rdpcap("trace.pcapng", "tcp.port == 443")'
+$ for h in 1 2 3; do pcapsh \-e "wrpcap(\e"h$h.pcapng\e", IP(dst=\e"10.0.0.$h\e")/ICMP())"; done
+$ pcapsh \-p myproto.posa \-o run1.pcapng generate.pcapsh
+.RE
+.fi
+.SH ENVIRONMENT
+.TP
+.B PCAPSH_PROTOS_DIR
+Directory of
+.B .posa
+files to load at startup instead of the installed one.
+.TP
+.B SSLKEYLOGFILE
+NSS key log loaded automatically for TLS decryption in
+.BR rdpcap() .
+.TP
+.B HOME
+Location of
+.IR ~/.pcapsh_protos.posa .
+.SH FILES
+.TP
+.I /usr/share/pcapsh/protos/*.posa
+Bundled protocol definitions (under the installation prefix).
+.TP
+.I ~/.pcapsh_protos.posa
+Personal protocol definitions, loaded every time.
+Created with TFTP and Telnet examples on first run if missing.
+.TP
+.I ./.pcapsh_history
+Interactive history, kept in the current directory.
+.SH NOTES
+.IP \(bu 2
+.B wrpcap()
+never truncates; remove the output file to start over.
+.IP \(bu 2
+Loop counters start at 1 with
+.BI range( n ) ;
+use an offset such as
+.B sport=49000+$i
+to stay out of well\-known ports.
+.IP \(bu 2
+.B Ether()
+defaults to the IPv4 ethertype; ARP frames need
+.BR type=0x0806 .
+.IP \(bu 2
+Some posa layers model only a fixed header (for example SMB2 without a
+command body, or KRB5's 18\-byte DER prefix); Wireshark may flag such packets
+as malformed.
+Append the body as a string payload when you need a clean dissection.
+.IP \(bu 2
+Output is coloured with ANSI escapes.
+.SH SEE ALSO
+.BR tshark (1),
+.BR wireshark (1),
+.BR tcpdump (1),
+.BR pcapngtool (1)
+.PP
+.I bin/pcapsh.md
+and
+.I doc/posa.md
+in the libpcapng source tree.
