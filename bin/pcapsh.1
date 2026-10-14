@@ -116,8 +116,8 @@ $ pcapsh
 >>> hexdump(Ether()/IP()/TCP(dport=443,flags="S"))
 >>> ls()                      # every known protocol
 >>> ls(TCP)                   # fields of TCP, with defaults
->>> wrpcap("out.pcapng", Ether()/IP()/ICMP())
->>> rdpcap("out.pcapng")      # tshark\-like listing
+>>> wrpcap("ping.pcapng", Ether()/IP()/ICMP())
+>>> rdpcap("ping.pcapng")      # tshark\-like listing
 >>> help()
 .RE
 .fi

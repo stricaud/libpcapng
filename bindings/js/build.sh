@@ -47,7 +47,6 @@ SOURCES=(
   "$LIB/community_id.c"
   "$LIB/flow_hash.c"
   "$LIB/reader.c"
-  "$LIB/reader.c"
   "$LIB/wire_layout.c"
   "$LIB/easyapi.c"
   "$LIB/reassembly.c"
