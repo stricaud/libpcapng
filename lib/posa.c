@@ -1408,8 +1408,19 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
         /* the delimiter comes from the raw line, not from a token: HTTP splits on
            " ", and tokenize() would have torn that quoted space in half */
         const char *u = strstr(raw, "until");
-        const char *q = u ? strchr(u, '"') : NULL;
+        const char *p2 = u ? u + 5 : NULL;
+        const char *q;
         f->type = PCAPNG_POSA_STR_DELIM;
+        /* `until any "<set>"` — end at any one of these bytes, rather than at
+           one multi-byte sequence. */
+        if (p2) {
+          while (*p2 == ' ' || *p2 == '\t') p2++;
+          if (!strncmp(p2, "any", 3) && (p2[3] == ' ' || p2[3] == '\t' || p2[3] == '"')) {
+            f->delim_any = 1;
+            p2 += 3;
+          }
+        }
+        q = p2 ? strchr(p2, '"') : NULL;
         if (q) parse_delim(q, f->delim, &f->ndelim);
       }
       /* `defaults(<value>)`, already read off the end of the line. */
@@ -1929,6 +1940,18 @@ static int find_delim(const uint8_t *d, int off, int lim, const char *delim, int
   return -1;
 }
 
+/* `until any "<set>"`: the first byte that is one of `set`. Consumes one byte,
+   not `nset` — the field ends at whichever delimiter turned up. */
+static int find_delim_any(const uint8_t *d, int off, int lim, const char *set, int nset)
+{
+  int i, k;
+  if (nset <= 0) return -1;
+  for (i = off; i < lim; i++)
+    for (k = 0; k < nset; k++)
+      if (d[i] == (uint8_t)set[k]) return i;
+  return -1;
+}
+
 /* An open scope/when/repeat block. `repeat` carries the extra state a loop needs:
    where to jump back to, how many iterations are left, and which subtree the
    current record's fields are being hung on. */
@@ -2343,11 +2366,14 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
     } else if (f->type == PCAPNG_POSA_STR_DELIM) {
       /* consume up to (and past) the delimiter; if the delimiter is absent the
          field is empty (0 bytes) — an "optional" delimited token. */
-      int start = off, d = find_delim(data, off, lim, f->delim, f->ndelim), n; char tmp[256];
+      int start = off, n; char tmp[256];
+      int d = f->delim_any ? find_delim_any(data, off, lim, f->delim, f->ndelim)
+                           : find_delim(data, off, lim, f->delim, f->ndelim);
       n = (d >= 0) ? d - start : 0;
       if (n > (int)sizeof tmp - 1) n = (int)sizeof tmp - 1;
       memcpy(tmp, data + start, (size_t)n); tmp[n] = '\0';
-      if (d >= 0) off = d + f->ndelim;
+      /* A set delimiter is one byte wide whichever member matched. */
+      if (d >= 0) off = d + (f->delim_any ? 1 : f->ndelim);
       cf = pf_add(cur, ab, PCAPNG_FT_STR); pf_str(cf, tmp);
       { const char *en = enum_name_str(f, tmp);
         if (en) pf_label(cf, "%s: %s (%s)", fld_disp(f), en, tmp);

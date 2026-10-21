@@ -12,7 +12,7 @@ keywords = ["pcapng", "pcap", "network", "dissect", "capture"]
 categories = ["network-programming", "parser-implementations"]
 
 [dependencies]
-pcapng-sys = { version = "0.19.3", path = "../pcapng-sys" }
+pcapng-sys = { version = "0.19.4", path = "../pcapng-sys" }
 
 [[example]]
 name = "read"

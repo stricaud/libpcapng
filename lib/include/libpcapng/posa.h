@@ -176,6 +176,12 @@ typedef struct {
   char                lenfield[PCAPNG_POSA_NAME_MAX];/* BYTES_REF/STR_REF, and
                                                         REPEAT: the count field */
   char                delim[PCAPNG_POSA_DELIM_MAX]; int ndelim; /* STR_DELIM   */
+  /* `until any "<set>"` — delim is a set of single bytes, any one of which
+     ends the field, rather than one multi-byte sequence. A line-oriented
+     protocol needs this: memcached's `get k\r\n` and `stats\r\n` end at a
+     space or at CR, and `until " \r"` asks for a space *followed by* CR,
+     which never occurs. */
+  int                 delim_any;
   char                sub[PCAPNG_POSA_NAME_MAX];     /* LAYER: sub-proto name  */
   pcapng_posa_enum_t  enums[PCAPNG_POSA_MAX_ENUMS];
   int                 nenums;
