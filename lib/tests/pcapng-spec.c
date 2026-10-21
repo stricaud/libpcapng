@@ -487,9 +487,15 @@ static void test_idb_size(void)
     CHECK((sz % 4) == 0);
 }
 
-static void test_idb_wire_format_raw(void)
+static void test_idb_wire_format_default(void)
 {
-    SUITE("Interface Description Block — wire format (LINKTYPE_RAW)");
+    /* The no-linktype form defaults to Ethernet, because everything that
+       writes through it — the easy API's Build* helpers, a live capture on an
+       Ethernet interface — produces Ethernet frames. It defaulted to
+       LINKTYPE_RAW until 0.19.6, which made such a file disagree with its own
+       packets: not an error, just every reader decoding from the wrong
+       offset. Bare IP goes through the _with_linktype form, below. */
+    SUITE("Interface Description Block — wire format (default linktype)");
 
     size_t sz = libpcapng_interface_description_block_size();
     unsigned char *buf = alloc_buf(sz);
@@ -498,11 +504,29 @@ static void test_idb_wire_format_raw(void)
     CHECK(written == sz);
     CHECK(u32at(buf,  0) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
     CHECK(u32at(buf,  4) == (uint32_t)sz);
-    CHECK(u16at(buf,  8) == LINKTYPE_RAW);
+    CHECK(u16at(buf,  8) == LINKTYPE_ETHERNET);
     CHECK(u16at(buf, 10) == 0u);
     CHECK(u32at(buf, 12) == 65535u);
     CHECK(u32at(buf, 16) == u32at(buf, 4));
     CHECK((u32at(buf, 4) % 4) == 0);
+
+    free(buf);
+}
+
+static void test_idb_wire_format_raw(void)
+{
+    SUITE("Interface Description Block — wire format (LINKTYPE_RAW)");
+
+    size_t sz = libpcapng_interface_description_block_size();
+    unsigned char *buf = alloc_buf(sz);
+    libpcapng_interface_description_block_write_with_linktype(65535, buf,
+                                                              LINKTYPE_RAW);
+
+    CHECK(u32at(buf,  0) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
+    CHECK(u16at(buf,  8) == LINKTYPE_RAW);
+    CHECK(u16at(buf, 10) == 0u);
+    CHECK(u32at(buf, 12) == 65535u);
+    CHECK(u32at(buf, 16) == u32at(buf, 4));
 
     free(buf);
 }
@@ -1501,7 +1525,9 @@ static void test_file_header_block_sequence(void)
 
     CHECK(u32at(raw, 28) == PCAPNG_INTERFACE_DESCRIPTION_BLOCK);
     CHECK(u32at(raw, 32) == 20u);
-    CHECK(u16at(raw, 36) == LINKTYPE_RAW);
+    /* The easy API's default: Ethernet, which is what its packet builders
+       emit. See test_idb_wire_format_default. */
+    CHECK(u16at(raw, 36) == LINKTYPE_ETHERNET);
     CHECK(u16at(raw, 38) == 0u);
 
     fclose(fp);
@@ -1861,6 +1887,7 @@ int main(void)
     test_shb_with_options();
 
     test_idb_size();
+    test_idb_wire_format_default();
     test_idb_wire_format_raw();
     test_idb_wire_format_ethernet();
     test_idb_wire_format_all_linktypes();

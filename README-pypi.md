@@ -114,21 +114,28 @@ filter you expect to fire does not.
 ## Writing packets
 
 Every `Build*` helper returns a complete **Ethernet** frame, which is why each
-one takes a pair of MAC addresses — so say so when you open the file. A file
-opened with plain `OpenFile(path, "w")` declares its interface as
-`LINKTYPE_RAW`, bare IP with no link layer, and writing Ethernet frames into
-it produces a capture whose interface disagrees with its packets: nothing
-errors, and every reader then decodes from the wrong offset and reports
-confident nonsense.
+one takes a pair of MAC addresses, and why that is what a file opened for
+writing declares.
 
 ```python
 import pycapng
 
 p = pycapng.PcapNG()
-p.OpenFileLinkType("out.pcapng", "w", pycapng.LINKTYPE_ETHERNET)
+p.OpenFile("out.pcapng", "w")
 ...
 p.CloseFile()
 ```
+
+Writing something else — bare IP datagrams, SLL, CAN — means saying so, since
+a file whose interface disagrees with its packets is not an error that any
+reader reports; it just decodes from the wrong offset:
+
+```python
+p.OpenFileLinkType("out.pcapng", "w", pycapng.LINKTYPE_RAW)
+```
+
+Before 0.19.6, `OpenFile` declared `LINKTYPE_RAW` and the builders' Ethernet
+frames landed in a file that claimed to hold raw IP.
 
 ### Raw bytes
 

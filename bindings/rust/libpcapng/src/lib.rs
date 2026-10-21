@@ -11,7 +11,7 @@
 //! # Reading a pcapng file (packet-level)
 //! ```no_run
 //! libpcapng::read_packets("capture.pcapng", |pkt| {
-//!     println!("ts={}  len={}  linktype={}", pkt.timestamp_us, pkt.origlen, pkt.linktype);
+//!     println!("ts={}  len={}  linktype={}", pkt.timestamp_ns, pkt.origlen, pkt.linktype);
 //!     true
 //! }).unwrap();
 //! ```
@@ -117,12 +117,76 @@ pub struct FilePacket<'a> {
     pub data: &'a [u8],
     /// Original on-wire length (may exceed `data.len()` if truncated).
     pub origlen: u32,
-    /// Capture timestamp in microseconds since the UNIX epoch.
-    pub timestamp_us: u64,
+    /// Capture timestamp in nanoseconds since the UNIX epoch, scaled by the
+    /// interface's `if_tsresol` — so this is comparable across captures
+    /// whatever resolution each one was recorded at, and it is the same unit
+    /// [`Writer::packet`] takes and the C, Python and Go bindings report.
+    ///
+    /// Zero for a Simple Packet Block, which carries no timestamp.
+    pub timestamp_ns: u64,
     /// Link-layer type (e.g. `LINKTYPE_ETHERNET`).
     pub linktype: u16,
     /// Private Enterprise Number — `Some(pen)` only for custom blocks.
     pub custom_pen: Option<u32>,
+}
+
+/// The `if_tsresol` value an interface is defined to have when it declares
+/// none: 10^-6 seconds, microseconds.
+const TSRESOL_MICROSECONDS: u8 = 6;
+
+/// Read an interface's `if_tsresol` option, or the default if it has none.
+///
+/// The IDB body is linktype(2) reserved(2) snaplen(4) and then options, each
+/// code(2) len(2) value(len) padded to a multiple of four. Option 9 is
+/// `if_tsresol`, one byte.
+fn tsresol_of_idb(body: &[u8]) -> u8 {
+    const IF_TSRESOL: u16 = 9;
+    const OPT_ENDOFOPT: u16 = 0;
+
+    // The caller's slice can carry a few bytes past the block's own data, so
+    // every read below is bounds-checked and a short option ends the walk.
+    let mut o = 8;
+    while o + 4 <= body.len() {
+        let code = u16::from_le_bytes([body[o], body[o + 1]]);
+        let len = u16::from_le_bytes([body[o + 2], body[o + 3]]) as usize;
+        if code == OPT_ENDOFOPT {
+            break;
+        }
+        let val = o + 4;
+        if val + len > body.len() {
+            break;
+        }
+        if code == IF_TSRESOL && len >= 1 {
+            return body[val];
+        }
+        o = val + len + ((4 - len % 4) % 4);
+    }
+    TSRESOL_MICROSECONDS
+}
+
+/// Convert a packet's timestamp from the interface's ticks to nanoseconds.
+///
+/// `if_tsresol` is a denominator: with the high bit clear the tick is
+/// 10^-value seconds, with it set 2^-value. Done in `u128` because a
+/// nanosecond timestamp near 2^63 times a power of ten overflows `u64` on the
+/// way, and a timestamp that silently wraps is worse than a slow multiply.
+fn ticks_to_ns(ticks: u64, tsresol: u8) -> u64 {
+    const NS_PER_S: u128 = 1_000_000_000;
+    let ticks = ticks as u128;
+    let ns = if tsresol & 0x80 != 0 {
+        let shift = (tsresol & 0x7f) as u32;
+        if shift >= 128 { return 0; }
+        ticks * NS_PER_S / (1u128 << shift)
+    } else {
+        let exp = tsresol as u32;
+        match NS_PER_S.checked_div(10u128.checked_pow(exp).unwrap_or(u128::MAX)) {
+            // Resolutions coarser than a nanosecond: scale up.
+            Some(per_tick) if per_tick > 0 => ticks * per_tick,
+            // Finer than a nanosecond (if_tsresol > 9): scale down.
+            _ => ticks / (10u128.checked_pow(exp - 9).unwrap_or(u128::MAX)),
+        }
+    };
+    ns.min(u64::MAX as u128) as u64
 }
 
 /// Read a pcapng (or classic pcap) file, calling `callback` once per packet.
@@ -143,7 +207,7 @@ where
         u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
     }
 
-    let mut interfaces: Vec<u16> = Vec::new();
+    let mut interfaces: Vec<(u16, u8)> = Vec::new();
 
     read_file(path, |_ctr, block_type, data| {
         // The C library passes the block body (block_total_length - 8 bytes
@@ -153,8 +217,12 @@ where
             // SHB: new section — reset interface list
             0x0A0D_0D0A => { interfaces.clear(); }
 
-            // IDB: Interface Description Block — record link type
-            0x0000_0001 => { interfaces.push(rd16(data, 0)); }
+            // IDB: Interface Description Block — record link type and the
+            // timestamp resolution, which is the part that is easy to skip.
+            // An interface may declare if_tsresol, and a capture written in
+            // nanoseconds read as microseconds is wrong by a factor of a
+            // thousand without looking wrong at all.
+            0x0000_0001 => { interfaces.push((rd16(data, 0), tsresol_of_idb(data))); }
 
             // EPB: Enhanced Packet Block
             0x0000_0006 => {
@@ -163,13 +231,17 @@ where
                 let ts_lo   = rd32(data,  8) as u64;
                 let caplen  = rd32(data, 12) as usize;
                 let origlen = rd32(data, 16);
-                let ts_us   = (ts_hi << 32) | ts_lo;
-                let lt = interfaces.get(iface).copied().unwrap_or(LINKTYPE_ETHERNET);
+                let ticks   = (ts_hi << 32) | ts_lo;
+                let (lt, tsresol) = interfaces
+                    .get(iface)
+                    .copied()
+                    .unwrap_or((LINKTYPE_ETHERNET, TSRESOL_MICROSECONDS));
                 let end = 20 + caplen;
                 if end <= data.len() {
                     let fp = FilePacket {
                         data: &data[20..end], origlen,
-                        timestamp_us: ts_us, linktype: lt, custom_pen: None,
+                        timestamp_ns: ticks_to_ns(ticks, tsresol),
+                        linktype: lt, custom_pen: None,
                     };
                     return callback(&fp);
                 }
@@ -182,11 +254,11 @@ where
                 // Conservative: body_valid = data.len().saturating_sub(8)
                 let body_valid = data.len().saturating_sub(8);
                 let caplen = body_valid.saturating_sub(4).min(origlen as usize);
-                let lt = interfaces.first().copied().unwrap_or(LINKTYPE_ETHERNET);
+                let lt = interfaces.first().map(|(lt, _)| *lt).unwrap_or(LINKTYPE_ETHERNET);
                 if 4 + caplen <= data.len() {
                     let fp = FilePacket {
                         data: &data[4..4 + caplen], origlen,
-                        timestamp_us: 0, linktype: lt, custom_pen: None,
+                        timestamp_ns: 0, linktype: lt, custom_pen: None,
                     };
                     return callback(&fp);
                 }
@@ -201,7 +273,7 @@ where
                 let body = if end > 4 { &data[4..end] } else { &[][..] };
                 let fp = FilePacket {
                     data: body, origlen: body.len() as u32,
-                    timestamp_us: 0, linktype: 0, custom_pen: Some(pen),
+                    timestamp_ns: 0, linktype: 0, custom_pen: Some(pen),
                 };
                 return callback(&fp);
             }
@@ -217,27 +289,28 @@ where
 /// Writes a pcapng file: a section header, one interface, and packets.
 ///
 /// This is the counterpart to [`read_packets`], and it exists because the
-/// obvious alternative does not do what a writer needs.
-/// `libpcapng_write_enhanced_packet_with_time_to_file()` takes a `FILE *` and a
-/// timestamp in **whole seconds**, so a tool writing more than one packet a
-/// second loses their ordering in the file. This goes through the block-level
-/// API instead, which takes the timestamp as the two microsecond words pcapng
-/// actually stores, and writes through [`std::io::Write`] so there is no `FILE *`
-/// to carry across the FFI boundary.
+/// obvious alternative does not do what a writer needs: the easy API's
+/// file-level helper wants a `FILE *`, which means carrying one across the FFI
+/// boundary. This goes through the block-level API and writes through
+/// [`std::io::Write`] instead, so it will write to a file, a buffer, or a
+/// socket.
 ///
 /// ```no_run
 /// use libpcapng::{Writer, LINKTYPE_ETHERNET};
 ///
 /// let mut w = Writer::create("out.pcapng", LINKTYPE_ETHERNET)?;
 /// # let frame: &[u8] = &[];
-/// w.packet(frame, 1_700_000_000_000_000)?;   // microseconds since the epoch
+/// w.packet(frame, 1_700_000_000_123_456_789)?;   // nanoseconds since the epoch
 /// w.finish()?;
 /// # Ok::<(), libpcapng::Error>(())
 /// ```
 ///
-/// Everything is little-endian, which the byte-order magic in the section
-/// header declares, and the interface is written with no `if_tsresol` option —
-/// so timestamps are microseconds, which is the format's default.
+/// Timestamps are nanoseconds since the epoch, the unit [`FilePacket`] reports
+/// and the C, Python and Go bindings use, so writing and reading need no
+/// conversion between them. Everything is little-endian, which the byte-order
+/// magic in the section header declares, and the interface is written with no
+/// `if_tsresol` option — so what lands in the file is microseconds, the
+/// format's default, and the sub-microsecond part of a timestamp is truncated.
 pub struct Writer<W: std::io::Write> {
     out: W,
     packets: u64,
@@ -315,9 +388,12 @@ impl<W: std::io::Write> Writer<W> {
         Ok(Writer { out, packets: 0 })
     }
 
-    /// Append a packet, timestamped in microseconds since the epoch.
-    pub fn packet(&mut self, frame: &[u8], timestamp_us: u64) -> Result<(), Error> {
-        self.packet_full(frame, frame.len() as u32, timestamp_us, None)
+    /// Append a packet, timestamped in nanoseconds since the epoch.
+    ///
+    /// The file stores microseconds, so anything finer is truncated; see the
+    /// type's documentation.
+    pub fn packet(&mut self, frame: &[u8], timestamp_ns: u64) -> Result<(), Error> {
+        self.packet_full(frame, frame.len() as u32, timestamp_ns, None)
     }
 
     /// Append a packet that was captured only in part, or that carries a
@@ -330,7 +406,7 @@ impl<W: std::io::Write> Writer<W> {
         &mut self,
         frame: &[u8],
         original_len: u32,
-        timestamp_us: u64,
+        timestamp_ns: u64,
         comment: Option<&str>,
     ) -> Result<(), Error> {
         let comment = comment.map(|s| s.as_bytes());
@@ -341,8 +417,11 @@ impl<W: std::io::Write> Writer<W> {
         let (opt_ptr, nopt) =
             if opts.is_empty() { (std::ptr::null(), 0) } else { (opts.as_ptr(), opts.len()) };
 
-        let ts_hi = (timestamp_us >> 32) as u32;
-        let ts_lo = (timestamp_us & 0xffff_ffff) as u32;
+        // The interface declares no if_tsresol, so the two words the block
+        // carries are microseconds — the format's default.
+        let ticks = timestamp_ns / 1_000;
+        let ts_hi = (ticks >> 32) as u32;
+        let ts_lo = (ticks & 0xffff_ffff) as u32;
 
         let epb = unsafe {
             build_block(

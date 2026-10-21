@@ -1152,15 +1152,15 @@ PYBIND11_MODULE(pycapng, m) {
            py::arg("pathname"), py::arg("mode"),
            R"doc(Open a capture file for reading ("r") or writing ("w").
 
-Writing declares the interface as LINKTYPE_RAW — bare IP, no link layer. The
-Build*/Write* helpers below all produce complete *Ethernet* frames, so writing
-them to a file opened this way produces a capture whose interface disagrees
-with its packets: nothing errors, and every reader, this library's dissector
-included, then decodes from the wrong offset and reports confident nonsense.
+Writing declares the interface as LINKTYPE_ETHERNET, which is what every
+Build*/Write* helper here produces. For bare IP datagrams, or any other link
+layer, say so with OpenFileLinkType:
 
-For a file you intend to dissect or open in Wireshark, say what is in it:
+    p.OpenFileLinkType("out.pcapng", "w", pycapng.LINKTYPE_RAW)
 
-    p.OpenFileLinkType("out.pcapng", "w", pycapng.LINKTYPE_ETHERNET))doc")
+Before 0.19.6 this defaulted to LINKTYPE_RAW, so a file written with the
+packet builders disagreed with its own interface — which no reader reports as
+an error; they just decode from the wrong offset.)doc")
       .def("OpenFileLinkType", &PcapNG::OpenFileLinkType,
            py::arg("pathname"), py::arg("mode"), py::arg("linktype"),
            R"doc(Open a capture file, declaring what the frames in it are.

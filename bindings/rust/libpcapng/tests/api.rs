@@ -182,8 +182,8 @@ fn a_written_capture_reads_back_packet_for_packet() {
         Some("libpcapng tests"),
     )
     .unwrap();
-    w.packet(&a, 1_700_000_000_000_000).unwrap();
-    w.packet_full(&b, b.len() as u32, 1_700_000_000_000_250, Some("the reply")).unwrap();
+    w.packet(&a, 1_700_000_000_000_000_000).unwrap();
+    w.packet_full(&b, b.len() as u32, 1_700_000_000_000_250_000, Some("the reply")).unwrap();
     assert_eq!(w.packets(), 2);
     w.finish().unwrap();
 
@@ -192,16 +192,18 @@ fn a_written_capture_reads_back_packet_for_packet() {
         let info = Dissection::new(pkt.data, LINKTYPE_ETHERNET)
             .map(|d| d.info().to_string())
             .unwrap_or_default();
-        seen.push((pkt.timestamp_us, pkt.data.len(), info));
+        seen.push((pkt.timestamp_ns, pkt.data.len(), info));
         true
     })
     .unwrap();
 
     assert_eq!(seen.len(), 2, "{seen:#?}");
-    // Microsecond timestamps survive, which the FILE*-based easyapi writer
-    // cannot do: it takes whole seconds.
-    assert_eq!(seen[0].0, 1_700_000_000_000_000);
-    assert_eq!(seen[1].0, 1_700_000_000_000_250);
+    // Sub-second spacing survives the round trip. The file stores
+    // microseconds, so a quarter of a millisecond apart is kept exactly;
+    // nanoseconds in and nanoseconds out, with nothing finer than a
+    // microsecond preserved.
+    assert_eq!(seen[0].0, 1_700_000_000_000_000_000);
+    assert_eq!(seen[1].0, 1_700_000_000_000_250_000);
     assert_eq!(seen[0].1, a.len());
     assert_eq!(seen[1].1, b.len());
     assert!(seen[0].2.contains("/cgi-bin/"), "{:?}", seen[0].2);
@@ -410,4 +412,93 @@ fn mongodb_owns_its_own_port() {
 
     // A filter naming the fields works, which it could not before.
     assert!(DisplayFilter::compile("mongodb.op_code == 2004").unwrap().matches(&d));
+}
+
+/// An interface may declare how fine its timestamps are, and a reader that
+/// ignores that is wrong by a factor of a thousand on a nanosecond capture —
+/// silently, because the number it reports still looks like a timestamp. So
+/// build the file by hand, with `if_tsresol` set, and check both directions.
+fn capture_with_tsresol(tsresol: Option<u8>, ticks: u64, frame: &[u8]) -> Vec<u8> {
+    fn block(btype: u32, body: &[u8]) -> Vec<u8> {
+        let pad = (4 - body.len() % 4) % 4;
+        let total = (12 + body.len() + pad) as u32;
+        let mut out = Vec::with_capacity(total as usize);
+        out.extend_from_slice(&btype.to_le_bytes());
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(body);
+        out.extend(std::iter::repeat(0).take(pad));
+        out.extend_from_slice(&total.to_le_bytes());
+        out
+    }
+
+    let mut shb = Vec::new();
+    shb.extend_from_slice(&0x1A2B_3C4Du32.to_le_bytes());
+    shb.extend_from_slice(&1u16.to_le_bytes());
+    shb.extend_from_slice(&0u16.to_le_bytes());
+    shb.extend_from_slice(&(-1i64).to_le_bytes()); // section length: unknown
+    let mut out = block(0x0A0D_0D0A, &shb);
+
+    let mut idb = Vec::new();
+    idb.extend_from_slice(&LINKTYPE_ETHERNET.to_le_bytes());
+    idb.extend_from_slice(&0u16.to_le_bytes());
+    idb.extend_from_slice(&65535u32.to_le_bytes());
+    if let Some(r) = tsresol {
+        idb.extend_from_slice(&9u16.to_le_bytes()); // if_tsresol
+        idb.extend_from_slice(&1u16.to_le_bytes()); // length
+        idb.push(r);
+        idb.extend_from_slice(&[0, 0, 0]); // padded to four
+        idb.extend_from_slice(&0u16.to_le_bytes()); // opt_endofopt
+        idb.extend_from_slice(&0u16.to_le_bytes());
+    }
+    out.extend_from_slice(&block(1, &idb));
+
+    let mut epb = Vec::new();
+    epb.extend_from_slice(&0u32.to_le_bytes()); // interface id
+    epb.extend_from_slice(&((ticks >> 32) as u32).to_le_bytes());
+    epb.extend_from_slice(&((ticks & 0xffff_ffff) as u32).to_le_bytes());
+    epb.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+    epb.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+    epb.extend_from_slice(frame);
+    out.extend_from_slice(&block(6, &epb));
+    out
+}
+
+#[test]
+fn a_packets_timestamp_is_scaled_by_the_interfaces_resolution() {
+    let f = http_get();
+    let dir = std::env::temp_dir().join(format!("libpcapng-tsresol-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // (if_tsresol, ticks in the file, expected nanoseconds)
+    let cases: [(Option<u8>, u64, u64); 5] = [
+        // No option at all: microseconds, which is what the format defines.
+        (None, 1_700_000_000_000_000, 1_700_000_000_000_000_000),
+        // Said out loud, same thing.
+        (Some(6), 1_700_000_000_000_000, 1_700_000_000_000_000_000),
+        // Nanoseconds. Read as microseconds this would come back as
+        // 1_700_000_000_123_456_789_000 — a thousand times too large, and
+        // nothing about it looks wrong.
+        (Some(9), 1_700_000_000_123_456_789, 1_700_000_000_123_456_789),
+        // Milliseconds, the other direction.
+        (Some(3), 1_700_000_000_123, 1_700_000_000_123_000_000),
+        // Powers of two are legal too: 2^-20 of a second per tick.
+        (Some(0x80 | 20), 1 << 20, 1_000_000_000),
+    ];
+
+    for (i, (tsresol, ticks, want)) in cases.into_iter().enumerate() {
+        let path = dir.join(format!("r{i}.pcapng"));
+        std::fs::write(&path, capture_with_tsresol(tsresol, ticks, &f)).unwrap();
+
+        let mut seen: Vec<u64> = Vec::new();
+        libpcapng::read_packets(&path, |pkt| {
+            seen.push(pkt.timestamp_ns);
+            true
+        })
+        .unwrap();
+
+        assert_eq!(seen.len(), 1, "case {i}: {seen:?}");
+        assert_eq!(seen[0], want, "case {i}: if_tsresol {tsresol:?}, {ticks} ticks");
+        std::fs::remove_file(&path).ok();
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

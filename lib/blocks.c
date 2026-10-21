@@ -75,7 +75,16 @@ size_t libpcapng_interface_description_block_write(uint32_t snaplen, unsigned ch
 	idb = (pcapng_interface_description_block_t *)outbuf;
 	idb->block_type = PCAPNG_INTERFACE_DESCRIPTION_BLOCK;
 	idb->block_total_length = block_total_length;
-	idb->linktype = LINKTYPE_RAW;
+	/* Ethernet, because that is what everything that writes through this
+	   path produces: every Build* helper in the easy API returns a complete
+	   Ethernet frame, and so does every live capture on an Ethernet
+	   interface. The default used to be LINKTYPE_RAW, which made the file
+	   disagree with its own packets — and a file whose interface lies about
+	   its frames does not fail, it decodes from the wrong offset and reports
+	   confident nonsense. Use
+	   libpcapng_interface_description_block_write_with_linktype() for bare
+	   IP or anything else. */
+	idb->linktype = LINKTYPE_ETHERNET;
 	idb->reserved = 0;
 	idb->snaplen = snaplen;
 
