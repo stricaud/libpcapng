@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <libpcapng/io.h>
+#include <libpcapng/reader.h>
 #include <libpcapng/capture.h>
 
 /* C trampolines that call into Go. The Go //export functions are defined in
@@ -10,6 +11,10 @@ int  cBlockCallback(uint32_t counter, uint32_t block_type, uint32_t block_total_
                     unsigned char *data, void *userdata);
 
 void cPacketCallback(const pcapng_packet_info_t *pkt, void *userdata);
+
+/* The file reader's per-packet callback, as opposed to the live capture's
+   above. Different struct, different source, so a separate trampoline. */
+int  cReadPacketCallback(const pcapng_packet_t *pkt, void *userdata);
 
 /* Carry a callback handle into C as the opaque `void *userdata` cookie.
    The handle is a counter from cbpool.go, not an address, so converting it on

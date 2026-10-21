@@ -167,7 +167,11 @@ Or use the ``pycapng`` binding if installed::
         ng.WritePacket(frame, "")
     ng.CloseFile()
 
-To write packets with explicit Unix timestamps (seconds)::
+To write packets with explicit timestamps, in nanoseconds since the epoch —
+the same unit ``read_packets()`` reports in ``pkt.timestamp_ns``::
 
     import time
-    ng.WritePacketTime(frame, int(time.time()))
+    ng.WritePacketTime(frame, time.time_ns())
+
+The file stores microseconds, the format's default resolution, so anything
+finer than a microsecond is truncated.

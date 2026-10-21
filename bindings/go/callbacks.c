@@ -5,6 +5,7 @@
 extern void goBlockCallback(uintptr_t handle, uint32_t counter, uint32_t block_type,
                             uint32_t block_total_length, unsigned char *data);
 extern void goPacketCallback(uintptr_t handle, const pcapng_packet_info_t *pkt);
+extern int  goReadPacketCallback(uintptr_t handle, const pcapng_packet_t *pkt);
 
 int cBlockCallback(uint32_t counter, uint32_t block_type, uint32_t block_total_length,
                    unsigned char *data, void *userdata)
@@ -16,6 +17,11 @@ int cBlockCallback(uint32_t counter, uint32_t block_type, uint32_t block_total_l
 void cPacketCallback(const pcapng_packet_info_t *pkt, void *userdata)
 {
     goPacketCallback((uintptr_t)userdata, pkt);
+}
+
+int cReadPacketCallback(const pcapng_packet_t *pkt, void *userdata)
+{
+    return goReadPacketCallback((uintptr_t)userdata, pkt);
 }
 
 void *cHandleToPtr(uintptr_t h)

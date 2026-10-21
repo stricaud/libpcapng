@@ -67,7 +67,9 @@ static py::object field_value(const pcapng_field_t *f) {
 }
 
 // Recursively convert a pcapng_field_t subtree to a nested Python dict.
-static py::dict field_to_dict(const pcapng_field_t *f) {
+/* Shared with pydissect.cpp, which renders the same tree for a full
+   dissection rather than for one posa decoder. */
+py::dict pcapng_field_to_dict(const pcapng_field_t *f) {
   py::dict d;
   d["label"] = py::str(f->label);
   d["abbrev"] = py::str(f->abbrev);
@@ -77,7 +79,7 @@ static py::dict field_to_dict(const pcapng_field_t *f) {
   d["value"] = field_value(f);
   py::list kids;
   for (const pcapng_field_t *c = f->children; c; c = c->next)
-    kids.append(field_to_dict(c));
+    kids.append(pcapng_field_to_dict(c));
   d["children"] = kids;
   return d;
 }
@@ -301,7 +303,7 @@ void register_posa(py::module_ &m) {
           // children as the top-level nodes (root itself is just a holder).
           py::list nodes;
           for (const pcapng_field_t *c = root->children; c; c = c->next)
-            nodes.append(field_to_dict(c));
+            nodes.append(pcapng_field_to_dict(c));
           out["fields"] = nodes;
           pcapng_field_free(root);
           return (consumed <= 0 && nodes.empty()) ? py::none() : py::object(out);

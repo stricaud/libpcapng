@@ -176,6 +176,12 @@ typedef struct {
   char                lenfield[PCAPNG_POSA_NAME_MAX];/* BYTES_REF/STR_REF, and
                                                         REPEAT: the count field */
   char                delim[PCAPNG_POSA_DELIM_MAX]; int ndelim; /* STR_DELIM   */
+  /* `until any "<set>"` — delim is a set of single bytes, any one of which
+     ends the field, rather than one multi-byte sequence. A line-oriented
+     protocol needs this: memcached's `get k\r\n` and `stats\r\n` end at a
+     space or at CR, and `until " \r"` asks for a space *followed by* CR,
+     which never occurs. */
+  int                 delim_any;
   char                sub[PCAPNG_POSA_NAME_MAX];     /* LAYER: sub-proto name  */
   pcapng_posa_enum_t  enums[PCAPNG_POSA_MAX_ENUMS];
   int                 nenums;
@@ -232,13 +238,17 @@ typedef struct {
                                                         no other one's first field
                                                         matches (an HTTP request has
                                                         no magic; a response does) */
-  char               prefixes[8][16];                /* `starts "GET " "POST "…` — select
-                                                        this member of group G only when the
-                                                        payload begins with one of these
-                                                        literals (content-based dispatch,
-                                                        for text protocols with no magic) */
+  /* `starts "GET " "POST "…` — select this member of group G only when the
+     payload begins with one of these literals (content-based dispatch, for a
+     text protocol with no magic number).
+
+     64 rather than 8: a command-oriented protocol lists one prefix per verb,
+     and FTP alone has 34. At 8, every prefix past the eighth was silently
+     dropped, so `STOR `, `RETR ` and `LIST ` did not decode at all. */
+#define PCAPNG_POSA_MAX_PREFIX 64
+  char               prefixes[PCAPNG_POSA_MAX_PREFIX][16];
   int                nprefix;
-  int                prefix_len[8];                   /* byte length of each prefix         */
+  int                prefix_len[PCAPNG_POSA_MAX_PREFIX]; /* byte length of each prefix      */
 } pcapng_posa_proto_t;
 
 /* Load .posa definitions into the global registry. Redefining a protocol by

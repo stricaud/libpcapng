@@ -3155,13 +3155,14 @@ typedef struct {
 static void to_file_cb(const pcapng_packet_info_t *pkt, void *ud)
 {
     to_file_ctx_t *ctx = (to_file_ctx_t *)ud;
-    /* timestamp in seconds for the easy-API */
-    uint32_t ts_sec = (uint32_t)(pkt->timestamp_ns / 1000000000ULL);
-    libpcapng_write_enhanced_packet_with_time_to_file(
+    /* The easy API takes nanoseconds, so the capture timestamp goes through
+       as it is. It used to be truncated to whole seconds here, which gave
+       every packet in a captured file the same arrival time. */
+    libpcapng_write_enhanced_packet_with_time_ns_to_file(
         ctx->out,
         (unsigned char *)(uintptr_t)pkt->data,   /* cast away const */
         pkt->captured_len,
-        ts_sec);
+        pkt->timestamp_ns);
     ctx->written++;
 }
 

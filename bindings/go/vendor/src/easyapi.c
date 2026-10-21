@@ -108,12 +108,23 @@ int libpcapng_write_enhanced_packet_to_file(FILE *outfile, const unsigned char *
 	return 0;
 }
 
-int libpcapng_write_enhanced_packet_with_time_to_file(FILE *outfile, const unsigned char *packet, size_t packet_size, uint32_t timestamp)
+int libpcapng_write_enhanced_packet_with_time_ns_to_file(FILE *outfile, const unsigned char *packet, size_t packet_size, uint64_t timestamp_ns)
 {
 	unsigned char *buffer;
 	size_t buffer_size;
 
-	uint64_t timestamp_in_micros = timestamp * (uint64_t) 1000000;
+	/* Nanoseconds in, because nanoseconds are what every reader in this
+	 * library reports: pcapng_packet_t::timestamp_ns, Python's
+	 * pkt.timestamp_ns, Go's Packet.TimestampNs. A writer that took some
+	 * other unit would mean every round trip had a conversion in it, and a
+	 * forgotten conversion in a timestamp is not something a test notices.
+	 *
+	 * The interface description this easy API writes carries no if_tsresol
+	 * option, so the format's default applies and the block's two words are
+	 * *microseconds* since the epoch. The sub-microsecond part is therefore
+	 * dropped here — truncated deliberately, which is visible in the file,
+	 * rather than reinterpreted, which would not be. */
+	uint64_t timestamp_in_micros = timestamp_ns / 1000;
 	uint64_t timestamp_high_shift = timestamp_in_micros >> 32;
 	uint32_t timestamp_high = (uint32_t) timestamp_high_shift;
 	uint32_t timestamp_low = timestamp_in_micros & 0xFFFFFFFF;
@@ -125,4 +136,11 @@ int libpcapng_write_enhanced_packet_with_time_to_file(FILE *outfile, const unsig
 	free(buffer);
 
   return 0;
+}
+
+int libpcapng_write_enhanced_packet_with_time_to_file(FILE *outfile, const unsigned char *packet, size_t packet_size, uint32_t timestamp)
+{
+	/* Whole seconds, kept for callers written against it. */
+	return libpcapng_write_enhanced_packet_with_time_ns_to_file(
+		outfile, packet, packet_size, (uint64_t)timestamp * 1000000000ULL);
 }

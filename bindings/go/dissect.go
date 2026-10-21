@@ -6,6 +6,7 @@ package pcapng
 */
 import "C"
 import (
+	"runtime"
 	"unsafe"
 )
 
@@ -24,14 +25,14 @@ const (
 
 // Field is one node in a dissected packet's field tree.
 type Field struct {
-	Abbrev   string    // e.g. "ip.src", "tcp.dstport"
-	Label    string    // human-readable label
+	Abbrev   string // e.g. "ip.src", "tcp.dstport"
+	Label    string // human-readable label
 	Type     FieldType
-	Uint     uint64    // valid when Type == FieldTypeUint
-	Str      string    // valid when Type is String / IPv4 / IPv6 / MAC
-	Bytes    []byte    // raw bytes (first 16 for FieldTypeBytes; full for IPv6/MAC)
-	Offset   int       // byte offset within the original packet
-	Len      int       // byte length of this field
+	Uint     uint64 // valid when Type == FieldTypeUint
+	Str      string // valid when Type is String / IPv4 / IPv6 / MAC
+	Bytes    []byte // raw bytes (first 16 for FieldTypeBytes; full for IPv6/MAC)
+	Offset   int    // byte offset within the original packet
+	Len      int    // byte length of this field
 	Children []*Field
 }
 
@@ -42,6 +43,30 @@ type Dissection struct {
 	Src      string // source address summary
 	Dst      string // destination address summary
 	Info     string // one-line info column
+
+	// The C field tree, kept alive so a compiled filter can be matched
+	// against a dissection that has already been built. Root above is a Go
+	// copy and is what callers read; the filter engine needs the original.
+	//
+	// Freed by Close, or by the garbage collector if Close is never called.
+	// Both are safe, and calling Close twice is safe.
+	cd *C.pcapng_dissection_t
+}
+
+// Close releases the C field tree behind the dissection.
+//
+// Optional: a dissection that is never closed is freed when the garbage
+// collector gets to it. Closing is worth doing in a loop over a large capture,
+// because the C allocation is invisible to Go's heap accounting, so nothing
+// tells the collector to hurry.
+//
+// After Close, every Go field is still readable — Root is a copy — but a
+// filter matched against it returns false.
+func (d *Dissection) Close() {
+	if d != nil && d.cd != nil {
+		C.pcapng_dissection_free(d.cd)
+		d.cd = nil
+	}
 }
 
 // Dissect dissects data as a packet with the given link-layer type (use the
@@ -65,17 +90,20 @@ func DissectFull(data []byte, caplen, origlen uint32, linktype uint16) (*Dissect
 	if cd == nil {
 		return nil, nil
 	}
-	defer C.pcapng_dissection_free(cd)
 
 	d := &Dissection{
 		Protocol: C.GoString(&cd.proto[0]),
 		Src:      C.GoString(&cd.src[0]),
 		Dst:      C.GoString(&cd.dst[0]),
 		Info:     C.GoString(&cd.info[0]),
+		cd:       cd,
 	}
 	if cd.root != nil {
 		d.Root = convertField(cd.root)
 	}
+	// So that a caller who never calls Close leaks nothing. The finalizer runs
+	// at most once, and Close clears the pointer, so the two cannot both free.
+	runtime.SetFinalizer(d, (*Dissection).Close)
 	return d, nil
 }
 

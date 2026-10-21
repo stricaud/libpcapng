@@ -148,6 +148,30 @@ def main():
         except RuntimeError:
             check("read_packets raises for a file that is not there", True)
 
+        print("\n[writing, then reading back]")
+        # The writer and the reader have to agree on the unit, and they used to
+        # not: WritePacketTime took whole seconds while every reader reports
+        # nanoseconds, so a file written through it had every packet arriving
+        # at the same instant.
+        path = tmp / "w.pcapng"
+        w = pycapng.PcapNG()
+        w.OpenFileLinkType(str(path), "w", pycapng.LINKTYPE_ETHERNET)
+        base = 1700000000 * 10**9 + 123456789
+        w.WritePacketTime(FRAME_A, base)
+        w.WritePacketTime(FRAME_B, base + 1500)
+        w.CloseFile()
+
+        pkts = pycapng.read_packets(str(path))
+        check("both packets came back", len(pkts) == 2)
+        check("the frames survived the round trip",
+              pkts[0].data == FRAME_A and pkts[1].data == FRAME_B)
+        # The file stores microseconds, so the nanosecond remainder is
+        # truncated — that much, and no more.
+        check("the nanosecond timestamp round-trips to the microsecond",
+              pkts[0].timestamp_ns == base // 1000 * 1000)
+        check("sub-second spacing is kept",
+              pkts[1].timestamp_ns > pkts[0].timestamp_ns)
+
     print(f"\n{ok} passed, {bad} failed")
     return 1 if bad else 0
 

@@ -100,7 +100,7 @@ public:
 				     const std::string &src_ip, const std::string &dst_ip,
 				     uint32_t src_port, uint32_t dst_port, py::bytes tls_appdata);
   
-  int WritePacketTime(py::bytes data, uint32_t timestamp);
+  int WritePacketTime(py::bytes data, uint64_t timestamp_ns);
   int WriteCustom(uint32_t pen, py::bytes data, const std::string &comment);
   int ForeachPacket(const py::object &func);
   int ForeachMem(py::bytes data, const py::object &func);

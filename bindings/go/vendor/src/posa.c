@@ -103,7 +103,15 @@ static ip4cidr_bind_t g_ip4cidrs[MAX_IP4_CIDR_BINDS]; static int g_nip4cidrs;
      • expression macro — RHS is a full display-filter expression:
          alias http.error   => http.response.code >= 400
        The name expands to that whole expression wherever it is used as a term. */
-#define MAX_ALIASES     64
+/* 1024, not 64: the bundled .posa files alone declare 424 aliases, so at 64
+   the table filled during the first few protocols loaded (alphabetically, so
+   amqp's resolved and ftp's never did) and every later `alias` line was
+   dropped without a word. A display filter naming one of them then matched
+   nothing, which looks exactly like the field not existing. */
+/* Defined further down, next to the warning buffer it writes into. */
+static void posa_warn(const char *fmt, const char *a, uint64_t b);
+
+#define MAX_ALIASES     1024
 #define ALIAS_MAX_TGTS  4
 typedef struct {
   char from[PCAPNG_POSA_NAME_MAX];
@@ -592,7 +600,14 @@ static void parse_alias(const char *rest)
   int macro = 0, ntok = 0;
   char tgts[ALIAS_MAX_TGTS][PCAPNG_POSA_NAME_MAX];
 
-  if (!arrow || g_naliases >= MAX_ALIASES) return;
+  if (!arrow) return;
+  if (g_naliases >= MAX_ALIASES) {
+    /* Silence here is what made the 64-entry limit so hard to see: a filter on
+       a dropped alias simply never matched. */
+    posa_warn("alias table full: '%s' and every alias after it ignored (max %llu)",
+              from, (uint64_t)MAX_ALIASES);
+    return;
+  }
   if (sscanf(rest, " %63s", from) != 1 || !from[0] || !strcmp(from, "=>")) return;
 
   /* scan the RHS tokens: all plain fields (≤ARRAY) → synonym, else → macro */
@@ -805,6 +820,33 @@ static void guard_from_toks(char **toks, int start, int nt, pcapng_posa_guard_t 
   }
 }
 
+/* Collect the quoted literals of a `starts` directive from one line of text.
+   Returns how many were added. Shared by the directive itself and by its
+   continuation lines, which is why it is a function rather than a loop inline:
+   a long `starts` list is normally wrapped, and before this the wrapped part
+   was read by nobody. */
+static int collect_prefixes(pcapng_posa_proto_t *cur, const char *p)
+{
+  int added = 0;
+  while (cur->nprefix < PCAPNG_POSA_MAX_PREFIX) {
+    int n; char raw_delim[PCAPNG_POSA_DELIM_MAX];
+    p = strchr(p, '"');
+    if (!p) break;
+    parse_delim(p, raw_delim, &n);
+    if (n > 0 && n < (int)sizeof cur->prefixes[0]) {
+      memcpy(cur->prefixes[cur->nprefix], raw_delim, n);
+      cur->prefix_len[cur->nprefix] = n;
+      cur->nprefix++;
+      added++;
+    }
+    p++;                                  /* past opening quote */
+    p = strchr(p, '"');                   /* closing quote     */
+    if (!p) break;
+    p++;
+  }
+  return added;
+}
+
 static int parse_src(const char *src, char *errbuf, size_t errlen)
 {
   const char *line = src;
@@ -813,6 +855,8 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
   pcapng_posa_fld_t *lastfld = NULL;
   int added = 0, lineno = 0;
   int blk_indent[32], nblk = 0;               /* open scope/when block indents */
+  int in_starts = 0;                          /* previous line was `starts`, or
+                                                 one of its continuations */
 
   while (*line) {
     char buf[1024], raw[1024], *toks[32], *hash, *tl;
@@ -822,7 +866,9 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
     const char *eol = strchr(line, '\n');
     size_t llen = eol ? (size_t)(eol - line) : strlen(line);
     int nt, indent, ti, structural;
+    int was_starts = in_starts;
 
+    in_starts = 0;
     lineno++;
     if (llen >= sizeof buf) llen = sizeof buf - 1;
     memcpy(buf, line, llen); buf[llen] = '\0';
@@ -908,22 +954,19 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
        Lets a text protocol (HTTP request, etc.) be recognised without a numeric
        magic, so binary payloads on the same port are not mis-decoded. */
     if (cur && !strncmp(tl, "starts", 6) && (tl[6] == ' ' || tl[6] == '"' || tl[6] == '\t')) {
-      const char *p = tl + 6;
-      while (cur->nprefix < 8) {
-        int n; char raw_delim[PCAPNG_POSA_DELIM_MAX];
-        p = strchr(p, '"');
-        if (!p) break;
-        parse_delim(p, raw_delim, &n);
-        if (n > 0 && n < (int)sizeof cur->prefixes[0]) {
-          memcpy(cur->prefixes[cur->nprefix], raw_delim, n);
-          cur->prefix_len[cur->nprefix] = n;
-          cur->nprefix++;
-        }
-        p++;                                  /* past opening quote */
-        p = strchr(p, '"');                   /* closing quote     */
-        if (!p) break;
-        p++;
-      }
+      collect_prefixes(cur, tl + 6);
+      in_starts = 1;
+      continue;
+    }
+
+    /* A continuation of the `starts` above: a line holding nothing but more
+       quoted literals. Wrapping a long list is the natural way to write one —
+       every bundled protocol with more than a handful of verbs does it — and
+       until this existed the wrapped lines were parsed as something else and
+       quietly discarded, taking their verbs with them. */
+    if (cur && was_starts && *tl == '"') {
+      collect_prefixes(cur, tl);
+      in_starts = 1;
       continue;
     }
 
@@ -1365,8 +1408,19 @@ static int parse_src(const char *src, char *errbuf, size_t errlen)
         /* the delimiter comes from the raw line, not from a token: HTTP splits on
            " ", and tokenize() would have torn that quoted space in half */
         const char *u = strstr(raw, "until");
-        const char *q = u ? strchr(u, '"') : NULL;
+        const char *p2 = u ? u + 5 : NULL;
+        const char *q;
         f->type = PCAPNG_POSA_STR_DELIM;
+        /* `until any "<set>"` — end at any one of these bytes, rather than at
+           one multi-byte sequence. */
+        if (p2) {
+          while (*p2 == ' ' || *p2 == '\t') p2++;
+          if (!strncmp(p2, "any", 3) && (p2[3] == ' ' || p2[3] == '\t' || p2[3] == '"')) {
+            f->delim_any = 1;
+            p2 += 3;
+          }
+        }
+        q = p2 ? strchr(p2, '"') : NULL;
         if (q) parse_delim(q, f->delim, &f->ndelim);
       }
       /* `defaults(<value>)`, already read off the end of the line. */
@@ -1886,6 +1940,18 @@ static int find_delim(const uint8_t *d, int off, int lim, const char *delim, int
   return -1;
 }
 
+/* `until any "<set>"`: the first byte that is one of `set`. Consumes one byte,
+   not `nset` — the field ends at whichever delimiter turned up. */
+static int find_delim_any(const uint8_t *d, int off, int lim, const char *set, int nset)
+{
+  int i, k;
+  if (nset <= 0) return -1;
+  for (i = off; i < lim; i++)
+    for (k = 0; k < nset; k++)
+      if (d[i] == (uint8_t)set[k]) return i;
+  return -1;
+}
+
 /* An open scope/when/repeat block. `repeat` carries the extra state a loop needs:
    where to jump back to, how many iterations are left, and which subtree the
    current record's fields are being hung on. */
@@ -2300,11 +2366,14 @@ static int dissect_one(const pcapng_posa_proto_t *p, const uint8_t *data, int le
     } else if (f->type == PCAPNG_POSA_STR_DELIM) {
       /* consume up to (and past) the delimiter; if the delimiter is absent the
          field is empty (0 bytes) — an "optional" delimited token. */
-      int start = off, d = find_delim(data, off, lim, f->delim, f->ndelim), n; char tmp[256];
+      int start = off, n; char tmp[256];
+      int d = f->delim_any ? find_delim_any(data, off, lim, f->delim, f->ndelim)
+                           : find_delim(data, off, lim, f->delim, f->ndelim);
       n = (d >= 0) ? d - start : 0;
       if (n > (int)sizeof tmp - 1) n = (int)sizeof tmp - 1;
       memcpy(tmp, data + start, (size_t)n); tmp[n] = '\0';
-      if (d >= 0) off = d + f->ndelim;
+      /* A set delimiter is one byte wide whichever member matched. */
+      if (d >= 0) off = d + (f->delim_any ? 1 : f->ndelim);
       cf = pf_add(cur, ab, PCAPNG_FT_STR); pf_str(cf, tmp);
       { const char *en = enum_name_str(f, tmp);
         if (en) pf_label(cf, "%s: %s (%s)", fld_disp(f), en, tmp);

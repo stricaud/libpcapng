@@ -94,6 +94,7 @@ libpcapng.so.1 libpcapng1 #MINVER#
  libpcapng_udp_packet_build 0.1
  libpcapng_update_tcp_state 0.1
  libpcapng_write_enhanced_packet_to_file 0.1
+ libpcapng_write_enhanced_packet_with_time_ns_to_file 0.1
  libpcapng_write_enhanced_packet_with_time_to_file 0.1
  libpcapng_write_header_to_file 0.1
  libpcapng_write_header_to_file_with_linktype 0.1

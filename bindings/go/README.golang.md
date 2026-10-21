@@ -25,53 +25,71 @@ import (
 )
 
 func main() {
-    err := pcapng.ReadFile("capture.pcapng", func(counter, blockType uint32, data []byte) {
-        if blockType == pcapng.BlockTypeEnhancedPacket {
-            fmt.Printf("block %d: %d bytes\n", counter, len(data))
-        }
+    n, err := pcapng.ReadPackets("capture.pcapng", func(p *pcapng.Packet) bool {
+        fmt.Printf("%d: %d bytes on the wire, %d captured\n",
+            p.Index, p.OriginalLen, p.CapturedLen)
+        return true // false stops the read
     })
     if err != nil {
         panic(err)
     }
+    fmt.Printf("%d packets\n", n)
 }
 ```
+
+`ReadPackets` hands you the frame itself, with the link-layer type already
+resolved from the interface the packet belongs to and the timestamp already
+scaled by that interface's resolution. Both `.pcap` and `.pcapng` work; the
+format is detected.
+
+If you want the file's block structure rather than its packets — options,
+name-resolution blocks, decryption secrets — use `ReadFile`, which delivers
+whole blocks including the 8-byte block header.
 
 ### Dissect packets
 
 ```go
-err := pcapng.ReadFile("capture.pcapng", func(counter, blockType uint32, data []byte) {
-    if blockType != pcapng.BlockTypeEnhancedPacket {
-        return
-    }
-    // The EPB body starts at offset 24 (8-byte block header + 16-byte EPB fixed fields).
-    // For real use, parse the EPB header to get captured_len and the packet payload offset.
-    d, _ := pcapng.Dissect(data[24:], pcapng.LinktypeEthernet)
+pcapng.EnsureProtocols() // once, at startup
+
+n, err := pcapng.ReadPackets("capture.pcapng", func(p *pcapng.Packet) bool {
+    d, _ := pcapng.Dissect(p.Data, p.Linktype)
     if d != nil {
-        fmt.Printf("[%s] %s → %s  %s\n", d.Protocol, d.Src, d.Dst, d.Info)
+        fmt.Printf("%4d  %-6s %-15s -> %-15s  %s\n",
+            p.Index, d.Protocol, d.Src, d.Dst, d.Info)
     }
+    return true
 })
 ```
+
+`EnsureProtocols` loads the bundled POSA protocol definitions. Without it you
+get only the built-in C dissectors — a bare `TCP` where there was an HTTP
+request — and a filter naming a field such as `http.uri` matches nothing,
+because the field does not exist yet. It is idempotent.
 
 ### Apply a display filter
 
 ```go
+pcapng.EnsureProtocols()
+
 f, err := pcapng.NewFilter("tcp.dstport == 443 and ip.src == 10.0.0.0/8")
 if err != nil {
-    panic(err)
+    panic(err) // a typo fails here, not silently on every packet
 }
 defer f.Close()
 
-err = pcapng.ReadFile("capture.pcapng", func(counter, blockType uint32, data []byte) {
-    if blockType != pcapng.BlockTypeEnhancedPacket {
-        return
+_, err = pcapng.ReadPackets("capture.pcapng", func(p *pcapng.Packet) bool {
+    d, _ := pcapng.Dissect(p.Data, p.Linktype)
+    if d != nil && f.Match(d) {
+        fmt.Printf("packet %d matches\n", p.Index)
     }
-    payload := data[24:]
-    matched, _ := f.MatchRaw(payload, pcapng.LinktypeEthernet)
-    if matched {
-        fmt.Printf("packet %d matches\n", counter)
-    }
+    return true
 })
 ```
+
+Dissect once and match many: dissecting costs microseconds, matching a
+compiled filter against the result costs nanoseconds. `f.MatchRaw(data,
+linktype)` is there for when you have only the bytes, but it dissects
+internally, so with more than one filter prefer `Dissect` + `Match`.
 
 ### Walk the field tree
 
@@ -109,8 +127,13 @@ defer w.Close()
 
 rawEthernetFrame := []byte{ /* ... */ }
 w.WritePacket(rawEthernetFrame)
-w.WritePacketWithTime(rawEthernetFrame, uint32(time.Now().Unix()))
+w.WritePacketWithTime(rawEthernetFrame, uint64(time.Now().UnixNano()))
 ```
+
+Timestamps are nanoseconds since the epoch — the same unit `ReadPackets` gives
+back in `Packet.TimestampNs`, so a round trip needs no conversion. The file
+stores microseconds, the format's default resolution, so anything finer than a
+microsecond is truncated.
 
 ### Live capture
 
@@ -135,13 +158,17 @@ cap.Loop(0, func(pkt *pcapng.PacketInfo) {
 
 | Symbol | Description |
 |--------|-------------|
-| `ReadFile(path, cb)` | Read every block from a pcap/pcapng file |
+| `ReadPackets(path, cb)` | Read every **packet**: frame, resolved linktype, scaled timestamp |
+| `EnsureProtocols()` | Load the bundled POSA protocol decoders (call once, before dissecting) |
+| `(*Packet).Truncated()` | Was the frame cut short by the capture's snaplen? |
+| `ReadFile(path, cb)` | Read every **block** from a pcap/pcapng file, header included |
 | `ReadMemory(buf, cb)` | Read blocks from an in-memory buffer |
 | `Dissect(data, linktype)` | Dissect raw packet bytes into a field tree |
 | `DissectFull(data, caplen, origlen, linktype)` | Dissect with separate captured/original lengths |
 | `ResetFlows()` | Clear the sticky flow-classification table between captures |
 | `SetVerifyChecksums(bool)` | Enable/disable IP/TCP/UDP checksum validation |
 | `NewFilter(expr)` | Compile a Wireshark-compatible display filter |
+| `(*Filter).Match(d)` | Match a compiled filter against an existing dissection |
 | `(*Filter).MatchRaw(data, linktype)` | Dissect + filter in one step |
 | `ListDevices()` | Enumerate network interfaces |
 | `DefaultDevice()` | Name of the first usable non-loopback interface |
@@ -152,6 +179,7 @@ cap.Loop(0, func(pkt *pcapng.PacketInfo) {
 | `(*Capture).Break()` | Stop the capture loop |
 | `CaptureToFile(dev, path, filter, count)` | One-shot: capture to file |
 | `NewWriter(path)` | Create a pcapng file writer (Ethernet link type) |
+| `(*Writer).WritePacketWithTime(frame, ns)` | Append a packet timestamped in nanoseconds |
 | `NewWriterWithLinktype(path, lt)` | Create a writer with explicit link type |
 
 ## Versioning & publishing

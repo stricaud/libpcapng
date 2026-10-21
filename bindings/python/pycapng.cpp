@@ -22,6 +22,7 @@ namespace py = pybind11;
 void register_pcapsh_submodule(py::module_ &parent);
 void register_capture(py::module_ &m);
 void register_posa(py::module_ &m);
+void register_dissect(py::module_ &m);
 
 PcapNG::PcapNG(void) {
   filename = NULL;
@@ -308,13 +309,13 @@ py::bytes PcapNG::BuildIcmpPacket(const std::string &src_mac,
     return py::bytes(reinterpret_cast<char *>(frame), frame_len);
 }
 
-int PcapNG::WritePacketTime(py::bytes data, uint32_t timestamp)
+int PcapNG::WritePacketTime(py::bytes data, uint64_t timestamp_ns)
 {
   py::buffer_info info(py::buffer(data).request());
   uint8_t *data_bytes = reinterpret_cast<uint8_t *>(info.ptr);
   size_t data_len = static_cast<size_t>(info.size);
 
-  libpcapng_write_enhanced_packet_with_time_to_file(_fp, data_bytes, data_len, timestamp);
+  libpcapng_write_enhanced_packet_with_time_ns_to_file(_fp, data_bytes, data_len, timestamp_ns);
 
   return 0;
 }
@@ -1142,29 +1143,113 @@ PYBIND11_MODULE(pycapng, m) {
    
     py::class_<PcapNG>(m, "PcapNG")
       .def(py::init<>())
-      .def("OpenFile", &PcapNG::OpenFile)
-      .def("OpenFileLinkType", &PcapNG::OpenFileLinkType)
-      .def("OpenFileLinkTypeComment", &PcapNG::OpenFileLinkTypeComment)
+      /* The arguments are named — and the ones that have an obvious default
+       * carry it — so that these can be called the way they are written down:
+       * ten positional arguments in the right order is not an API anyone
+       * should have to get right from memory. Every builder returns a
+       * complete Ethernet frame, which is why each takes a pair of MACs. */
+      .def("OpenFile", &PcapNG::OpenFile,
+           py::arg("pathname"), py::arg("mode"),
+           R"doc(Open a capture file for reading ("r") or writing ("w").
+
+Writing declares the interface as LINKTYPE_RAW — bare IP, no link layer. The
+Build*/Write* helpers below all produce complete *Ethernet* frames, so writing
+them to a file opened this way produces a capture whose interface disagrees
+with its packets: nothing errors, and every reader, this library's dissector
+included, then decodes from the wrong offset and reports confident nonsense.
+
+For a file you intend to dissect or open in Wireshark, say what is in it:
+
+    p.OpenFileLinkType("out.pcapng", "w", pycapng.LINKTYPE_ETHERNET))doc")
+      .def("OpenFileLinkType", &PcapNG::OpenFileLinkType,
+           py::arg("pathname"), py::arg("mode"), py::arg("linktype"),
+           R"doc(Open a capture file, declaring what the frames in it are.
+
+`linktype` is one of the LINKTYPE_* constants: LINKTYPE_ETHERNET for anything
+the Build* helpers return, LINKTYPE_RAW for bare IP datagrams.)doc")
+      .def("OpenFileLinkTypeComment", &PcapNG::OpenFileLinkTypeComment,
+           py::arg("pathname"), py::arg("mode"), py::arg("linktype"),
+           py::arg("comment"))
       .def("CloseFile", &PcapNG::CloseFile)
-      .def("WriteCustom", &PcapNG::WriteCustom)
-      .def("WritePacket", &PcapNG::WritePacket)
-      .def("WriteTcpPacket", &PcapNG::WriteTcpPacket)
-      .def("BuildTcpPacket", &PcapNG::BuildTcpPacket)
-      .def("BuildUdpPacket", &PcapNG::BuildUdpPacket)
-      .def("BuildIcmpPacket", &PcapNG::BuildIcmpPacket)
-      .def("BuildDnsQuery", &PcapNG::BuildDnsQuery)
-      .def("BuildDNSResponse", &PcapNG::BuildDNSResponse)
-      .def("BuildDhcpDiscover", &PcapNG::BuildDhcpDiscover)
-      .def("BuildDhcpOffer", &PcapNG::BuildDhcpOffer)
-      .def("BuildNtpRequest", &PcapNG::BuildNtpRequest)
-      .def("BuildNtpReply", &PcapNG::BuildNtpReply)
-      .def("BuildTlsClientHello", &PcapNG::BuildTlsClientHello)
-      .def("BuildTlsServerHello", &PcapNG::BuildTlsServerHello)
-      .def("BuildTlsCertificate", &PcapNG::BuildTlsCertificate)
+      .def("WriteCustom", &PcapNG::WriteCustom,
+           py::arg("pen"), py::arg("data"), py::arg("comment") = "")
+      .def("WritePacket", &PcapNG::WritePacket,
+           py::arg("data"), py::arg("comment") = "")
+      .def("WriteTcpPacket", &PcapNG::WriteTcpPacket,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"),
+           py::arg("seqnum") = 0, py::arg("ack") = 0,
+           py::arg("flags") = 0x18, py::arg("data") = py::bytes())
+      .def("BuildTcpPacket", &PcapNG::BuildTcpPacket,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"),
+           py::arg("seqnum") = 0, py::arg("ack") = 0,
+           py::arg("flags") = 0x18, py::arg("data") = py::bytes())
+      .def("BuildUdpPacket", &PcapNG::BuildUdpPacket,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"),
+           py::arg("data") = py::bytes())
+      .def("BuildIcmpPacket", &PcapNG::BuildIcmpPacket,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("icmp_type"), py::arg("icmp_code"),
+           py::arg("identifier") = 0, py::arg("sequence") = 0,
+           py::arg("data") = py::bytes())
+      .def("BuildDnsQuery", &PcapNG::BuildDnsQuery,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"),
+           py::arg("transaction_id"), py::arg("domain"),
+           py::arg("qtype") = "A", py::arg("qclass") = "IN")
+      .def("BuildDNSResponse", &PcapNG::BuildDNSResponse,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"),
+           py::arg("transaction_id"), py::arg("domain"),
+           py::arg("qtype"), py::arg("response_ip"))
+      .def("BuildDhcpDiscover", &PcapNG::BuildDhcpDiscover,
+           py::arg("src_mac"), py::arg("src_ip"),
+           py::arg("src_port"), py::arg("dst_port"), py::arg("xid"))
+      .def("BuildDhcpOffer", &PcapNG::BuildDhcpOffer,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("offered_ip"), py::arg("xid"),
+           py::arg("src_port"), py::arg("dst_port"))
+      .def("BuildNtpRequest", &PcapNG::BuildNtpRequest,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"))
+      .def("BuildNtpReply", &PcapNG::BuildNtpReply,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"), py::arg("ntp_request"))
+      .def("BuildTlsClientHello", &PcapNG::BuildTlsClientHello,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"))
+      .def("BuildTlsServerHello", &PcapNG::BuildTlsServerHello,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"))
+      .def("BuildTlsCertificate", &PcapNG::BuildTlsCertificate, py::arg("cert"))
       .def("BuildTlsFinished", &PcapNG::BuildTlsFinished)
-      .def("BuildTlsApplicationData", &PcapNG::BuildTlsApplicationData)
-      .def("WritePacketTime", &PcapNG::WritePacketTime)
-      .def("ForeachPacket", &PcapNG::ForeachPacket)
+      .def("BuildTlsApplicationData", &PcapNG::BuildTlsApplicationData,
+           py::arg("src_mac"), py::arg("dst_mac"),
+           py::arg("src_ip"), py::arg("dst_ip"),
+           py::arg("src_port"), py::arg("dst_port"), py::arg("tls_appdata"))
+      .def("WritePacketTime", &PcapNG::WritePacketTime,
+           py::arg("data"), py::arg("timestamp_ns"),
+           R"doc(Write a packet timestamped in nanoseconds since the epoch.
+
+    p.WritePacketTime(frame, time.time_ns())
+
+Nanoseconds because that is what `read_packets()` gives back in
+`pkt.timestamp_ns`, so writing and reading use one unit. The file itself
+stores microseconds, the format's default resolution, so anything finer than
+a microsecond is truncated.)doc")
+      .def("ForeachPacket", &PcapNG::ForeachPacket, py::arg("func"))
       .def("ForeachMem", &PcapNG::ForeachMem,
            "Parse pcap or pcapng bytes from memory and call func(idx, block_type, block_len, data) for each block.")
       /* RDP packet builders */
@@ -1489,6 +1574,7 @@ PYBIND11_MODULE(pycapng, m) {
     register_pcapsh_submodule(m);
     register_capture(m);
     register_posa(m);
+    register_dissect(m);
 
     py::class_<Reassembler>(m, "Reassembler",
         "IP fragment reassembler.\n\n"

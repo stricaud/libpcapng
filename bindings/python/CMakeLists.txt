@@ -18,6 +18,7 @@ set(PYCAPNG_SRC
     pypcapsh.cpp
     pycapture.cpp
     pyposa.cpp
+    pydissect.cpp
     ${CMAKE_SOURCE_DIR}/bin/pcapsh.c
     ${CMAKE_SOURCE_DIR}/bin/pcapsh_layer.c
     ${CMAKE_SOURCE_DIR}/bin/pcapsh_posa.c
@@ -54,6 +55,19 @@ add_test(
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_reader.py
 )
 set_tests_properties(Python-Reader PROPERTIES
+    ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:pycapng>")
+
+# The dissector and the filter engine. The ordering requirement is what this
+# one is for: until ensure_protocols() has run, the POSA decoders are not
+# registered, so an HTTP request dissects as plain TCP and a filter on
+# http.uri matches nothing — with no error either way. The test checks that
+# before/after difference, and that Dissection.fields steps over the unnamed
+# root the C tree uses as a holder.
+add_test(
+    NAME Python-Dissect
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dissect.py
+)
+set_tests_properties(Python-Dissect PROPERTIES
     ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:pycapng>")
 
 if(SKBUILD)

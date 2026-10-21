@@ -55,15 +55,22 @@ func (w *Writer) WritePacket(data []byte) error {
 	return nil
 }
 
-// WritePacketWithTime appends an Enhanced Packet Block with the given
-// Unix timestamp in seconds.
-func (w *Writer) WritePacketWithTime(data []byte, timestamp uint32) error {
+// WritePacketWithTime appends an Enhanced Packet Block timestamped in
+// nanoseconds since the UNIX epoch:
+//
+//	w.WritePacketWithTime(frame, uint64(time.Now().UnixNano()))
+//
+// Nanoseconds because that is the unit ReadPackets gives back in
+// Packet.TimestampNs, so a round trip needs no conversion. The file stores
+// microseconds, the format's default resolution, so anything finer than a
+// microsecond is truncated.
+func (w *Writer) WritePacketWithTime(data []byte, timestampNs uint64) error {
 	if len(data) == 0 {
 		return nil
 	}
-	rc := C.libpcapng_write_enhanced_packet_with_time_to_file(w.fp,
+	rc := C.libpcapng_write_enhanced_packet_with_time_ns_to_file(w.fp,
 		(*C.uchar)(unsafe.Pointer(&data[0])), C.size_t(len(data)),
-		C.uint32_t(timestamp))
+		C.uint64_t(timestampNs))
 	if rc < 0 {
 		return fmt.Errorf("pcapng: WritePacketWithTime to %q failed", w.path)
 	}

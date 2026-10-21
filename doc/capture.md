@@ -398,9 +398,8 @@ static void on_packet(const pcapng_packet_info_t *pkt, void *ud)
        kernel ring and is const; the writer only reads, and says so, so it
        goes across without a cast. */
     if (s->pcapng_out) {
-        libpcapng_ts_t t = libpcapng_ts_from_ns(pkt->timestamp_ns);
-        libpcapng_write_enhanced_packet_with_time_to_file(
-            s->pcapng_out, pkt->data, pkt->captured_len, (uint32_t)t.sec);
+        libpcapng_write_enhanced_packet_with_time_ns_to_file(
+            s->pcapng_out, pkt->data, pkt->captured_len, pkt->timestamp_ns);
     }
 }
 

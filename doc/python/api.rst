@@ -26,9 +26,12 @@ Key methods:
     ``opt_comment`` (visible in Wireshark's packet detail pane).  Pass
     ``""`` for no comment.
 
-``WritePacketTime(data, timestamp)``
-    Append an EPB with an explicit Unix timestamp (seconds, ``uint32``).
-    Use this when replaying recorded captures with original timing.
+``WritePacketTime(data, timestamp_ns)``
+    Append an EPB with an explicit timestamp, in nanoseconds since the
+    UNIX epoch — the unit ``read_packets()`` gives back in
+    ``pkt.timestamp_ns``, so replaying a recorded capture with its
+    original timing needs no conversion.  The file stores microseconds,
+    the format's default resolution, so finer precision is truncated.
 
 ``CloseFile()``
     Flush and close the output file.
