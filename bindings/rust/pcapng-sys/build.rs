@@ -96,9 +96,18 @@ fn main() {
 
     // Rebuild triggers. The C sources add their own above; the headers are
     // walked here, since a struct layout can change with no .c file touched.
+    //
+    // Both trees, not just the public one: `builtin_protos.h` — the embedded
+    // .posa decoders, and the file most likely to be regenerated — sits
+    // beside the sources in lib/, not in lib/include/. Watching only the
+    // include directory meant a regenerated protocol set was compiled into
+    // nothing, which looks exactly like the edit having had no effect.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=wrapper.h");
     watch_headers(&inc_root);
+    if src_root != inc_root {
+        watch_headers(&src_root);
+    }
 
     // Generate bindings with bindgen.
     let bindings = bindgen::Builder::default()
