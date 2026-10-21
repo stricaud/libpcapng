@@ -202,17 +202,24 @@ git push origin bindings/go/v0.2.0
 The Go module proxy ([proxy.golang.org](https://proxy.golang.org)) will fetch and cache
 the new version automatically within a few minutes of the tag being pushed.
 
-## Updating vendored C sources
+## Updating the bundled C sources
 
-The C library sources are vendored under `vendor/`. After updating the parent
-library, re-run the sync script:
+The C library sources are carried in `csrc/`, which is why `go get` needs
+nothing installed. After updating the parent library, re-run the sync script:
 
 ```bash
 cd bindings/go
 ./scripts/sync-sources.sh
 ```
 
-Then commit the updated `vendor/` directory alongside any API changes.
+Then commit the updated `csrc/` directory alongside any API changes.
+`ctest -R Vendor-Sync` fails if the copy has drifted from `lib/`.
+
+The directory is deliberately **not** called `vendor`: the module zip format
+drops any directory with that name, so the published module arrived with no C
+sources in it and would not compile — while building perfectly from a
+checkout, where the directory is sitting right there. If you rename it, do not
+rename it to that.
 
 ## License
 

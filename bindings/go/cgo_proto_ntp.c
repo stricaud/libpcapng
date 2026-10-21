@@ -1,2 +1,2 @@
 /* CGo compilation unit for protocols/ntp.c */
-#include "vendor/src/protocols/ntp.c"
+#include "csrc/src/protocols/ntp.c"

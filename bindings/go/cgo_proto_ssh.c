@@ -1,2 +1,2 @@
 /* CGo compilation unit for protocols/ssh.c */
-#include "vendor/src/protocols/ssh.c"
+#include "csrc/src/protocols/ssh.c"

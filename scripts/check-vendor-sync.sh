@@ -2,7 +2,10 @@
 #
 # check-vendor-sync.sh — the vendored C sources must match lib/.
 #
-# The Go and Rust bindings each carry a copy of the library's C sources. That
+# The Go and Rust bindings each carry a copy of the library's C sources —
+# bindings/go/csrc and bindings/rust/pcapng-sys/vendor. (The Go one is not
+# called vendor: a module zip silently drops directories with that name, which
+# published a binding with no C in it.) That
 # is not a design choice anyone made for fun: cgo and cc-rs compile C that is
 # inside the published module, so `go get` and `cargo add` have to work for
 # someone who has never heard of libpcapng and has nothing installed. Neither
@@ -79,7 +82,7 @@ check_tree() {
 }
 
 echo "=== vendored source sync ==="
-check_tree "go"   "$ROOT/bindings/go/vendor/src"              "$SKIP_GO"
+check_tree "go"   "$ROOT/bindings/go/csrc/src"              "$SKIP_GO"
 check_tree "rust" "$ROOT/bindings/rust/pcapng-sys/vendor/src" "$SKIP_RUST"
 
 # cgo only compiles .c files sitting in the package directory, so each vendored
@@ -89,9 +92,9 @@ check_tree "rust" "$ROOT/bindings/rust/pcapng-sys/vendor/src" "$SKIP_RUST"
 # built.
 echo "=== cgo bridges ==="
 GO_PKG="$ROOT/bindings/go"
-if [[ -d "$GO_PKG/vendor/src" ]]; then
+if [[ -d "$GO_PKG/csrc/src" ]]; then
     nobridge=0
-    for f in "$GO_PKG"/vendor/src/*.c; do
+    for f in "$GO_PKG"/csrc/src/*.c; do
         [[ -e "$f" ]] || continue
         b="$(basename "$f" .c)"
         if [[ ! -f "$GO_PKG/cgo_$b.c" ]]; then
@@ -99,7 +102,7 @@ if [[ -d "$GO_PKG/vendor/src" ]]; then
             nobridge=$((nobridge + 1))
         fi
     done
-    for f in "$GO_PKG"/vendor/src/protocols/*.c; do
+    for f in "$GO_PKG"/csrc/src/protocols/*.c; do
         [[ -e "$f" ]] || continue
         b="$(basename "$f" .c)"
         if [[ ! -f "$GO_PKG/cgo_proto_$b.c" ]]; then
@@ -123,7 +126,7 @@ gen="$(mktemp)"
 trap 'rm -f "$gen"' EXIT
 if python3 "$ROOT/bindings/python/embed_protos.py" "$ROOT/bin/protos" "$gen" >/dev/null 2>&1; then
     for h in "$LIB/builtin_protos.h" \
-             "$ROOT/bindings/go/vendor/include/builtin_protos.h" \
+             "$ROOT/bindings/go/csrc/include/builtin_protos.h" \
              "$ROOT/bindings/rust/pcapng-sys/vendor/include/builtin_protos.h"; do
         [[ -f "$h" ]] || continue
         if cmp -s "$gen" "$h"; then

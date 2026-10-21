@@ -6,7 +6,7 @@
 package pcapng
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/vendor/include -DNDEBUG
+#cgo CFLAGS: -I${SRCDIR}/csrc/include -DNDEBUG
 #cgo linux LDFLAGS: -lm
 #cgo darwin LDFLAGS: -lresolv -lm
 #cgo windows LDFLAGS: -lws2_32

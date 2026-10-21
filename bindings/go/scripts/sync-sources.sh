@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # sync-sources.sh — copy libpcapng C sources from the repo root into the
-# Go binding's vendor/ directory.
+# Go binding's csrc/ directory.
+#
+# Not vendor/: the Go module zip format drops every directory named "vendor",
+# so a module whose C sources lived there published without them and failed to
+# compile for anyone who ran `go get` — while building perfectly from a
+# checkout, where the directory is right there. Hence csrc/.
 #
 # Run this script whenever the C library sources change and before publishing
 # a new version of the Go module.
@@ -12,7 +17,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GO_DIR="$SCRIPT_DIR/.."
 REPO_ROOT="$GO_DIR/../.."
 LIB="$REPO_ROOT/lib"
-VEND="$GO_DIR/vendor"
+VEND="$GO_DIR/csrc"
 
 # Verify we can find the library sources.
 if [[ ! -f "$LIB/blocks.c" ]]; then
@@ -56,5 +61,5 @@ cp -v "$LIB/builtin_protos.h" "$VEND/include/"
 find "$VEND" -name "*~" -delete
 
 echo ""
-echo "vendor/ synced from $LIB"
+echo "csrc/ synced from $LIB"
 echo "$(find "$VEND" -name '*.c' | wc -l | tr -d ' ') C files, $(find "$VEND" -name '*.h' | wc -l | tr -d ' ') headers"
