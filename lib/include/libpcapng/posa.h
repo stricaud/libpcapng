@@ -232,13 +232,17 @@ typedef struct {
                                                         no other one's first field
                                                         matches (an HTTP request has
                                                         no magic; a response does) */
-  char               prefixes[8][16];                /* `starts "GET " "POST "…` — select
-                                                        this member of group G only when the
-                                                        payload begins with one of these
-                                                        literals (content-based dispatch,
-                                                        for text protocols with no magic) */
+  /* `starts "GET " "POST "…` — select this member of group G only when the
+     payload begins with one of these literals (content-based dispatch, for a
+     text protocol with no magic number).
+
+     64 rather than 8: a command-oriented protocol lists one prefix per verb,
+     and FTP alone has 34. At 8, every prefix past the eighth was silently
+     dropped, so `STOR `, `RETR ` and `LIST ` did not decode at all. */
+#define PCAPNG_POSA_MAX_PREFIX 64
+  char               prefixes[PCAPNG_POSA_MAX_PREFIX][16];
   int                nprefix;
-  int                prefix_len[8];                   /* byte length of each prefix         */
+  int                prefix_len[PCAPNG_POSA_MAX_PREFIX]; /* byte length of each prefix      */
 } pcapng_posa_proto_t;
 
 /* Load .posa definitions into the global registry. Redefining a protocol by

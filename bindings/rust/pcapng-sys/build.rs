@@ -79,6 +79,11 @@ fn main() {
         // missing source as a failed compiler invocation with the path buried
         // in its output.
         assert!(path.is_file(), "pcapng-sys: C source not found: {}", path.display());
+        // Without this, cargo reruns build.rs only when build.rs or wrapper.h
+        // changes, so editing the C library leaves a stale static library
+        // linked into every dependent crate — the change appears to have had
+        // no effect, which is a bewildering thing to debug.
+        println!("cargo:rerun-if-changed={}", path.display());
         build.file(path);
     }
 
@@ -89,9 +94,11 @@ fn main() {
 
     build.compile("pcapng");
 
-    // Rebuild triggers.
+    // Rebuild triggers. The C sources add their own above; the headers are
+    // walked here, since a struct layout can change with no .c file touched.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=wrapper.h");
+    watch_headers(&inc_root);
 
     // Generate bindings with bindgen.
     let bindings = bindgen::Builder::default()
@@ -180,4 +187,17 @@ fn check_sources_match_cmake(cmakelists: &Path) {
     }
     msg.push_str("  Edit C_SOURCES in bindings/rust/pcapng-sys/build.rs to match.");
     panic!("{msg}");
+}
+
+/// Tell cargo to rerun when any header under `dir` changes.
+fn watch_headers(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            watch_headers(&path);
+        } else if path.extension().is_some_and(|e| e == "h") {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }

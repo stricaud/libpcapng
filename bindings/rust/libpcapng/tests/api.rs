@@ -280,3 +280,66 @@ fn a_truncated_packet_keeps_both_of_its_lengths() {
     .unwrap();
     assert_eq!(seen, vec![(40, full.len() as u32)]);
 }
+
+// ── regressions in the POSA parser ──────────────────────────────────────────
+
+/// `starts` used to be parsed from one line only, and to hold at most eight
+/// prefixes. FTP declares 34 across four lines, so everything from the ninth
+/// on — `STOR `, `RETR `, `LIST `, and the whole no-argument list past
+/// `REIN` — decoded as nothing at all. A honeypot or an IDS filtering on
+/// `ftp.command == "STOR"` therefore never matched an upload.
+#[test]
+fn a_wrapped_starts_list_is_read_to_the_end() {
+    ensure_protocols();
+
+    // One command from each line of ftp.posa's two `starts` lists, including
+    // the last of each, so a regression to any fixed cap is caught.
+    for (command, line) in [
+        ("USER anonymous", "with an argument, 1st prefix"),
+        ("STRU F", "with an argument, 8th — the old limit"),
+        ("MODE S", "with an argument, 9th — the first ever dropped"),
+        ("STOR evil.exe", "with an argument, 2nd line"),
+        ("LIST .", "with an argument, 4th line"),
+        ("HELP x", "with an argument, last of all"),
+        ("PASV", "no argument, 1st prefix"),
+        ("REIN", "no argument, 7th"),
+        ("PWD", "no argument, 2nd line"),
+        ("CCC", "no argument, last of all"),
+    ] {
+        let payload = format!("{command}\r\n");
+        let f = frame(payload.as_bytes(), 40000, 21);
+        let d = Dissection::new(&f, LINKTYPE_ETHERNET).unwrap();
+        let verb = command.split(' ').next().unwrap();
+        let got = d
+            .root()
+            .find("ftp.command")
+            .map(|f| f.str_value().to_string());
+        assert_eq!(got.as_deref(), Some(verb), "{command} ({line}) did not decode");
+    }
+}
+
+/// The alias table held 64 entries while the bundled decoders declare 424, so
+/// it filled during the first few protocols loaded — alphabetically, which is
+/// why `amqp.*` aliases resolved and `ftp.*` never did. Every later `alias`
+/// line was dropped in silence, and a display filter naming one matched
+/// nothing, indistinguishable from the field not existing.
+#[test]
+fn aliases_declared_late_in_the_bundle_still_resolve() {
+    ensure_protocols();
+
+    let f = frame(b"USER anonymous\r\n", 40000, 21);
+    let d = Dissection::new(&f, LINKTYPE_ETHERNET).unwrap();
+
+    // The real field, and the alias ftp.posa declares for it. Both must match.
+    for expr in [
+        r#"ftp.command == "USER""#,
+        r#"ftp.request.command == "USER""#,
+        "ftp.request.arg",
+    ] {
+        let filter = DisplayFilter::compile(expr).unwrap_or_else(|e| panic!("{expr}: {e}"));
+        assert!(filter.matches(&d), "{expr} should match through its alias");
+    }
+
+    // An alias from a protocol loaded early must keep working too.
+    assert!(DisplayFilter::compile("amqp.type").is_ok());
+}
