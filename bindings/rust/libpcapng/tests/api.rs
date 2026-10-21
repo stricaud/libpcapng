@@ -343,3 +343,71 @@ fn aliases_declared_late_in_the_bundle_still_resolve() {
     // An alias from a protocol loaded early must keep working too.
     assert!(DisplayFilter::compile("amqp.type").is_ok());
 }
+
+/// `until "<delim>"` matches that exact byte sequence, so a field meant to end
+/// at "a space or a CR" cannot be written `until " \r"` — that asks for a
+/// space followed by a CR, which no line-oriented protocol produces. memcached
+/// was written that way, and its `command` field decoded empty for every
+/// command. `until any "<set>"` is the form that works.
+#[test]
+fn a_command_ending_at_any_of_several_bytes_decodes() {
+    ensure_protocols();
+
+    for (line, want) in [
+        ("get flag\r\n", "get"),          // ends at a space
+        ("set k 0 0 5\r\n", "set"),
+        ("delete x\r\n", "delete"),
+        ("stats\r\n", "stats"),           // ends at CR
+        ("version\r\n", "version"),
+        ("quit\r\n", "quit"),
+    ] {
+        let f = frame(line.as_bytes(), 40000, 11211);
+        let d = Dissection::new(&f, LINKTYPE_ETHERNET).unwrap();
+        let got = d
+            .root()
+            .find("memcached.command")
+            .map(|f| f.str_value().to_string());
+        assert_eq!(got.as_deref(), Some(want), "{line:?} did not decode its command");
+    }
+
+    // And a filter on it matches, which is the point.
+    let f = frame(b"get flag\r\n", 40000, 11211);
+    let d = Dissection::new(&f, LINKTYPE_ETHERNET).unwrap();
+    assert!(DisplayFilter::compile(r#"memcached.command == "get""#).unwrap().matches(&d));
+    assert!(!DisplayFilter::compile(r#"memcached.command == "set""#).unwrap().matches(&d));
+}
+
+/// steam.posa claimed `tcp.port == 27017`, which is MongoDB's default and is
+/// also claimed by mongodb.posa. Whichever loaded last won, so traffic to a
+/// MongoDB server decoded as Steam and exposed no `mongodb.*` field at all.
+#[test]
+fn mongodb_owns_its_own_port() {
+    ensure_protocols();
+
+    // An OP_QUERY for isMaster, which is what every MongoDB client and
+    // scanner opens with.
+    let doc = b"\x13\x00\x00\x00\x10isMaster\x00\x01\x00\x00\x00\x00";
+    let mut body = Vec::new();
+    body.extend_from_slice(&0i32.to_le_bytes());
+    body.extend_from_slice(b"admin.$cmd\x00");
+    body.extend_from_slice(&0i32.to_le_bytes());
+    body.extend_from_slice(&(-1i32).to_le_bytes());
+    body.extend_from_slice(doc);
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&((16 + body.len()) as i32).to_le_bytes());
+    msg.extend_from_slice(&1i32.to_le_bytes());
+    msg.extend_from_slice(&0i32.to_le_bytes());
+    msg.extend_from_slice(&2004i32.to_le_bytes());  // OP_QUERY
+    msg.extend_from_slice(&body);
+
+    let f = frame(&msg, 40000, 27017);
+    let d = Dissection::new(&f, LINKTYPE_ETHERNET).unwrap();
+    assert_eq!(d.proto().to_ascii_lowercase(), "mongodb", "27017 decoded as {}", d.proto());
+
+    let root = d.root();
+    assert_eq!(root.find("mongodb.op_code").map(|f| f.uint()), Some(2004));
+    assert!(root.find("mongodb.message_length").is_some());
+
+    // A filter naming the fields works, which it could not before.
+    assert!(DisplayFilter::compile("mongodb.op_code == 2004").unwrap().matches(&d));
+}
