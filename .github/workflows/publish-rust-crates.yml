@@ -72,9 +72,11 @@ jobs:
           # The crates' own version.
           p = pathlib.Path("bindings/rust/Cargo.toml")
           s = p.read_text()
-          s2 = re.sub(r'(\[workspace\.package\][^\[]*?\nversion\s*=\s*")[^"]*(")',
+          # subn, not "did the text change": a tag matching the committed
+          # version leaves the file identical, and that is not an error.
+          s2, n = re.subn(r'(\[workspace\.package\][^\[]*?\nversion\s*=\s*")[^"]*(")',
                       lambda m: m.group(1) + v + m.group(2), s, count=1, flags=re.S)
-          if s == s2:
+          if n == 0:
               sys.exit("could not find [workspace.package] version to set")
           p.write_text(s2)
 
@@ -85,9 +87,9 @@ jobs:
           # against anything added since.
           q = pathlib.Path("bindings/rust/libpcapng/Cargo.toml")
           s = q.read_text()
-          s2 = re.sub(r'(pcapng-sys\s*=\s*\{[^}]*?version\s*=\s*")[^"]*(")',
+          s2, n = re.subn(r'(pcapng-sys\s*=\s*\{[^}]*?version\s*=\s*")[^"]*(")',
                       lambda m: m.group(1) + v + m.group(2), s, count=1)
-          if s == s2:
+          if n == 0:
               sys.exit("could not find the pcapng-sys dependency version to set")
           q.write_text(s2)
           EOF
