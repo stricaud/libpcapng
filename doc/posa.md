@@ -69,6 +69,7 @@ New files should omit it.
 | `utf16[lenfield]` | value of `lenfield` | UTF-16LE text (SMB2 file and share names) |
 | `cstring` | until `\0` | NUL-terminated text |
 | `string … until "<delim>"` | until the delimiter | delimited text (HTTP lines) |
+| `string … until any "<set>"` | until any one of those bytes | a token that can end several ways |
 | `kvblock <name> [sep "<sep>"]` | until `\r\n\r\n` | MIME-style header block (see §3) |
 | `dnsname` | one encoded name | DNS labels, following `0xc0` compression pointers |
 | `uuid` (`guid`) | 16 | DCE/RPC UUID / Microsoft GUID, rendered canonically |
@@ -358,6 +359,26 @@ one, that error does not stay local, it takes the rest of the file with it.
 
 A count that adjusts to zero or less draws nothing, exactly as a zero count
 does.
+
+### `until any "<set>"` — a token that can end more than one way
+
+`until "<delim>"` looks for that exact byte sequence. Sometimes a field ends
+at whichever of several bytes turns up first, and then the set form is what
+you want:
+
+```posa
+string command until any " \r" lookup MemcachedCommands "Command"
+```
+
+A memcached command ends at a space when it takes arguments (`get key`) and
+at CR when it does not (`stats`). Written as `until " \r"` that would mean a
+space *followed by* CR — a sequence the protocol never produces, so the field
+decodes empty every time and the whole line falls through to the next one.
+With `any`, each quoted byte is a separate terminator and the field ends at
+the first of them, consuming one byte.
+
+Use it for line-oriented command protocols. For a single fixed terminator,
+plain `until` remains clearer.
 
 ### `kvblock` — MIME-style key: value header blocks
 
