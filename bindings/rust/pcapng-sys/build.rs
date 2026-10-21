@@ -1,9 +1,18 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-// Keep in sync with LIBPCAPNG_SOURCES in lib/CMakeLists.txt.
+// The library's C sources. This list and LIBPCAPNG_SOURCES in lib/CMakeLists.txt
+// have to agree: the CMake build and this one compile the same library, and a
+// file in one and not the other is a link error in whichever is missing it.
+//
+// `check_sources_match_cmake` below enforces that when building from the repo
+// tree, because the comment asking for it was not enough — the two lists drifted
+// by five files (flow_hash.c, dfilter.c, reader.c, tls_keylog.c, surgery.c), and
+// since dissect.c calls into flow_hash.c and tls_keylog.c, every crate that
+// linked pcapng-sys failed with undefined symbols.
 const C_SOURCES: &[&str] = &[
     "blocks.c",
     "easyapi.c",
+    "flow_hash.c",
     "io.c",
     "protocols/asn1.c",
     "protocols/rdp.c",
@@ -23,14 +32,18 @@ const C_SOURCES: &[&str] = &[
     "protocols/http2_stream.c",
     "protocols/tls_stream.c",
     "protocols/tcp_mss.c",
-    "community_id.c",
     "reassembly.c",
     "reassembly_tcp.c",
     "capture.c",
     "dissect.c",
+    "dfilter.c",
     "objects.c",
+    "reader.c",
     "posa.c",
+    "community_id.c",
     "wire_layout.c",
+    "tls_keylog.c",
+    "surgery.c",
 ];
 
 fn main() {
@@ -46,14 +59,27 @@ fn main() {
         (lib.clone(), lib.join("include"))
     };
 
+    // Checked against CMake whenever the repo tree is reachable — which is not
+    // the same as whether vendor/ exists, since a leftover vendor/ from a
+    // publish run would otherwise silence the check in the one place it is
+    // meant to run. A published crate has no lib/ above it and skips this.
+    let cmakelists = manifest.join("../../../lib/CMakeLists.txt");
+    if cmakelists.is_file() {
+        check_sources_match_cmake(&cmakelists);
+        println!("cargo:rerun-if-changed={}", cmakelists.display());
+    }
+
     // Compile libpcapng C sources into a static library.
     let mut build = cc::Build::new();
-    build
-        .include(&inc_root)
-        .warnings(false);
+    build.include(&inc_root).warnings(false);
 
     for src in C_SOURCES {
-        build.file(src_root.join(src));
+        let path = src_root.join(src);
+        // Checked here rather than left to the compiler, because `cc` reports a
+        // missing source as a failed compiler invocation with the path buried
+        // in its output.
+        assert!(path.is_file(), "pcapng-sys: C source not found: {}", path.display());
+        build.file(path);
     }
 
     // Windows needs ws2_32 for Winsock (ntohs/inet_ntop/etc.).
@@ -75,8 +101,10 @@ fn main() {
         .allowlist_function("libpcapng_.*")
         .allowlist_function("pcapng_.*")
         .allowlist_type("pcapng_.*")
+        .allowlist_type("libpcapng_.*")
         .allowlist_type("foreach_pcapng_block_cb")
         .allowlist_var("PCAPNG_.*")
+        .allowlist_var("LIBPCAPNG_.*")
         .allowlist_var("BLOCK_.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
@@ -84,4 +112,72 @@ fn main() {
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     bindings.write_to_file(out.join("bindings.rs")).expect("write bindings");
+}
+
+/// Fail the build if C_SOURCES and LIBPCAPNG_SOURCES have drifted apart.
+///
+/// Order does not matter — both lists end up in one static library — but
+/// membership does, in both directions: a file CMake builds and this one does
+/// not becomes an undefined symbol, and one this builds and CMake does not is a
+/// source the C library has stopped using.
+fn check_sources_match_cmake(cmakelists: &Path) {
+    let Ok(text) = std::fs::read_to_string(cmakelists) else {
+        // The caller already established that it is a file, so this is a
+        // permissions or I/O problem rather than a missing checkout. Not a
+        // reason to fail a build that would otherwise succeed.
+        println!(
+            "cargo:warning=pcapng-sys: cannot read {}, so C_SOURCES was not checked \
+             against CMake",
+            cmakelists.display()
+        );
+        return;
+    };
+
+    let Some(body) = text
+        .split_once("set(LIBPCAPNG_SOURCES")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(body, _)| body)
+    else {
+        println!(
+            "cargo:warning=pcapng-sys: no closed LIBPCAPNG_SOURCES list in {}",
+            cmakelists.display()
+        );
+        return;
+    };
+
+    let mut from_cmake: Vec<&str> = body
+        .lines()
+        // An entry can carry a trailing `#` comment.
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|l| l.ends_with(".c"))
+        .collect();
+    from_cmake.sort_unstable();
+
+    let mut from_here: Vec<&str> = C_SOURCES.to_vec();
+    from_here.sort_unstable();
+
+    if from_cmake == from_here {
+        return;
+    }
+
+    let missing: Vec<&str> =
+        from_cmake.iter().copied().filter(|f| !from_here.contains(f)).collect();
+    let extra: Vec<&str> =
+        from_here.iter().copied().filter(|f| !from_cmake.contains(f)).collect();
+
+    let mut msg = format!(
+        "pcapng-sys: C_SOURCES in build.rs and LIBPCAPNG_SOURCES in {} disagree.\n",
+        cmakelists.display()
+    );
+    if !missing.is_empty() {
+        msg.push_str(&format!(
+            "  in CMake but not in build.rs — these become undefined symbols at link \
+             time: {missing:?}\n"
+        ));
+    }
+    if !extra.is_empty() {
+        msg.push_str(&format!("  in build.rs but not in CMake: {extra:?}\n"));
+    }
+    msg.push_str("  Edit C_SOURCES in bindings/rust/pcapng-sys/build.rs to match.");
+    panic!("{msg}");
 }

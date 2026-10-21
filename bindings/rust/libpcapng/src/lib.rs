@@ -212,6 +212,335 @@ where
     })
 }
 
+// ── File writing ───────────────────────────────────────────────────────────
+
+/// Writes a pcapng file: a section header, one interface, and packets.
+///
+/// This is the counterpart to [`read_packets`], and it exists because the
+/// obvious alternative does not do what a writer needs.
+/// `libpcapng_write_enhanced_packet_with_time_to_file()` takes a `FILE *` and a
+/// timestamp in **whole seconds**, so a tool writing more than one packet a
+/// second loses their ordering in the file. This goes through the block-level
+/// API instead, which takes the timestamp as the two microsecond words pcapng
+/// actually stores, and writes through [`std::io::Write`] so there is no `FILE *`
+/// to carry across the FFI boundary.
+///
+/// ```no_run
+/// use libpcapng::{Writer, LINKTYPE_ETHERNET};
+///
+/// let mut w = Writer::create("out.pcapng", LINKTYPE_ETHERNET)?;
+/// # let frame: &[u8] = &[];
+/// w.packet(frame, 1_700_000_000_000_000)?;   // microseconds since the epoch
+/// w.finish()?;
+/// # Ok::<(), libpcapng::Error>(())
+/// ```
+///
+/// Everything is little-endian, which the byte-order magic in the section
+/// header declares, and the interface is written with no `if_tsresol` option —
+/// so timestamps are microseconds, which is the format's default.
+pub struct Writer<W: std::io::Write> {
+    out: W,
+    packets: u64,
+}
+
+impl Writer<std::io::BufWriter<std::fs::File>> {
+    /// Create a file and write its headers.
+    pub fn create<P: AsRef<Path>>(path: P, linktype: u16) -> Result<Self, Error> {
+        Self::create_with(path, linktype, None, None)
+    }
+
+    /// The same, with a comment and an application name recorded in the
+    /// section header. Wireshark shows both under *Statistics → Capture File
+    /// Properties*, which is the right place to say where a capture came from.
+    pub fn create_with<P: AsRef<Path>>(
+        path: P,
+        linktype: u16,
+        comment: Option<&str>,
+        application: Option<&str>,
+    ) -> Result<Self, Error> {
+        let file = std::fs::File::create(path.as_ref())
+            .map_err(|e| err(format!("{}: {e}", path.as_ref().display())))?;
+        Writer::new(std::io::BufWriter::new(file), linktype, comment, application)
+    }
+}
+
+impl<W: std::io::Write> Writer<W> {
+    /// Write the section header and interface description to `out`.
+    ///
+    /// Takes any writer, so a capture can be built in memory with a `Vec<u8>`
+    /// or streamed somewhere that is not a file.
+    pub fn new(
+        mut out: W,
+        linktype: u16,
+        comment: Option<&str>,
+        application: Option<&str>,
+    ) -> Result<Self, Error> {
+        // The option values have to outlive the write, so they are bound here
+        // rather than built inside the call that borrows them.
+        let comment = comment.map(|s| s.as_bytes());
+        let application = application.map(|s| s.as_bytes());
+
+        let mut opts: Vec<sys::pcapng_option_t> = Vec::with_capacity(2);
+        if let Some(c) = comment {
+            opts.push(option(sys::PCAPNG_OPT_COMMENT as u16, c));
+        }
+        if let Some(a) = application {
+            opts.push(option(sys::PCAPNG_OPT_SHB_USERAPPL as u16, a));
+        }
+
+        let shb = unsafe {
+            build_block(
+                sys::libpcapng_section_header_block_size_with_options(opts.as_ptr(), opts.len()),
+                |buf| sys::libpcapng_section_header_block_write_with_options(
+                    opts.as_ptr(), opts.len(), buf,
+                ),
+            )
+        }?;
+        out.write_all(&shb).map_err(|e| err(e.to_string()))?;
+
+        let idb = unsafe {
+            build_block(
+                sys::libpcapng_interface_description_block_size_with_options(
+                    std::ptr::null(), 0,
+                ),
+                |buf| sys::libpcapng_interface_description_block_write_with_options(
+                    // Snaplen 0 is "no limit", which is the honest answer for a
+                    // writer: nothing here truncated anything.
+                    0, linktype, std::ptr::null(), 0, buf,
+                ),
+            )
+        }?;
+        out.write_all(&idb).map_err(|e| err(e.to_string()))?;
+
+        Ok(Writer { out, packets: 0 })
+    }
+
+    /// Append a packet, timestamped in microseconds since the epoch.
+    pub fn packet(&mut self, frame: &[u8], timestamp_us: u64) -> Result<(), Error> {
+        self.packet_full(frame, frame.len() as u32, timestamp_us, None)
+    }
+
+    /// Append a packet that was captured only in part, or that carries a
+    /// comment.
+    ///
+    /// `original_len` is how long the packet was on the wire, which is larger
+    /// than `frame.len()` for a capture taken with a snaplen. Readers use the
+    /// difference to show that a packet was cut short.
+    pub fn packet_full(
+        &mut self,
+        frame: &[u8],
+        original_len: u32,
+        timestamp_us: u64,
+        comment: Option<&str>,
+    ) -> Result<(), Error> {
+        let comment = comment.map(|s| s.as_bytes());
+        let mut opts: Vec<sys::pcapng_option_t> = Vec::new();
+        if let Some(c) = comment {
+            opts.push(option(sys::PCAPNG_OPT_COMMENT as u16, c));
+        }
+        let (opt_ptr, nopt) =
+            if opts.is_empty() { (std::ptr::null(), 0) } else { (opts.as_ptr(), opts.len()) };
+
+        let ts_hi = (timestamp_us >> 32) as u32;
+        let ts_lo = (timestamp_us & 0xffff_ffff) as u32;
+
+        let epb = unsafe {
+            build_block(
+                sys::libpcapng_enhanced_packet_block_size_with_options(frame.len(), opt_ptr, nopt),
+                |buf| sys::libpcapng_enhanced_packet_block_write_full(
+                    frame.as_ptr(), frame.len(), original_len, 0, ts_hi, ts_lo, opt_ptr, nopt, buf,
+                ),
+            )
+        }?;
+        self.out.write_all(&epb).map_err(|e| err(e.to_string()))?;
+        self.packets += 1;
+        Ok(())
+    }
+
+    /// How many packets have been written.
+    pub fn packets(&self) -> u64 {
+        self.packets
+    }
+
+    /// Flush without giving up the writer.
+    pub fn flush(&mut self) -> Result<(), Error> {
+        self.out.flush().map_err(|e| err(e.to_string()))
+    }
+
+    /// Flush and hand back the underlying writer.
+    ///
+    /// Called explicitly, rather than left to `Drop`, so that a failed flush is
+    /// reported instead of discarded — the last packets of a capture are
+    /// usually the interesting ones.
+    pub fn finish(mut self) -> Result<W, Error> {
+        self.out.flush().map_err(|e| err(e.to_string()))?;
+        Ok(self.out)
+    }
+}
+
+fn option(kind: u16, value: &[u8]) -> sys::pcapng_option_t {
+    sys::pcapng_option_t {
+        type_: kind,
+        length: value.len() as u16,
+        value: value.as_ptr() as *const std::os::raw::c_void,
+    }
+}
+
+/// Size a block, let the library fill it, and keep only what it actually wrote.
+///
+/// The two-call shape — ask the size, then write into a buffer of that size —
+/// is how every block writer in `blocks.h` works. Returning the written length
+/// rather than the asked-for one means a disagreement between the two shows up
+/// as a short block, which a reader rejects, instead of as trailing zeroes that
+/// one might silently accept.
+unsafe fn build_block<F>(size: usize, write: F) -> Result<Vec<u8>, Error>
+where
+    F: FnOnce(*mut u8) -> usize,
+{
+    if size == 0 {
+        return Err(err("libpcapng sized a pcapng block as zero bytes"));
+    }
+    let mut buf = vec![0u8; size];
+    let written = write(buf.as_mut_ptr());
+    if written == 0 || written > size {
+        return Err(err(format!(
+            "libpcapng wrote {written} bytes into a {size}-byte pcapng block"
+        )));
+    }
+    buf.truncate(written);
+    Ok(buf)
+}
+
+// ── Protocol registry ──────────────────────────────────────────────────────
+
+/// Make sure every bundled decoder is registered.
+///
+/// Most of libpcapng's protocol support is POSA definitions compiled into the
+/// library rather than C dissectors, and they are loaded into a global registry
+/// on demand. Three things depend on that registry being populated, and all
+/// three fail quietly rather than loudly if it is not:
+///
+/// * [`Dissection::new`] will not recognise a protocol whose decoder is absent,
+///   and reports the layer below it instead — a plain `tcp` where there was an
+///   `http` request.
+/// * A [`DisplayFilter`] naming a field only resolves against decoders that are
+///   loaded, so a filter on `http.uri` silently matches nothing.
+/// * Worker threads must not be the first to touch the registry; see
+///   `libpcapng/threading.h`.
+///
+/// Call it once at startup, before compiling any filter and before starting any
+/// thread that dissects. It is idempotent and cheap to call again.
+///
+/// ```no_run
+/// libpcapng::ensure_protocols();
+/// let filter = libpcapng::DisplayFilter::compile("http.uri contains \"/cgi-bin/\"").unwrap();
+/// ```
+pub fn ensure_protocols() {
+    unsafe { sys::pcapng_dissect_ensure_protocols() }
+}
+
+// ── Display filters ────────────────────────────────────────────────────────
+
+/// A compiled Wireshark/tshark-style display filter.
+///
+/// This is the filter engine every tool built on libpcapng matches rules with.
+/// Compile an expression once and test it against as many packets as you like:
+///
+/// ```no_run
+/// use libpcapng::{ensure_protocols, DisplayFilter, Dissection, LINKTYPE_ETHERNET};
+///
+/// ensure_protocols();
+/// let filter = DisplayFilter::compile("http.uri contains \"/cgi-bin/\"").unwrap();
+///
+/// # let frame: &[u8] = &[];
+/// if let Some(d) = Dissection::new(frame, LINKTYPE_ETHERNET) {
+///     if filter.matches(&d) {
+///         println!("{}", d.info());
+///     }
+/// }
+/// ```
+///
+/// Compiling once and matching many times is the whole performance story for a
+/// rule-driven tool. The alternative — handing an expression and a packet to
+/// the library together — re-dissects and re-parses for every rule, so thirty
+/// rules cost thirty dissections of the same bytes. Here, dissection happens
+/// once per packet and each rule is a walk of the resulting tree.
+///
+/// What the grammar supports:
+///
+/// ```text
+///   existence     tcp            http.uri          dns.qname
+///   comparison    ip.src == 10.0.0.1     tcp.port != 80     ip.ttl >= 64
+///   operators     == eq  != ne  > gt  < lt  >= ge  <= le  contains  matches
+///   logic         && and   || or   ! not   ( )
+///   values        42  0x2a  "text"  1.2.3.4[/cidr]  aa:bb:cc:dd:ee:ff
+///   byte slices   eth.src[0:3] == 00:00:5e
+///   sets          tcp.port in {80, 443, 8080}      udp.port in {1..1024}
+///   aliases       ip.addr  tcp.port  udp.port  eth.addr  ipv6.addr
+/// ```
+///
+/// Freed automatically on drop.
+pub struct DisplayFilter(*mut sys::pcapng_dfilter_t);
+
+impl DisplayFilter {
+    /// Compile an expression, or report why it will not compile.
+    ///
+    /// An empty or blank expression compiles to a filter that matches
+    /// everything, which is how a catch-all rule is written.
+    ///
+    /// Compile at startup rather than on first use: a typo then becomes a
+    /// startup failure instead of a surprise on whichever packet first reached
+    /// the rule.
+    pub fn compile(expr: &str) -> Result<Self, Error> {
+        let c_expr = CString::new(expr).map_err(|e| err(e.to_string()))?;
+        let mut errbuf = vec![0 as std::os::raw::c_char; 512];
+        let ptr = unsafe {
+            sys::pcapng_dfilter_compile(c_expr.as_ptr(), errbuf.as_mut_ptr(), errbuf.len())
+        };
+        if ptr.is_null() {
+            let msg = cstr_to_str(&errbuf);
+            return Err(err(if msg.is_empty() {
+                format!("cannot compile display filter: {expr}")
+            } else {
+                msg.to_string()
+            }));
+        }
+        Ok(DisplayFilter(ptr))
+    }
+
+    /// Does this packet match?
+    ///
+    /// The decoders the expression names have to be registered, or the fields
+    /// it tests do not exist and it matches nothing. See [`ensure_protocols`].
+    pub fn matches(&self, dissection: &Dissection) -> bool {
+        unsafe { sys::pcapng_dfilter_match(self.0, dissection.root_ptr()) != 0 }
+    }
+
+    /// Match against a field tree directly, for a caller that already has one
+    /// — a subtree, or a root kept separately from its `Dissection`.
+    ///
+    /// # Safety
+    /// `root` must point into a field tree that is still alive.
+    pub unsafe fn matches_root(&self, root: *mut sys::pcapng_field_t) -> bool {
+        sys::pcapng_dfilter_match(self.0, root) != 0
+    }
+
+    /// True when compiled from a blank expression, so every packet matches.
+    pub fn is_match_all(&self) -> bool {
+        unsafe { sys::pcapng_dfilter_is_match_all(self.0) != 0 }
+    }
+}
+
+impl Drop for DisplayFilter {
+    fn drop(&mut self) { unsafe { sys::pcapng_dfilter_free(self.0) } }
+}
+
+// A compiled filter is immutable and `pcapng_dfilter_match` only reads it, so
+// one filter can be matched from several threads at once — which is what lets a
+// ruleset be compiled on the main thread and used by a pool of workers.
+unsafe impl Send for DisplayFilter {}
+unsafe impl Sync for DisplayFilter {}
+
 // ── Dissection ─────────────────────────────────────────────────────────────
 
 /// A dissected packet: protocol field tree + Wireshark-style summary columns.
@@ -261,6 +590,13 @@ impl Dissection {
     /// field tree via C-level offsets).
     pub fn root_ptr(&self) -> *mut sys::pcapng_field_t {
         self.inner().root
+    }
+
+    /// Does this packet match `filter`?  The same test as
+    /// [`DisplayFilter::matches`], written the other way round for when the
+    /// packet is what you have in hand.
+    pub fn matches(&self, filter: &DisplayFilter) -> bool {
+        filter.matches(self)
     }
 }
 

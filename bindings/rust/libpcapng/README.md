@@ -39,6 +39,44 @@ fn main() {
 
 ---
 
+## Writing a pcapng file
+
+`Writer` writes a section header, one interface, and packets. Timestamps are
+microseconds since the epoch:
+
+```rust
+use libpcapng::{Writer, LINKTYPE_ETHERNET};
+
+fn save(frames: &[Vec<u8>]) -> Result<(), libpcapng::Error> {
+    let mut w = Writer::create_with(
+        "out.pcapng",
+        LINKTYPE_ETHERNET,
+        Some("what this capture is"),   // shown in Wireshark's file properties
+        Some("my-tool 1.0"),
+    )?;
+    for (i, frame) in frames.iter().enumerate() {
+        w.packet(frame, 1_700_000_000_000_000 + i as u64 * 1000)?;
+    }
+    w.finish()?;                        // flush, and report a failure to do so
+    Ok(())
+}
+```
+
+`Writer::new` takes any `std::io::Write`, so a capture can be built in a
+`Vec<u8>` or streamed somewhere that is not a file. `packet_full` is for a
+packet captured only in part, or one carrying a comment:
+
+```rust
+// 40 bytes kept of a frame that was 1514 on the wire
+w.packet_full(&captured, 1514, timestamp_us, Some("truncated by snaplen"))?;
+```
+
+Prefer this over `libpcapng_write_enhanced_packet_with_time_to_file` from
+`ffi`: that one takes its timestamp in whole seconds, so a tool writing more
+than one packet per second loses their ordering in the file.
+
+---
+
 ## Dissecting packets
 
 `Dissection::new` turns raw Ethernet (or other link-layer) bytes into a protocol field tree with Wireshark-style summary columns:
@@ -87,6 +125,84 @@ while let Some(f) = layer {
     layer = f.next();
 }
 ```
+
+---
+
+## Display filters
+
+The same Wireshark/tshark-style filter engine every tool built on libpcapng
+matches rules with. Compile an expression once, then test it against as many
+packets as you like:
+
+```rust
+use libpcapng::{ensure_protocols, DisplayFilter, Dissection, LINKTYPE_ETHERNET};
+
+fn main() -> Result<(), libpcapng::Error> {
+    // Decoders have to be registered before a filter naming their fields is
+    // compiled — see below.
+    ensure_protocols();
+
+    let suspicious = DisplayFilter::compile(r#"http.uri contains "/cgi-bin/""#)?;
+
+    let frame: &[u8] = read_a_frame_somehow();
+    if let Some(d) = Dissection::new(frame, LINKTYPE_ETHERNET) {
+        if suspicious.matches(&d) {
+            println!("{} → {}  {}", d.src(), d.dst(), d.info());
+        }
+    }
+    Ok(())
+}
+```
+
+Compiling once and matching many times is the whole performance story for a
+rule-driven tool. The alternative — handing an expression and a packet to the
+library together — re-parses the expression and re-dissects the packet for
+every rule, so thirty rules cost thirty dissections of the same bytes. This way
+a packet is dissected once and each rule is a walk of the resulting tree:
+roughly 7 µs against a few hundred nanoseconds.
+
+A `DisplayFilter` is immutable and matching only reads it, so it is `Send` and
+`Sync`: compile a ruleset on one thread and match it from a pool.
+
+```rust
+let filter = std::sync::Arc::new(DisplayFilter::compile("tls.server_name contains \"evil\"")?);
+```
+
+What the grammar supports:
+
+```
+existence     tcp            http.uri          dns.qname
+comparison    ip.src == 10.0.0.1     tcp.port != 80     ip.ttl >= 64
+operators     == eq  != ne  > gt  < lt  >= ge  <= le  contains  matches
+logic         && and   || or   ! not   ( )
+values        42  0x2a  "text"  1.2.3.4[/cidr]  aa:bb:cc:dd:ee:ff
+byte slices   eth.src[0:3] == 00:00:5e
+sets          tcp.port in {80, 443, 8080}      udp.port in {1..1024}
+aliases       ip.addr  tcp.port  udp.port  eth.addr  ipv6.addr
+```
+
+An empty expression compiles to a filter that matches everything, which
+`is_match_all()` reports — useful for a catch-all rule. A syntax error is an
+`Err` with the engine's own message, so compiling at startup turns a typo into
+a startup failure rather than a surprise on whichever packet first reached it.
+
+### Registering the decoders
+
+`ensure_protocols()` loads the protocol decoders — most of libpcapng's protocol
+support is POSA definitions compiled into the library, held in a global
+registry that is populated on demand. Three things depend on it, and all three
+fail *quietly*:
+
+* `Dissection::new` does not recognise a protocol whose decoder is absent, and
+  reports the layer below instead — a plain `tcp` where there was an `http`
+  request.
+* A filter naming a field only resolves against decoders that are loaded, so
+  `http.uri contains "/x"` silently matches nothing.
+* Worker threads must not be the first to touch the registry — see
+  `libpcapng/threading.h`.
+
+Call it once at startup, before compiling any filter and before starting any
+thread that dissects. It is idempotent.
 
 ---
 
