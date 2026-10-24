@@ -50,6 +50,30 @@ IP()/TCP()/"GET / HTTP/1.0\r\n\r\n"
 IP()/UDP(dport=514)/SYSLOG()/"<34>Oct 11 22:14:15 mymachine su: 'su root' failed"
 ```
 
+### Multi-line statements
+
+A statement carries on to the next line while a bracket or string is open, or
+when a line ends with `/`, `,` or `\`. Comments may end each line, and the
+REPL shows a `...` prompt until the statement is complete (an empty line
+submits it). A line break inside a string becomes a newline, so Wireshark hex
+dumps paste into `fromhex()` unchanged.
+
+```
+answer = IP(src="8.8.8.8", dst="192.168.1.10")/
+         UDP(sport=53, dport=54321)/
+         DNS(id=0xC0DE, qr=1, rd=1, ra=1,
+             qd=DNSQR(qname="pcapsh.rocks"),     # question
+             an=DNSRR(rrname="pcapsh.rocks", type=A, ttl=300, rdata="10.13.37.1"),
+             ancount=1)
+```
+
+### Tunnels and hand-set fields
+
+Layers serialise in order, each one carrying the rest, so a protocol can repeat:
+`IP()/GRE(proto=IPV4)/IP()/TCP()` or `IP()/UDP(dport=4789)/VXLAN()/Ether()/IP()/TCP()`.
+`Ether.type` and `IP.proto` follow the next layer; lengths and checksums are
+computed unless you set them, so `IP(chksum=0xdead)/UDP(len=4)` stays broken on purpose.
+
 ### Comments
 
 ```
@@ -376,7 +400,7 @@ Use `ls()` to list all available protocols; use `ls(PROTO)` for field details.
 ### ARP
 
 ```
-Ether(type=0x0806)/ARP(op=REQUEST, spa="192.168.1.1", tpa="192.168.1.254")
+Ether()/ARP(op=REQUEST, spa="192.168.1.1", tpa="192.168.1.254")
 Ether()/ARP(op=REPLY, sha="aa:bb:cc:dd:ee:ff", spa="192.168.1.1", tha="bb:cc:dd:ee:ff:00", tpa="192.168.1.2")
 ```
 
@@ -1153,10 +1177,10 @@ wrpcap("dns_mx.pcapng", IP(dst="8.8.8.8")/UDP(dport=53)/DNS(id=RandShort(),rd=1,
 
 ```
 # arp_scan.pcapsh — ARP requests for a /28 subnet
-wrpcap("arp_scan.pcapng", Ether(type=0x0806)/ARP(op=REQUEST, spa="10.0.0.100", tpa="10.0.0.1"))
-wrpcap("arp_scan.pcapng", Ether(type=0x0806)/ARP(op=REQUEST, spa="10.0.0.100", tpa="10.0.0.2"))
-wrpcap("arp_scan.pcapng", Ether(type=0x0806)/ARP(op=REQUEST, spa="10.0.0.100", tpa="10.0.0.3"))
-wrpcap("arp_scan.pcapng", Ether(type=0x0806)/ARP(op=REPLY, sha="aa:bb:cc:dd:ee:01", spa="10.0.0.1", tha="02:00:0a:00:00:64", tpa="10.0.0.100"))
+wrpcap("arp_scan.pcapng", Ether()/ARP(op=REQUEST, spa="10.0.0.100", tpa="10.0.0.1"))
+wrpcap("arp_scan.pcapng", Ether()/ARP(op=REQUEST, spa="10.0.0.100", tpa="10.0.0.2"))
+wrpcap("arp_scan.pcapng", Ether()/ARP(op=REQUEST, spa="10.0.0.100", tpa="10.0.0.3"))
+wrpcap("arp_scan.pcapng", Ether()/ARP(op=REPLY, sha="aa:bb:cc:dd:ee:01", spa="10.0.0.1", tha="02:00:0a:00:00:64", tpa="10.0.0.100"))
 ```
 
 ### Full HTTP session
@@ -1428,7 +1452,7 @@ ls(DCERPC)
 - **ANSI colors**: the REPL uses colors for protocol display; pipe through `cat` for plain text if needed.
 - **Protocol registry**: adding a posa protocol auto-registers it for name/color lookup — no code changes required.
 - **For-loop sport arithmetic**: `sport=$i` hits well-known ports (Echo=7, Discard=9, Daytime=13, Chargen=19, …). Always offset: `sport=49000+$i`.
-- **ARP Ether type**: `Ether()` defaults to `type=0x0800` (IPv4). ARP frames require `type=0x0806` explicitly — Wireshark will try to parse ARP bytes as IPv4 otherwise.
+- **Ether type**: `Ether()` picks its type from the next layer (0x0806 before ARP, 0x0800 before IP); set `type=` to override.
 - **SMB2 NEGOTIATE body**: the `SMB2(command=NEGOTIATE)` header alone (64 bytes) is not RFC-compliant — Wireshark marks it malformed because the NEGOTIATE command body (36 bytes for request, 65 for response) is missing. For clean captures, start SMB2 sessions at SESSION_SETUP.
 - **KRB5 TCP seq accounting**: each `KRB5()` object serializes to exactly 18 bytes. Advance seq/ack by 18 per data exchange: SYN(seq=0) → data starts at seq=1, next ack=1+18=19, etc.
 - **Syslog RFC compliance**: the `SYSLOG()` built-in emits only the PRI byte. Use a raw string payload for RFC 3164-compliant output: `UDP(dport=514)/"<38>May 11 10:00:01 host tag: msg"`.

@@ -144,13 +144,19 @@ UDP
 and Ether
 .B type
 are filled in from the layers that follow unless set explicitly.
+Setting one by hand (\fBIP(chksum=0xdead)\fP, \fBUDP(len=4)\fP) keeps
+that value, which is how deliberately malformed packets are made.
+.PP
+Layers are serialised in order, each one carrying everything after it, so a
+protocol may appear more than once \(em that is how tunnels are written:
 .PP
 .nf
 .RS 4
 IP()
 Ether(src="aa:bb:cc:dd:ee:ff")/IP(src="10.0.0.1",dst="10.0.0.2",ttl=1)/TCP(dport=22)
 IP()/TCP(flags="PA")/"GET / HTTP/1.0\er\en\er\en"
-IP(proto=47)/GRE(proto=IPV4)/IP(dst="192.168.2.1")/TCP()
+IP(src="10.0.0.1",dst="10.0.0.2")/GRE(proto=IPV4)/IP(dst="192.168.2.1")/TCP()
+IP()/UDP(dport=4789)/VXLAN()/Ether()/IP(dst="172.16.0.2")/TCP(dport=8080)
 .RE
 .fi
 .PP
@@ -239,10 +245,36 @@ wrpcap("ntp.pcapng", req)
 Everything from
 .B #
 to the end of a line is ignored.
+.SS Multi\-line statements
+A statement carries on to the next line while a bracket or a string is still
+open, or when a line ends with
+.BR / ,
+.B ,
+or
+.BR \e .
+Comments may end each line, and a line break inside a string becomes a
+newline character, so a Wireshark hex dump can be pasted into
+.B fromhex()
+as is.
+In the REPL the prompt changes to
+.B ...
+until the statement is complete; an empty line submits it.
+.PP
+.nf
+.RS 4
+answer = IP(src="8.8.8.8", dst="192.168.1.10")/
+         UDP(sport=53, dport=54321)/
+         DNS(id=0xC0DE, qr=1, rd=1, ra=1,
+             qd=DNSQR(qname="pcapsh.rocks"),     # question
+             an=DNSRR(rrname="pcapsh.rocks", type=A,
+                      ttl=300, rdata="10.13.37.1"),
+             ancount=1)
+.RE
+.fi
 .SH SCRIPTS
 A script is a plain text file, by convention ending in
 .BR .pcapsh ,
-holding one statement per line.
+holding one statement per line (or spread over several, as above).
 .B wrpcap()
 appends to an existing file, so delete old output before a re\-run if you
 want a fresh capture:
@@ -418,13 +450,12 @@ Show built\-in help; leave the shell.
 .TP
 .B Ether
 .BR dst " (ff:ff:ff:ff:ff:ff), " src ", " type
-(0x0800 by default; set
-.B type=0x0806
-for ARP).
+(follows the next layer: 0x0800 for IP, 0x0806 for ARP, 0x86DD for IPv6,
+0x8100 for Dot1Q, 0x8847 for MPLS).
 .TP
 .B IP
 .BR src ", " dst " (127.0.0.1), " ttl " (64), " id ", " flags ", " frag ", " tos ,
-.BR proto ", " len ", " chksum " (automatic)."
+.BR proto ", " len ", " chksum " (automatic; " proto " follows the next layer, e.g. 47 for GRE)."
 .TP
 .B TCP
 .BR sport " (20), " dport " (80), " seq ", " ack ", " flags " (""S""), " window ,
@@ -654,8 +685,8 @@ wrpcap("dns.pcapng", IP(src="8.8.8.8",dst="192.168.1.10")/UDP(sport=53,dport=543
 .SS ARP request and reply
 .nf
 .RS 4
-wrpcap("arp.pcapng", Ether(type=0x0806)/ARP(op=REQUEST,spa="10.0.0.100",tpa="10.0.0.1"))
-wrpcap("arp.pcapng", Ether(type=0x0806)/ARP(op=REPLY,sha="aa:bb:cc:dd:ee:01",spa="10.0.0.1",tha="02:00:0a:00:00:64",tpa="10.0.0.100"))
+wrpcap("arp.pcapng", Ether()/ARP(op=REQUEST,spa="10.0.0.100",tpa="10.0.0.1"))
+wrpcap("arp.pcapng", Ether()/ARP(op=REPLY,sha="aa:bb:cc:dd:ee:01",spa="10.0.0.1",tha="02:00:0a:00:00:64",tpa="10.0.0.100"))
 .RE
 .fi
 .SS Port sweep with a loop
@@ -770,10 +801,6 @@ Loop counters start at 1 with
 use an offset such as
 .B sport=49000+$i
 to stay out of well\-known ports.
-.IP \(bu 2
-.B Ether()
-defaults to the IPv4 ethertype; ARP frames need
-.BR type=0x0806 .
 .IP \(bu 2
 Some posa layers model only a fixed header (for example SMB2 without a
 command body, or KRB5's 18\-byte DER prefix); Wireshark may flag such packets
