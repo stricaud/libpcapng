@@ -209,8 +209,57 @@ void eval_protocol_block(const char *name, const char *body) {
 
 /* ─── Script execution ───────────────────────────────────────────────────────── */
 
+/* ─── Multi-line statements ──────────────────────────────────────────────────
+ * A statement carries on to the next line while a bracket or a string is still
+ * open, or when the line ends with '/', ',' or '\'. Each line's # comment is
+ * dropped before joining. A line break inside a string becomes the escape
+ * "\n", so the joined statement is still one line (for-loop bodies are split
+ * on newlines) and the lexer turns it back into a real newline — which keeps
+ * multi-line fromhex() dumps intact. */
+typedef struct { int depth; char quote; size_t len; } stmt_t;
+
+/* Feed one physical line into st/buf; returns 1 while more lines are needed. */
+static int stmt_feed(stmt_t *st, char *buf, size_t cap, const char *line) {
+    char last = 0;
+    int was_in_str = st->quote != 0;
+    size_t i;
+    for (i = 0; line[i]; i++) {
+        char c = line[i];
+        if (st->quote) {
+            if (c == '\\' && line[i+1]) { i++; continue; }
+            if (c == st->quote) st->quote = 0;
+            last = c;
+            continue;
+        }
+        if (c == '#') break;
+        if (c == '"' || c == '\'')     st->quote = c;
+        else if (strchr("([{", c))     st->depth++;
+        else if (strchr(")]}", c) && st->depth > 0) st->depth--;
+        if (c != ' ' && c != '\t') last = c;
+    }
+    size_t code = i;
+    if (!st->quote) while (code && (line[code-1] == ' ' || line[code-1] == '\t')) code--;
+    if (!st->quote && last == '\\') code--;              /* explicit continuation */
+
+    const char *sep = st->len == 0 ? "" : was_in_str ? "\\n" : " ";
+    size_t need = strlen(sep) + code;
+    if (st->len + need < cap) {
+        memcpy(buf + st->len, sep, strlen(sep));
+        memcpy(buf + st->len + strlen(sep), line, code);
+        st->len += need;
+    }
+    buf[st->len] = '\0';
+    return st->quote || st->depth > 0 || last == '/' || last == ',' || last == '\\';
+}
+
+static void stmt_reset(stmt_t *st, char *buf) {
+    memset(st, 0, sizeof *st);
+    buf[0] = '\0';
+}
+
 static void run_script_f(FILE *f) {
-    char line[4096];
+    char phys[8192];
+    static char line[65536];
     char proto_name[64]   = {0};
     char proto_body[8192] = {0};
     int  in_proto = 0;
@@ -220,31 +269,21 @@ static void run_script_f(FILE *f) {
     int64_t for_start = 0, for_stop = 0, for_step = 1;
     int  in_for = 0;
 
-    char cont[65536] = "";
-    int  cont_len = 0;
+    static char stmt[65536];
+    stmt_t st;
+    stmt_reset(&st, stmt);
 
-    while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len-1]=='\n'||line[len-1]=='\r')) line[--len]='\0';
+    while (fgets(phys, sizeof(phys), f)) {
+        size_t len = strlen(phys);
+        while (len > 0 && (phys[len-1]=='\n'||phys[len-1]=='\r')) phys[--len]='\0';
 
-        if (len > 0 && line[len-1] == '\\') {
-            line[len-1] = ' ';
-            if (cont_len + (int)len < (int)sizeof(cont) - 1) {
-                memcpy(cont + cont_len, line, len);
-                cont_len += (int)len;
-                cont[cont_len] = '\0';
-            }
-            continue;
-        }
-        if (cont_len > 0) {
-            if (cont_len + (int)len < (int)sizeof(cont) - 1) {
-                memcpy(cont + cont_len, line, len);
-                cont_len += (int)len;
-                cont[cont_len] = '\0';
-            }
-            memcpy(line, cont, cont_len + 1);
-            len = cont_len;
-            cont_len = 0; cont[0] = '\0';
+        if (in_proto) {
+            memcpy(line, phys, len + 1);
+        } else {
+            if (stmt_feed(&st, stmt, sizeof stmt, phys)) continue;
+            memcpy(line, stmt, st.len + 1);
+            len = st.len;
+            stmt_reset(&st, stmt);
         }
 
         char *p = line;
@@ -297,6 +336,16 @@ static void run_script_f(FILE *f) {
         }
 
         eval_line(line);
+    }
+    if (st.len) {
+        fprintf(stderr, CBRED "pcapsh: end of file inside a statement "
+                              "(unclosed bracket or string?)\n" CR);
+        if (in_for) {
+            strncat(for_body, stmt, sizeof(for_body) - strlen(for_body) - 2);
+            strncat(for_body, "\n", sizeof(for_body) - strlen(for_body) - 1);
+        } else {
+            eval_line(stmt);
+        }
     }
     if (in_proto)
         fprintf(stderr, CBRED "pcapsh: unterminated 'protocol' block\n" CR);
@@ -521,11 +570,29 @@ int main(int argc, char **argv) {
     int64_t for_start = 0, for_stop = 0, for_step = 1;
     int  in_for = 0;
 
+    static char stmt[65536];
+    stmt_t st;
+    stmt_reset(&st, stmt);
+
     char *line;
     int continue_mode = 0; /* show cont_prompt when collecting multi-line constructs */
-    while ((line = linenoise(continue_mode ? cont_prompt : prompt)) != NULL) {
+    while ((line = linenoise(continue_mode || st.len ? cont_prompt : prompt)) != NULL) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
+
+        /* Join a statement spread over several lines; an empty line submits
+           whatever is pending, so an unclosed bracket never traps the user. */
+        if (!in_proto && (st.len || *p)) {
+            int more = *p ? stmt_feed(&st, stmt, sizeof stmt, line) : 0;
+            linenoiseFree(line);
+            if (more) continue;
+            line = strdup(stmt);
+            stmt_reset(&st, stmt);
+            if (!line) continue;
+            p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) { linenoiseFree(line); continue; }   /* comment-only line */
+        }
 
         if (in_proto) {
             if (strcmp(p, "end") == 0) {

@@ -1,0 +1,34 @@
+# test_continuation.pcapsh — statements spread over several lines
+
+# open bracket carries on, comments on each line are dropped
+p = IP(dst="10.0.0.1",   # where to
+       ttl=3)/UDP()      # ttl must survive
+# expect: ttl=3 and a UDP layer on the same packet
+p
+
+# a trailing / carries on to the next layer
+q = IP(dst="10.0.0.2")/
+    TCP(dport=443)
+# expect: dport=443
+q
+
+# brackets and # inside strings do not count
+# expect: 'a ( b # c ['
+raw(IP()/UDP()/"a ( b # c [")
+
+# a Wireshark hex dump split over lines stays one string
+d = fromhex("0000   45 00 00 34 00 01 00 00  40 11 f6 c4 c0 a8 01 05   E..4....@.......
+0010   08 08 08 08 c3 a8 00 35  00 20 41 a1 12 34 01 00   .......5. A..4..
+0020   00 01 00 00 00 00 00 00                            ........")
+# expect: <DNS id=4660
+show("IP/UDP/DNS", d)
+
+# continuation inside a for-loop body
+for $i in range(2):
+    raw(IP(dst="10.0.0.9",
+           id=0x4240+$i)/UDP())
+
+# an explicit backslash still joins lines
+r = IP(dst="10.0.0.3") \
+    /ICMP(type=0)
+r

@@ -706,6 +706,40 @@ else
     fail "filter binary not found (run cmake --build build first)"
 fi
 
+# ── Layer nesting (tunnels) ───────────────────────────────────────────────────
+echo ""
+echo "-- Layer nesting (tunnels) --"
+GRE='hexdump(IP(src="10.0.0.1",dst="10.0.0.2")/GRE(proto=IPV4)/IP(src="192.168.1.1",dst="192.168.2.1")/TCP())'
+check "GRE: outer IP announces proto 47"    "$GRE" '45 00 00 40 00 01 00 00  40 2F'
+check "GRE: inner IP follows GRE header"    "$GRE" '00 00 08 00  45 00 00 28'
+check "GRE: inner TCP carries the payload"  "$GRE" 'C0 A8 02 01 00 14 00 50'
+VXLAN='hexdump(IP()/UDP(dport=4789)/VXLAN()/Ether()/IP(dst="172.16.0.2")/TCP())'
+check "VXLAN: outer UDP to 4789"            "$VXLAN" '00 35 12 B5'
+check "VXLAN: inner Ether then IPv4"        "$VXLAN" '08 00 45 00 00 28'
+check "VXLAN: inner IP destination"         "$VXLAN" 'AC 10 00 02'
+check "Explicit checksums are kept"         'hexdump(IP(chksum=0xdead)/UDP(chksum=0xbeef))' 'DE AD'
+check "Explicit UDP checksum is kept"       'hexdump(IP(chksum=0xdead)/UDP(chksum=0xbeef))' 'BE EF'
+
+# ── Multi-line statements ─────────────────────────────────────────────────────
+echo ""
+echo "-- Multi-line statements --"
+CONT_OUT=$("$PCAPSH" bin/tests/test_continuation.pcapsh 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+cont_has() {
+    if echo "$CONT_OUT" | grep -qF -- "$2"; then ok "$1"; else fail "$1 — '$2' missing"; fi
+}
+cont_has "open bracket joins lines"         'ttl=3 proto=auto chksum=auto src=127.0.0.1 dst=10.0.0.1 |<UDP'
+cont_has "trailing / joins lines"           'dport=443'
+cont_has "brackets inside strings ignored"  'a ( b # c ['
+cont_has "multi-line hex dump string"       '<DNS id=4660'
+cont_has "continuation in loop body (1)"    '\x1cBA\x00'
+cont_has "continuation in loop body (2)"    '\x1cBB\x00'
+cont_has "backslash joins lines"            '<ICMP type=0x0000'
+if echo "$CONT_OUT" | grep -qi 'error\|unknown\|end of file'; then
+    fail "continuation script reports errors: $CONT_OUT"
+else
+    ok "continuation script runs without errors"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
