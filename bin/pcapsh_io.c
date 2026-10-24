@@ -762,221 +762,238 @@ size_t show_layer_by_name(const char *proto, const uint8_t *d, size_t avail) {
 
 /* ─── Raw bytes builder ─────────────────────────────────────────────────────── */
 
-size_t pkt_to_raw_ex(layer_t *pkt, uint8_t *buf, size_t bufsz, int keep_eth);
+/* Layers are serialised in order: each one writes its header and then the
+ * rest of the chain as its payload, so a layer can appear more than once
+ * (IP/GRE/IP, IP/UDP/VXLAN/Ether/IP/TCP, …). Fields left "auto" (lengths,
+ * checksums, next-protocol numbers) are derived; explicit values win, so
+ * deliberately wrong checksums or lengths can still be crafted. */
+
+/* Nearest enclosing IPv4 addresses, for the TCP/UDP pseudo-header. */
+typedef struct { uint32_t sip, dip; } ser_ctx_t;
+
+static size_t ser_chain(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx);
+
+static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+static void put32(uint8_t *p, uint32_t v) { put16(p, (uint16_t)(v >> 16)); put16(p + 2, (uint16_t)v); }
+
+static uint32_t csum_add(uint32_t sum, const uint8_t *d, size_t n) {
+    for (size_t i = 0; i + 1 < n; i += 2) sum += (uint32_t)((d[i] << 8) | d[i+1]);
+    if (n & 1) sum += (uint32_t)(d[n-1] << 8);
+    return sum;
+}
+static uint16_t csum_fold(uint32_t sum) {
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+static uint16_t l4_checksum(ser_ctx_t ctx, uint8_t proto, const uint8_t *seg, size_t n) {
+    uint32_t sum = (ctx.sip >> 16) + (ctx.sip & 0xffff) + (ctx.dip >> 16) + (ctx.dip & 0xffff)
+                 + proto + (uint32_t)n;
+    return csum_fold(csum_add(sum, seg, n));
+}
+
+/* A field the user set explicitly overrides the computed value. */
+static int explicit_u64(layer_t *l, const char *name, uint64_t *v) {
+    field_t *f = find_field(l, name);
+    if (!f || f->is_auto || f->type != FT_U64) return 0;
+    *v = f->n;
+    return 1;
+}
+
+static int name_is(layer_t *l, const char *name) {
+    return l && !strcasecmp(proto_name(l->proto), name);
+}
+
+/* EtherType announcing the layer that follows an Ethernet header. */
+static uint16_t ethertype_for(layer_t *next) {
+    if (!next || next->proto == PROTO_IP) return 0x0800;
+    if (name_is(next, "ARP"))   return 0x0806;
+    if (name_is(next, "IPv6"))  return 0x86DD;
+    if (name_is(next, "Dot1Q")) return 0x8100;
+    if (name_is(next, "MPLS"))  return 0x8847;
+    if (name_is(next, "PPPoE")) return 0x8864;
+    if (name_is(next, "EAPOL")) return 0x888E;
+    return 0x0800;
+}
+
+/* IP protocol number announcing the layer that follows an IPv4 header. */
+static uint8_t ipproto_for(layer_t *next) {
+    static const struct { const char *name; uint8_t num; } dyn[] = {
+        {"IGMP",2}, {"GRE",47}, {"ESP",50}, {"AH",51}, {"IPv6",41}, {"ICMPv6",58},
+        {"RSVP",46}, {"EIGRP",88}, {"OSPF",89}, {"PIM",103}, {"VRRP",112}, {"SCTP",132},
+    };
+    if (!next) return 0;
+    switch (next->proto) {
+        case PROTO_TCP:  return 6;
+        case PROTO_UDP:  return 17;
+        case PROTO_ICMP: return 1;
+        case PROTO_IP:   return 4;
+    }
+    for (size_t i = 0; i < sizeof dyn / sizeof dyn[0]; i++)
+        if (name_is(next, dyn[i].name)) return dyn[i].num;
+    return 0;
+}
+
+static size_t ser_ether(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx) {
+    static const uint8_t SRC[6] = {0,0,0,0,0,0}, DST[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
+    if (cap < 14) return 0;
+    get_mac(l, "dst", DST, out);
+    get_mac(l, "src", SRC, out + 6);
+    uint64_t et;
+    put16(out + 12, explicit_u64(l, "type", &et) ? (uint16_t)et : ethertype_for(l->next));
+    return 14 + ser_chain(l->next, out + 14, cap - 14, ctx);
+}
+
+static size_t ser_ip(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx) {
+    if (cap < 20) return 0;
+    ctx.sip = get_ip4(l, "src", "127.0.0.1");
+    ctx.dip = get_ip4(l, "dst", "127.0.0.1");
+    size_t plen = ser_chain(l->next, out + 20, cap - 20, ctx);
+
+    uint64_t v;
+    uint8_t  flags = (uint8_t)get_u64(l, "flags", 0);
+    uint16_t frag  = (uint16_t)(get_u64(l, "frag", 0) & 0x1fff);
+    out[0] = 0x45;
+    out[1] = (uint8_t)get_u64(l, "tos", 0);
+    put16(out + 2, explicit_u64(l, "len", &v) ? (uint16_t)v : (uint16_t)(20 + plen));
+    put16(out + 4, (uint16_t)get_u64(l, "id", 1));
+    put16(out + 6, (uint16_t)(((flags & 0x7) << 13) | frag));
+    out[8] = (uint8_t)get_u64(l, "ttl", 64);
+    out[9] = explicit_u64(l, "proto", &v) ? (uint8_t)v : ipproto_for(l->next);
+    put16(out + 10, 0);
+    put32(out + 12, ctx.sip);
+    put32(out + 16, ctx.dip);
+    put16(out + 10, explicit_u64(l, "chksum", &v) ? (uint16_t)v : csum_fold(csum_add(0, out, 20)));
+    return 20 + plen;
+}
+
+static size_t ser_tcp(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx) {
+    uint8_t opts[40]; size_t optlen = 0;
+    uint16_t mss = (uint16_t)get_u64(l, "mss", 0);
+    if (mss) { opts[optlen++] = 0x02; opts[optlen++] = 0x04; put16(opts + optlen, mss); optlen += 2; }
+    if (get_u64(l, "sack_perm", 0)) {
+        opts[optlen++] = 0x01; opts[optlen++] = 0x01;   /* NOP NOP */
+        opts[optlen++] = 0x04; opts[optlen++] = 0x02;   /* SACK_PERM */
+    }
+    while (optlen & 3) opts[optlen++] = 0x01;           /* NOP pad */
+    size_t hlen = 20 + optlen;
+    if (cap < hlen) return 0;
+    size_t plen = ser_chain(l->next, out + hlen, cap - hlen, ctx);
+
+    uint8_t tf = 0x02;
+    field_t *flg = find_field(l, "flags");
+    if (flg && !flg->is_auto) {
+        if (flg->type == FT_STR && flg->s[0]) tf = parse_tcp_flags(flg->s);
+        else if (flg->type == FT_U64)         tf = (uint8_t)flg->n;
+    }
+    uint64_t v;
+    put16(out,      (uint16_t)get_u64(l, "sport", 20));
+    put16(out + 2,  (uint16_t)get_u64(l, "dport", 80));
+    put32(out + 4,  (uint32_t)get_u64(l, "seq", 0));
+    put32(out + 8,  (uint32_t)get_u64(l, "ack", 0));
+    out[12] = (uint8_t)((hlen / 4) << 4);
+    out[13] = tf;
+    put16(out + 14, (uint16_t)get_u64(l, "window", 65535));
+    put16(out + 16, 0);
+    put16(out + 18, (uint16_t)get_u64(l, "urgptr", 0));
+    memcpy(out + 20, opts, optlen);
+    put16(out + 16, explicit_u64(l, "chksum", &v) ? (uint16_t)v
+                                                  : l4_checksum(ctx, 6, out, hlen + plen));
+    return hlen + plen;
+}
+
+static size_t ser_udp(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx) {
+    if (cap < 8) return 0;
+    size_t plen = ser_chain(l->next, out + 8, cap - 8, ctx);
+    uint64_t v;
+    put16(out,     (uint16_t)get_u64(l, "sport", 53));
+    put16(out + 2, (uint16_t)get_u64(l, "dport", 53));
+    put16(out + 4, explicit_u64(l, "len", &v) ? (uint16_t)v : (uint16_t)(8 + plen));
+    put16(out + 6, 0);
+    if (explicit_u64(l, "chksum", &v)) put16(out + 6, (uint16_t)v);
+    else {
+        uint16_t c = l4_checksum(ctx, 17, out, 8 + plen);
+        put16(out + 6, c ? c : 0xffff);                  /* 0 means "no checksum" */
+    }
+    return 8 + plen;
+}
+
+static size_t ser_icmp(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx) {
+    if (cap < 8) return 0;
+    size_t plen = ser_chain(l->next, out + 8, cap - 8, ctx);
+    uint64_t v;
+    out[0] = (uint8_t)get_u64(l, "type", 8);
+    out[1] = (uint8_t)get_u64(l, "code", 0);
+    put16(out + 2, 0);
+    put16(out + 4, (uint16_t)get_u64(l, "id", 0));
+    put16(out + 6, (uint16_t)get_u64(l, "seq", 0));
+    put16(out + 2, explicit_u64(l, "chksum", &v) ? (uint16_t)v
+                                                 : csum_fold(csum_add(0, out, 8 + plen)));
+    return 8 + plen;
+}
+
+static size_t ser_raw(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx) {
+    field_t *rf = find_field(l, "load");
+    const uint8_t *src = NULL; size_t n = 0;
+    if (rf && rf->type == FT_BYTES && rf->raw) { src = rf->raw; n = rf->raw_len; }
+    else if (rf && rf->type == FT_STR)         { src = (const uint8_t *)rf->s; n = strlen(rf->s); }
+    if (n > cap) n = cap;
+    if (n) memcpy(out, src, n);
+    return n + ser_chain(l->next, out + n, cap - n, ctx);
+}
+
+/* TLS() wraps everything after it in one Application Data record. */
+static size_t ser_tls(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx) {
+    uint8_t inner[8192];
+    size_t n = ser_chain(l->next, inner, sizeof inner, ctx);
+    if (!n) return 0;
+    field_t *kf = find_field(l, "key");
+    if (kf && kf->type == FT_STR && kf->s[0]) tls_set_key_label(kf->s);
+    size_t r = tls_build_application_data(out, cap, inner, n);
+    if (r) return r;
+    n = n < cap ? n : cap;                               /* too big to wrap: pass through */
+    memcpy(out, inner, n);
+    return n;
+}
+
+static size_t ser_chain(layer_t *l, uint8_t *out, size_t cap, ser_ctx_t ctx) {
+    if (!l || !cap) return 0;
+    switch (l->proto) {
+        case PROTO_ETHER: return ser_ether(l, out, cap, ctx);
+        case PROTO_IP:    return ser_ip(l, out, cap, ctx);
+        case PROTO_TCP:   return ser_tcp(l, out, cap, ctx);
+        case PROTO_UDP:   return ser_udp(l, out, cap, ctx);
+        case PROTO_ICMP:  return ser_icmp(l, out, cap, ctx);
+        case PROTO_RAW:   return ser_raw(l, out, cap, ctx);
+        case PROTO_TLS:   return ser_tls(l, out, cap, ctx);
+    }
+    size_t n = 0;
+    if (l->proto == PROTO_DNS) n = serialize_dns_layer(l, out, cap);
+    else if (l->proto >= PROTO_DYNAMIC_BASE) {
+        pdef_t *def = find_pdef_by_id(l->proto);
+        if (def) n = serialize_pdef_layer(def, l, out, cap);
+    }
+    return n + ser_chain(l->next, out + n, cap - n, ctx);
+}
+
 size_t pkt_to_raw(layer_t *pkt, uint8_t *buf, size_t bufsz) {
     return pkt_to_raw_ex(pkt, buf, bufsz, 0);
 }
+
+/* keep_eth: the result is a link-layer frame (wrpcap writes LINKTYPE_ETHERNET),
+ * so a packet that starts at the network layer gets a default Ethernet header. */
 size_t pkt_to_raw_ex(layer_t *pkt, uint8_t *buf, size_t bufsz, int keep_eth) {
-    layer_t *l_ether = NULL, *l_ip = NULL, *l_tcp = NULL;
-    layer_t *l_udp = NULL, *l_icmp = NULL, *l_raw = NULL, *l_tls = NULL;
-    for (layer_t *l = pkt; l; l = l->next) {
-        switch (l->proto) {
-            case PROTO_ETHER: l_ether = l; break;
-            case PROTO_IP:    l_ip    = l; break;
-            case PROTO_TCP:   l_tcp   = l; break;
-            case PROTO_UDP:   l_udp   = l; break;
-            case PROTO_ICMP:  l_icmp  = l; break;
-            case PROTO_RAW:   l_raw   = l; break;
-            case PROTO_TLS:   l_tls   = l; break;
-        }
+    ser_ctx_t ctx = {0, 0};
+    if (!pkt) return 0;
+    if (keep_eth && pkt->proto != PROTO_ETHER &&
+        (pkt->proto == PROTO_IP || ethertype_for(pkt) != 0x0800)) {
+        static const uint8_t SRC[6] = {0x02,0x00,0x00,0x00,0x00,0x01};
+        if (bufsz < 14) return 0;
+        memset(buf, 0xff, 6);
+        memcpy(buf + 6, SRC, 6);
+        put16(buf + 12, ethertype_for(pkt));
+        return 14 + ser_chain(pkt, buf + 14, bufsz - 14, ctx);
     }
-
-    static const uint8_t ZEROS[6] = {0x02,0x00,0x00,0x00,0x00,0x01};
-    static const uint8_t BCAST[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
-
-    uint8_t src_mac[6], dst_mac[6];
-    get_mac(l_ether ? l_ether : NULL, "src", ZEROS, src_mac);
-    get_mac(l_ether ? l_ether : NULL, "dst", BCAST, dst_mac);
-    if (!l_ether) {
-        memcpy(src_mac, ZEROS, 6);
-        memcpy(dst_mac, BCAST, 6);
-    }
-
-    uint8_t pay_combined[8192]; size_t pay_len = 0;
-    for (layer_t *lx = pkt; lx; lx = lx->next) {
-        if (lx->proto == PROTO_DNS) {
-            if (pay_len < sizeof(pay_combined))
-                pay_len += serialize_dns_layer(lx, pay_combined+pay_len, sizeof(pay_combined)-pay_len);
-            continue;
-        }
-        if (lx->proto < PROTO_DYNAMIC_BASE) continue;
-        pdef_t *def = find_pdef_by_id(lx->proto);
-        if (def && pay_len < sizeof(pay_combined))
-            pay_len += serialize_pdef_layer(def, lx, pay_combined+pay_len, sizeof(pay_combined)-pay_len);
-    }
-    if (l_raw) {
-        field_t *rf = find_field(l_raw, "load");
-        if (rf && rf->type==FT_BYTES && rf->raw) {
-            size_t cp = rf->raw_len < sizeof(pay_combined)-pay_len ? rf->raw_len : sizeof(pay_combined)-pay_len;
-            memcpy(pay_combined+pay_len, rf->raw, cp); pay_len += cp;
-        } else if (rf && rf->type==FT_STR) {
-            size_t sl = strlen(rf->s);
-            sl = sl < sizeof(pay_combined)-pay_len ? sl : sizeof(pay_combined)-pay_len;
-            memcpy(pay_combined+pay_len, rf->s, sl); pay_len += sl;
-        }
-    }
-    /* TLS Application Data: wrap accumulated payload in a TLS record */
-    if (l_tls && pay_len > 0) {
-        field_t *kf = find_field(l_tls, "key");
-        if (kf && kf->type == FT_STR && kf->s[0])
-            tls_set_key_label(kf->s);
-        uint8_t tls_out[8200];
-        size_t tls_len = tls_build_application_data(tls_out, sizeof(tls_out),
-                                                     pay_combined, pay_len);
-        if (tls_len > 0 && tls_len <= sizeof(pay_combined)) {
-            memcpy(pay_combined, tls_out, tls_len);
-            pay_len = tls_len;
-        }
-    }
-
-    uint8_t *payload = pay_len ? pay_combined : NULL;
-    size_t   plen    = pay_len;
-
-    size_t frame_len = 0;
-    int    prepended_eth = 0;
-
-    if (l_tcp && l_ip) {
-        field_t *flg = find_field(l_tcp, "flags");
-        uint8_t tf = 0x02;
-        if (flg && !flg->is_auto) {
-            if (flg->type==FT_STR && flg->s[0]) tf = parse_tcp_flags(flg->s);
-            else if (flg->type==FT_U64) tf = (uint8_t)flg->n;
-        }
-
-        uint32_t sip   = get_ip4(l_ip, "src", "127.0.0.1");
-        uint32_t dip   = get_ip4(l_ip, "dst", "127.0.0.1");
-        uint16_t sport = (uint16_t)get_u64(l_tcp, "sport",  20);
-        uint16_t dport = (uint16_t)get_u64(l_tcp, "dport",  80);
-        uint32_t seq_n = (uint32_t)get_u64(l_tcp, "seq",     0);
-        uint32_t ack_n = (uint32_t)get_u64(l_tcp, "ack",     0);
-        uint16_t win   = (uint16_t)get_u64(l_tcp, "window", 65535);
-        uint8_t  ttl   = (uint8_t) get_u64(l_ip,  "ttl",    64);
-
-        /* IP id: use the layer value only when explicitly set */
-        field_t *id_f   = find_field(l_ip, "id");
-        int      has_id = id_f && !id_f->is_auto && id_f->type == FT_U64;
-        uint16_t ip_id  = has_id ? (uint16_t)id_f->n : (uint16_t)(rand() & 0xffff);
-
-        /* TCP options: MSS and SACK_PERM */
-        uint8_t opts[40]; int optlen = 0;
-        uint16_t mss       = (uint16_t)get_u64(l_tcp, "mss",       0);
-        int      sack_perm = (int)     get_u64(l_tcp, "sack_perm", 0);
-        if (mss) {
-            opts[optlen++] = 0x02; opts[optlen++] = 0x04;
-            opts[optlen++] = (uint8_t)(mss >> 8); opts[optlen++] = (uint8_t)mss;
-        }
-        if (sack_perm) {
-            opts[optlen++] = 0x01; opts[optlen++] = 0x01; /* NOP NOP */
-            opts[optlen++] = 0x04; opts[optlen++] = 0x02; /* SACK_PERM */
-        }
-        while (optlen & 3) opts[optlen++] = 0x01; /* NOP pad to 4-byte boundary */
-
-        /* Build Ethernet + IP + TCP frame in buf */
-        size_t tcp_seg_len = 20 + optlen + plen;
-        size_t ip_total    = 20 + tcp_seg_len;
-        size_t off = 0;
-
-        /* Ethernet */
-        memcpy(buf+off, dst_mac, 6); off += 6;
-        memcpy(buf+off, src_mac, 6); off += 6;
-        buf[off++] = 0x08; buf[off++] = 0x00;
-
-        /* IPv4 */
-        struct libpcapng_ipv4_hdr *iph = (struct libpcapng_ipv4_hdr *)(buf+off);
-        libpcapng_fill_ipv4_header(iph, sip, dip, (uint16_t)ip_total, IPPROTO_TCP);
-        iph->ttl = ttl;
-        iph->id  = htons(ip_id);
-        /* IP flags: DF=2, MF=1 → frag_off bits */
-        uint8_t ip_flags = (uint8_t)get_u64(l_ip, "flags", 0);
-        uint16_t frag_word = 0;
-        if (ip_flags & 2) frag_word |= 0x4000; /* DF */
-        if (ip_flags & 1) frag_word |= 0x2000; /* MF */
-        iph->frag_off = htons(frag_word);
-        iph->checksum = 0;
-        iph->checksum = libpcapng_ip_checksum(iph, 20);
-        off += 20;
-
-        /* TCP header */
-        struct tcp_hdr *tcph = (struct tcp_hdr *)(buf+off);
-        libpcapng_fill_tcp_header(tcph, sport, dport, seq_n, ack_n, tf, win);
-        tcph->doff = (uint8_t)((20 + optlen) / 4);
-        off += 20;
-
-        /* TCP options */
-        if (optlen) { memcpy(buf+off, opts, optlen); off += optlen; }
-
-        /* Payload */
-        if (payload && plen) { memcpy(buf+off, payload, plen); off += plen; }
-
-        /* TCP checksum over pseudo-header + full TCP segment (header+opts+payload) */
-        tcph->checksum = 0;
-        uint32_t chk = 0;
-        chk += (sip >> 16) & 0xffff; chk += sip & 0xffff;
-        chk += (dip >> 16) & 0xffff; chk += dip & 0xffff;
-        chk += htons(IPPROTO_TCP);
-        chk += htons((uint16_t)tcp_seg_len);
-        const uint8_t *seg = buf + 14 + 20;
-        for (size_t i = 0; i + 1 < tcp_seg_len; i += 2)
-            chk += (uint32_t)((seg[i] << 8) | seg[i+1]);
-        if (tcp_seg_len & 1) chk += (uint32_t)(seg[tcp_seg_len-1] << 8);
-        while (chk >> 16) chk = (chk & 0xffff) + (chk >> 16);
-        tcph->checksum = htons(~chk & 0xffff);
-
-        frame_len = off;
-        prepended_eth = 1;
-    } else if (l_udp && l_ip) {
-        uint32_t sip = get_ip4(l_ip, "src", "127.0.0.1");
-        uint32_t dip = get_ip4(l_ip, "dst", "127.0.0.1");
-        libpcapng_udp_packet_build(src_mac, dst_mac, sip, dip,
-            (uint16_t)get_u64(l_udp,"sport",53),
-            (uint16_t)get_u64(l_udp,"dport",53),
-            payload, plen, buf, &frame_len);
-        prepended_eth = 1;
-    } else if (l_icmp && l_ip) {
-        uint32_t sip = get_ip4(l_ip, "src", "127.0.0.1");
-        uint32_t dip = get_ip4(l_ip, "dst", "127.0.0.1");
-        libpcapng_icmp_packet_build(src_mac, dst_mac, sip, dip,
-            (uint8_t)get_u64(l_icmp,"type",8),
-            (uint8_t)get_u64(l_icmp,"code",0),
-            (uint16_t)get_u64(l_icmp,"id",0),
-            (uint16_t)get_u64(l_icmp,"seq",0),
-            payload, plen, buf, &frame_len);
-        prepended_eth = 1;
-    } else if (l_ip) {
-        size_t ip_payload = plen;
-        size_t ip_total   = 20 + ip_payload;
-        struct libpcapng_eth_hdr *eth = (struct libpcapng_eth_hdr *)buf;
-        memcpy(eth->dst, dst_mac, 6);
-        memcpy(eth->src, src_mac, 6);
-        eth->ethertype = htons(0x0800);
-        struct libpcapng_ipv4_hdr *iph = (struct libpcapng_ipv4_hdr *)(buf + 14);
-        uint32_t sip = get_ip4(l_ip, "src", "127.0.0.1");
-        uint32_t dip = get_ip4(l_ip, "dst", "127.0.0.1");
-        libpcapng_fill_ipv4_header(iph, sip, dip, (uint16_t)ip_total,
-                                   (uint8_t)get_u64(l_ip,"proto",0));
-        iph->ttl = (uint8_t)get_u64(l_ip,"ttl",64);
-        iph->checksum = 0;
-        iph->checksum = libpcapng_ip_checksum(iph, 20);
-        if (payload && ip_payload) memcpy(buf + 34, payload, ip_payload);
-        frame_len = 14 + ip_total;
-        prepended_eth = 1;
-    } else if (l_ether) {
-        struct libpcapng_eth_hdr *eth = (struct libpcapng_eth_hdr *)buf;
-        memcpy(eth->dst, dst_mac, 6);
-        memcpy(eth->src, src_mac, 6);
-        uint16_t et = (uint16_t)get_u64(l_ether,"type",0x800);
-        eth->ethertype = htons(et);
-        if (payload && plen) memcpy(buf + 14, payload, plen);
-        frame_len = 14 + plen;
-    } else if (payload) {
-        if (plen <= bufsz) { memcpy(buf, payload, plen); frame_len = plen; }
-    }
-
-    if (!keep_eth && prepended_eth && !l_ether && frame_len >= 14) {
-        memmove(buf, buf + 14, frame_len - 14);
-        frame_len -= 14;
-    }
-    return frame_len;
+    return ser_chain(pkt, buf, bufsz, ctx);
 }
 
 /* ─── Pretty printer ────────────────────────────────────────────────────────── */
